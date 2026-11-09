@@ -137,6 +137,9 @@ import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
 import me.rerere.rikkahub.data.datastore.getChatModelForAssistant
 import me.rerere.rikkahub.data.files.FilesManager
+import me.rerere.rikkahub.data.video.FrameFileOwnership
+import me.rerere.rikkahub.data.video.VideoCallRuntime
+import me.rerere.rikkahub.data.video.VideoFrameStore
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.ConversationConfig
@@ -211,6 +214,7 @@ private val outputTransformers by lazy {
         Base64ImageToLocalFileTransformer,
         RegexOutputTransformer,
         me.rerere.rikkahub.data.ai.transformers.InteractionOutputTransformer,
+        me.rerere.rikkahub.data.ai.transformers.VideoCallOutputTransformer,
         SpeechOutputTransformer,
     )
 }
@@ -364,14 +368,14 @@ class ChatService(
     internal val pendingIncomingCall = MutableStateFlow<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction?>(null)
 
     fun finishInteractionCalls(conversationId: Uuid, startJob: Job? = null, startedAt: Long? = null,
-        transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null) {
+        transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null, giftSummary: String = "") {
         val endedAt = System.currentTimeMillis()
         val connectingIds = getConversationFlow(conversationId).value.currentMessages.flatMap { it.annotations }
             .filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction>()
             .filter { it.kind == "call" && it.status == "connecting" }.map { it.id }.toSet()
         appScope.launch {
             startJob?.join()
-            runCatching { endChatInteractionCalls(conversationId, startedAt, endedAt, transcript, connectingIds) }
+            runCatching { endChatInteractionCalls(conversationId, startedAt, endedAt, transcript, connectingIds, giftSummary) }
         }
     }
     fun respondIncomingInteraction(conversationId: Uuid, action: String, onReady: () -> Unit) {
@@ -413,6 +417,22 @@ class ChatService(
                 onGenerationIdle = { processMessageQueue(it) },
                 onIdle = { removeSession(it) }
             ).also {
+                // 队列是"本轮附图"的唯一持有者：撤销/清空时由它终结文件（正常派发后的所有权
+                // 已经移交给请求本身，由 job 的 finally 删）。
+                it.messageQueue.onDiscardTransientImages = { discarded ->
+                    VideoFrameStore.deleteTransient(context, discarded.transientImageUrls)
+                }
+                // 队列项被彻底放弃（撤回/清空/暂停）：只终结**显式所有权**里的文件。
+                // 绝不能按目录把 parts 里的 Image 全删掉：用户重发一张历史里的截图时，
+                // 那也是一条 UIMessagePart.Image，删掉就等于把历史里的照片永久断链。
+                it.messageQueue.onMessageDiscarded = { discarded ->
+                    VideoFrameStore.deleteTransient(context, discarded.transientImageUrls)
+                    discarded.ownedImageUrls.forEach { url -> VideoFrameStore.deleteOwned(context, url) }
+                }
+                // 队列项被放弃/暂停：撤销这一轮的通话授权（恢复队列是一次全新请求）。
+                it.messageQueue.onRequestTokenRevoked = { token ->
+                    VideoCallRuntime.cancelTurnRequest(token)
+                }
                 if (id in deletedConversationIds) it.markDeleted()
                 _sessionsVersion.value++
                 Log.i(TAG, "createSession: $id (total: ${sessions.size + 1})")
@@ -594,7 +614,9 @@ class ChatService(
     /** Only this request can be withdrawn or interrupted; other callers retain their own turns. */
     fun cancelQueuedMessage(conversationId: Uuid, requestId: Uuid) {
         val session = sessions[conversationId] ?: return
-        if (session.messageQueue.remove(requestId) != null) {
+        session.messageQueue.remove(requestId)?.let {
+            // 队列自己已经终结了这次专用临时帧与"本次新建、还没落库"的永久帧；
+            // 正在进行的请求不在这里删（所有权在 job 的 finally）。
             processMessageQueue(conversationId)
             return
         }
@@ -612,6 +634,25 @@ class ChatService(
         enableTools: Boolean = true,
         interaction: UIMessageAnnotation.AvatarInteraction? = null,
         existingMessageId: Uuid? = null,
+        /** 只用于本次请求的图片（视频通话自动抓帧），不进聊天历史。 */
+        transientImageUrls: List<String> = emptyList(),
+        /**
+         * 本次**新建**、还没有被聊天历史引用的永久帧（手动夹帧）。
+         *
+         * 所有权判定：请求的 finally 才知道这条用户消息到底有没有落库。
+         * 落库了 → 文件属于历史，永远不删；没落库（保存失败/取消）→ 删掉，避免孤儿照片。
+         */
+        ownedImageUrls: List<String> = emptyList(),
+        /** 队列暂停摘掉"本轮附图"之后要改用的 system prompt（视频 context 的无图版本）。 */
+        transientSystemPromptWithoutImages: String? = null,
+        /**
+         * 这一轮的授权 token（视频通话）。
+         *
+         * 随队列项**不可变**地传下去，由生成管线带到 `TransformerContext.requestToken`。
+         * 以前这里是一个"入队后再回调去登记"的可失败副作用；现在改成纯参数：
+         * 入队与授权要么一起成立，要么都不成立，不存在"回调失败但消息已经进队列"的中间态。
+         */
+        requestToken: String? = null,
     ): QueuedMessage? {
         if ((content.isEmptyInputMessage() && existingMessageId == null) || conversationId in deletedConversationIds) return null
         val session = getOrCreateSession(conversationId)
@@ -620,7 +661,18 @@ class ChatService(
             // A fresh send after stopping an empty queue is explicit intent to continue.
             // A manually paused backlog remains paused until the user resumes it.
             if (session.messageQueue.state.value.messages.isEmpty()) session.messageQueue.resume()
-            session.messageQueue.enqueue(content, answer, interaction, transientSystemPrompt, enableTools, existingMessageId)
+            session.messageQueue.enqueue(
+                parts = content,
+                answer = answer,
+                interaction = interaction,
+                transientSystemPrompt = transientSystemPrompt,
+                transientSystemPromptWithoutImages = transientSystemPromptWithoutImages,
+                enableTools = enableTools,
+                existingMessageId = existingMessageId,
+                transientImageUrls = transientImageUrls,
+                ownedImageUrls = ownedImageUrls,
+                requestToken = requestToken,
+            )
         } ?: return null
         queued.completion.invokeOnCompletion { cause ->
             if (cause is CancellationException && !queued.reply.isCompleted) cancelQueuedMessage(conversationId, queued.id)
@@ -664,6 +716,14 @@ class ChatService(
         val transientSystemPrompt = queued.transientSystemPrompt
         val enableTools = queued.enableTools
         val interaction = queued.interaction
+        // 本次请求专用的临时图片（视频通话自动抓帧）：请求结束（含失败/取消）后删除。
+        val transientImageUrls = queued.transientImageUrls
+        // 本次新建、还没被历史引用的永久帧（手动夹帧）：**只有没落库**才允许删。
+        val ownedImageUrls = queued.ownedImageUrls
+        // 临时图的锚点：就是这条用户消息自己的 ID；工具多步插进来的消息不会把它顶掉。
+        val transientImageAnchorMessageId = (queued.existingMessageId ?: queued.id).toString()
+        // 这一轮的授权 token（视频通话）；非通话请求为 null。
+        val requestToken = queued.requestToken
         // 用户一开口就立即撤销旧主动闹钟。新的休眠计时必须等本轮正常回复结束后再开始，
         // 避免 AI 正在聊天时主动器到点，也避免长回复吃掉休眠间隔。
         val currentProactiveSetting = settingsStore.settingsFlow.value.proactiveMessageSetting
@@ -680,6 +740,12 @@ class ChatService(
         }
 
         val trace = LoadingDiagnostics.begin(context, "chat.send", timeoutMillis = 0)
+        // 本次新建的永久帧（手动夹帧/留影）的归属状态。
+        // 必须在协程外面创建：`invokeOnCompletion` 的兜底和协程体的 finally 必须看**同一份**状态
+        // （旧实现把 Boolean 声明在 launch 里，兜底根本引用不到，编译就过不去；即使能引用，
+        // 一个布尔也区分不了"取消时事务可能已提交"这种真正危险的中间态）。
+        // 礼物/转账这种已有持久消息的请求从一开始就是 PUBLISHED：文件归历史所有，永不删除。
+        val frameOwnership = FrameFileOwnership(alreadyDurable = queued.existingMessageId != null)
         val job = appScope.launch(start = CoroutineStart.LAZY) {
             var failure: Throwable? = null
             try {
@@ -711,7 +777,15 @@ class ChatService(
                         ).toMessageNode(),
                     )
                     trace.stage("saving user message")
-                    saveConversationLocked(conversationId, newConversation)
+                    // 归属交接就在这一句里：发布之前先标记"可能已发布"，成功之后才确认 PUBLISHED。
+                    // 取消落在 Room 的挂起提交中间时状态停在 PUBLISHING —— 两条兜底路径都不会删文件。
+                    saveConversationWithOwnership(
+                        session = session,
+                        conversationId = conversationId,
+                        conversation = newConversation,
+                        ownership = frameOwnership,
+                        publishedMessageId = queued.id,
+                    )
                     assistant to processedContent
                 }
 
@@ -761,6 +835,9 @@ class ChatService(
                         transientSystemPrompt = transientSystemPrompt,
                         enableTools = enableTools,
                         diagnosticTrace = trace,
+                        transientImageUrls = transientImageUrls,
+                        transientImageAnchorMessageId = transientImageAnchorMessageId,
+                        requestToken = requestToken,
                     )
                     if (!completed) {
                         failure = IllegalStateException("生成失败，请检查会话中的错误信息")
@@ -795,6 +872,26 @@ class ChatService(
                 activeQueueGenerations.computeIfPresent(conversationId) { _, owner ->
                     owner.takeUnless { it.message.id == queued.id }
                 }
+                // 请求作用域结束：删除本次专用的临时帧（自动抓帧），聊天历史里只有文字。
+                // 临时帧的所有权始终在本请求，任何队列清理都不会提前删掉它们。
+                VideoFrameStore.deleteTransient(context, transientImageUrls)
+                // 本次**新建**的永久帧（手动夹帧）：只有"从未被历史引用"才删。
+                // 落库了它就是历史的一部分（旧实现按目录删 parts 里的 Image，会把历史照片删掉）。
+                // claimDeletion 是幂等的 CAS：这个 finally 和下面的 invokeOnCompletion 兜底
+                // 只有一条会真正删；状态一旦进过 PUBLISHING 就永远返回 false。
+                if (frameOwnership.claimDeletion()) {
+                    ownedImageUrls.forEach { url -> VideoFrameStore.deleteOwned(context, url) }
+                }
+                // 这一轮的通话授权（礼物/留影）：请求自己决定是"正常完成"还是"被取消"。
+                // complete 保留已经发出的留影许可（合法的异步留影落在请求结束之后）；
+                // cancel 会撤销这次请求的全部许可。
+                requestToken?.let { token ->
+                    if (failure == null) {
+                        VideoCallRuntime.completeTurnRequest(token)
+                    } else {
+                        VideoCallRuntime.cancelTurnRequest(token)
+                    }
+                }
                 // An API failure must not leave the proactive timer cancelled forever. Do not
                 // restart it for a cancelled job that was superseded by a newer user message.
                 if (coroutineContext.isActive && !session.messageQueue.hasPendingOrInFlight) {
@@ -813,6 +910,14 @@ class ChatService(
             activeQueueGenerations.computeIfPresent(conversationId) { _, owner ->
                     owner.takeUnless { it.message.id == queued.id }
                 }
+            // 连协程体都没跑起来就被取消：临时帧和授权都必须在这里收尾。
+            if (cause != null) {
+                VideoFrameStore.deleteTransient(context, transientImageUrls)
+                if (frameOwnership.claimDeletion()) {
+                    ownedImageUrls.forEach { url -> VideoFrameStore.deleteOwned(context, url) }
+                }
+                requestToken?.let { VideoCallRuntime.cancelTurnRequest(it) }
+            }
         }
         return job
     }
@@ -1343,6 +1448,9 @@ class ChatService(
         transientSystemPrompt: String? = null,
         enableTools: Boolean = true,
         diagnosticTrace: TaskWatchdog.Trace? = null,
+        transientImageUrls: List<String> = emptyList(),
+        transientImageAnchorMessageId: String? = null,
+        requestToken: String? = null,
     ): Boolean {
         diagnosticTrace?.stage("reading generation settings")
         val initialConversation = bindConversationConfig(conversationId)
@@ -1556,6 +1664,10 @@ class ChatService(
                 reactionSourceMessages = conversation.currentMessages.take(
                     conversation.currentMessages.indexOfLast { it.id in requestMessageIds } + 1,
                 ),
+                // 视频通话自动抓帧：只作为本次请求的临时图片输入，不写聊天历史。
+                transientImageUrls = transientImageUrls,
+                transientImageAnchorMessageId = transientImageAnchorMessageId,
+                requestToken = requestToken,
                 onReactionContextPrepared = { reactionTurn = it },
                 onToolCheckpoint = { checkpointMessages ->
                     diagnosticTrace?.stage("saving tool checkpoint")
@@ -2567,6 +2679,45 @@ class ChatService(
         getOrCreateSession(conversationId).withStateLock {
             saveConversationLocked(conversationId, conversation)
         }
+    }
+
+    /**
+     * 在**已持有 saveMutex** 的前提下保存对话，并同步推进永久帧文件的归属状态。
+     *
+     * 这是"文件所有权"和"数据库取消"之间唯一被允许的交接点：
+     *
+     * 1. [saveConversationLocked] 第一件事是 `updateConversation()`，也就是把新消息发布进
+     *    内存里的会话状态（UI 立刻可见），**然后**才是 Room 的挂起提交。所以"发布"和
+     *    "提交"之间天然有窗口，取消可以落在里面。
+     * 2. 因此进入保存之前先 [FrameFileOwnership.markPublishing]：从这一刻起这些文件
+     *    就当"可能已经被引用"处理，任何取消路径都不许删。
+     * 3. 正常返回 → [FrameFileOwnership.markPublished]（历史真的引用了它）。
+     * 4. 抛出普通异常 → 事务一定回滚了，但消息**可能**已经被发布进内存状态（那样它迟早会
+     *    被别的保存写进数据库）。这里直接查会话状态里有没有这条消息来决定能不能删文件，
+     *    而不是猜。只有"确实从没被引用"才退回可删除，正常失败仍然能清理干净。
+     *
+     * @param ownership 本次新建的永久帧；`null` 表示这次请求没有新建永久文件。
+     * @param publishedMessageId 这次保存要发布的消息 ID，用于失败时判断是否真的发布过。
+     */
+    internal suspend fun saveConversationWithOwnership(
+        session: ConversationSession,
+        conversationId: Uuid,
+        conversation: Conversation,
+        ownership: FrameFileOwnership?,
+        publishedMessageId: Uuid,
+    ) {
+        ownership?.markPublishing()
+        try {
+            saveConversationLocked(conversationId, conversation)
+        } catch (cancelled: CancellationException) {
+            // 不知道事务提交没有：状态停在 PUBLISHING，文件归历史（保守，宁可留孤儿）。
+            throw cancelled
+        } catch (error: Throwable) {
+            val published = session.state.value.currentMessages.any { it.id == publishedMessageId }
+            if (published) ownership?.markPublished() else ownership?.markSaveFailed()
+            throw error
+        }
+        ownership?.markPublished()
     }
 
     // Caller holds saveMutex. Publish before the first database suspension so a

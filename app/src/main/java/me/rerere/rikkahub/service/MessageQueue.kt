@@ -17,11 +17,45 @@ data class QueuedMessage(
     val interaction: UIMessageAnnotation.AvatarInteraction? = null,
     val isEditing: Boolean = false,
     val transientSystemPrompt: String? = null,
+    /**
+     * 暂停后"本轮附图"被摘掉时改用的 system prompt（视频 context 的无图版本）。
+     *
+     * 暂停会把 [transientImageUrls] 摘掉，但 [transientSystemPrompt] 里还写着"本轮附了一张图"，
+     * 于是恢复队列时模型会被告知有一张根本不存在的图。永久手动夹帧仍然在 [parts] 里，
+     * 那种情况继续用 [transientSystemPrompt]（确实还有图）。
+     */
+    val transientSystemPromptWithoutImages: String? = null,
     val enableTools: Boolean = true,
     val existingMessageId: Uuid? = null,
+    /**
+     * 只用于本次请求的图片地址（视频通话自动抓帧）。
+     *
+     * 约定：不进聊天历史、不持久化；请求结束（完成/失败/取消/撤回/暂停/清空）后
+     * 由 [MessageQueue] 的终结回调删除文件，之后的历史里只剩文字。
+     */
+    val transientImageUrls: List<String> = emptyList(),
+    /**
+     * 本次**新建**、还没有被聊天历史引用的永久帧（用户手动夹住的那一帧）。
+     *
+     * 只有"这条消息最终没有写进历史"时才允许删除：一旦落库，文件就是历史的一部分，
+     * 任何队列清理都不许再动它。因此这里存的是**显式的所有权**，
+     * 而不是"扫一下 parts 里所有 Image 再按目录删"（那样会把用户重发的历史截图删掉）。
+     */
+    val ownedImageUrls: List<String> = emptyList(),
+    /**
+     * 这一轮的授权 token（视频通话）。
+     *
+     * 随队列项不可变地传给生成管线；送礼/留影只认"有效通话 + 这个 token"，
+     * 不再用"最后一条用户消息"这种可复用的伪身份。
+     */
+    val requestToken: String? = null,
     val completion: CompletableDeferred<Unit> = CompletableDeferred(),
     val reply: CompletableDeferred<String?> = CompletableDeferred(),
-)
+) {
+    /** 本消息是否还带着**永久**图片（手动夹帧）；暂停时用它决定要不要换掉"附图"说明。 */
+    val hasPermanentImage: Boolean
+        get() = parts.any { it is UIMessagePart.Image }
+}
 
 data class MessageQueueState(
     val messages: List<QueuedMessage> = emptyList(),
@@ -38,6 +72,34 @@ class MessageQueue internal constructor(
     val state = mutableState.asStateFlow()
     private val inFlight = linkedMapOf<Uuid, QueuedMessage>()
 
+    /**
+     * 临时图片的**唯一终结回调**（由 ChatService 注入，删除请求作用域的临时文件）。
+     *
+     * 队列是这些文件的持有者：谁把队列项丢掉（撤回 / 清空 / 暂停后放弃），谁就必须
+     * 在**同一时刻**通知这里，否则文件没人再知道存在。正常的"派发出去"不走这里——
+     * 那时文件的所有权已经移交给请求本身（job 的 finally 负责删）。
+     */
+    var onDiscardTransientImages: ((QueuedMessage) -> Unit)? = null
+
+    /**
+     * 队列项被彻底放弃（撤回 / 清空 / 会话删除）时的终结回调。
+     *
+     * 与 [onDiscardTransientImages] 的区别：暂停只是把"本轮附图"摘掉，消息本体仍会
+     * resume（它的永久夹帧必须留着），所以暂停不会走这里。
+     *
+     * 实现方只允许删除 [QueuedMessage.transientImageUrls] 与 [QueuedMessage.ownedImageUrls]
+     * 这两个**显式所有权**列表；绝不能按目录把 parts 里的 Image 都删掉 ——
+     * 用户重发一张历史里的截图时，那也是一条 `UIMessagePart.Image`。
+     */
+    var onMessageDiscarded: ((QueuedMessage) -> Unit)? = null
+
+    /**
+     * 队列项放弃/暂停时撤销它携带的通话授权。
+     *
+     * 恢复队列是一次**全新的请求**，绝不能复用暂停前那个 token 的送礼/留影权限。
+     */
+    var onRequestTokenRevoked: ((String) -> Unit)? = null
+
     val hasPendingOrInFlight: Boolean get() = synchronized(this) {
         state.value.messages.isNotEmpty() || inFlight.isNotEmpty()
     }
@@ -49,15 +111,24 @@ class MessageQueue internal constructor(
         answer: Boolean = true,
         interaction: UIMessageAnnotation.AvatarInteraction? = null,
         transientSystemPrompt: String? = null,
+        transientSystemPromptWithoutImages: String? = null,
         enableTools: Boolean = true,
         existingMessageId: Uuid? = null,
+        transientImageUrls: List<String> = emptyList(),
+        ownedImageUrls: List<String> = emptyList(),
+        requestToken: String? = null,
     ): QueuedMessage? {
         if (parts.isEmptyInputMessage() && existingMessageId == null) return null
         if (existingMessageId != null && (state.value.messages + inFlight.values).any { it.existingMessageId == existingMessageId }) return null
         val message = QueuedMessage(
             parts = parts.toList(), answer = answer, interaction = interaction,
-            transientSystemPrompt = transientSystemPrompt, enableTools = enableTools,
+            transientSystemPrompt = transientSystemPrompt,
+            transientSystemPromptWithoutImages = transientSystemPromptWithoutImages,
+            enableTools = enableTools,
             existingMessageId = existingMessageId,
+            transientImageUrls = transientImageUrls.toList(),
+            ownedImageUrls = ownedImageUrls.toList(),
+            requestToken = requestToken,
         )
         // Resolve a blocked caller before publishing the entry: no observer can attach under this monitor.
         // Content and completion remain available for an explicit user resume.
@@ -124,12 +195,33 @@ class MessageQueue internal constructor(
         return previous.takeIf { parts != null }
     }
 
+    /**
+     * 暂停队列。
+     *
+     * 仍然留在队列里、尚未派发的项：它们的"本轮附图"其实已经不属于任何一个请求了
+     * （将来 resume 时是一次全新的请求），所以在这里就把临时文件删掉、把 URL 从队列项上
+     * 摘掉。否则 resume/重试会带着一个已经不存在的图片路径，让模型以为有图其实没有。
+     *
+     * 同时还要做两件事（否则恢复的是一个"看起来很合法的旧请求"）：
+     * 1. 把 [QueuedMessage.transientSystemPrompt] 换成**无图版本**
+     *    （永久手动夹帧仍在 parts 里，那种情况保持原说明）；
+     * 2. 撤销这个 token 的送礼/留影授权并把它从队列项上摘掉：
+     *    恢复队列是一次新请求，不能复用暂停前的权限。
+     */
     fun pause() {
-        val messages = synchronized(this) {
-            publish(state.value.copy(paused = true))
-            state.value.messages.toList()
+        val (stripped, waiters) = synchronized(this) {
+            val pending = state.value.messages
+            val updated = pending.map { message -> stripTransientLocked(message) }
+            publish(state.value.copy(paused = true, messages = updated))
+            // 回调拿到的是**原始的**队列项（带着 token 与临时图地址），便于终结方准确清理。
+            pending.zip(updated).filter { (before, after) -> before !== after } to pending.toList()
         }
-        messages.forEach { it.reply.completeExceptionally(MessageQueuePausedException()) }
+        stripped.forEach { (before, _) ->
+            discardTransientImages(before)
+            // 暂停之后这一轮不会再被执行：token 的送礼/留影授权必须当场撤销，不能留着。
+            revokeRequestToken(before)
+        }
+        waiters.forEach { it.reply.completeExceptionally(MessageQueuePausedException()) }
     }
 
     @Synchronized
@@ -142,17 +234,31 @@ class MessageQueue internal constructor(
         pending.forEach { it.reply.completeExceptionally(IllegalStateException(message)) }
     }
 
-    /** Used by session deletion/cleanup; no queued content can be dispatched after this mutation. */
+    /**
+     * 会话删除/清理时清空队列。
+     *
+     * **只有 pending（还没提交到历史）的项可以在这里终结。**
+     *
+     * in-flight 的图片所有权在**请求本身**（`ChatService` job 的 finally：它才知道这条用户消息
+     * 到底有没有落库）。旧实现在这里把 in-flight 也 `withdraw`，于是 `onMessageDiscarded`
+     * 会删掉一张**已经进入持久历史**的手动照片，用户聊天里的图就永久断链了。
+     * 现在这里只解除队列自己的引用并保持条目在 in-flight 里，等 job 结束时由
+     * `complete(...)`（失败/取消时带 cause）正式收尾 —— 顺带保证 deferred 不会悬空。
+     *
+     * @return 被清掉的项（pending 已终结；in-flight 只是不再属于队列）。
+     */
     fun clear(): List<QueuedMessage> {
-        val removed = synchronized(this) {
-            val messages = state.value.messages + inFlight.values
-            inFlight.clear()
-            attachmentReferences.release()
+        val (pending, running) = synchronized(this) {
+            val messages = state.value.messages
+            val inFlightNow = inFlight.values.toList()
             mutableState.value = MessageQueueState(paused = true)
-            messages
+            // in-flight 的附件仍然在被发送，必须继续钉住；只释放 pending 的引用。
+            refreshPins(emptyList())
+            messages to inFlightNow
         }
-        removed.forEach(::withdraw)
-        return removed
+        // pending 从未落库：临时图与新夹的永久帧都还没有任何持有者，可以安全终结。
+        pending.forEach(::withdraw)
+        return pending + running
     }
 
     private fun publish(next: MessageQueueState) {
@@ -164,8 +270,51 @@ class MessageQueue internal constructor(
         attachmentReferences.update((pending + inFlight.values).flatMap { it.parts })
     }
 
+    /**
+     * 撤回 / 弃置一个**从未提交到历史**的队列项。
+     *
+     * 顺序：先让等待方拿到结果，再把"这次新创建、还没人引用"的文件交出去删除，
+     * 最后撤销这一轮的通话授权。
+     */
     private fun withdraw(message: QueuedMessage) {
         message.reply.complete(null)
         message.completion.cancel(CancellationException("Queued message was withdrawn"))
+        discardTransientImages(message)
+        revokeRequestToken(message)
+        onMessageDiscarded?.invoke(message)
+    }
+
+    /**
+     * 暂停时把一个队列项上的"本轮附图"摘干净。
+     *
+     * 注意永久手动夹帧仍在 [QueuedMessage.parts] 里：那种情况不改写系统提示，
+     * 因为"本轮确实附了一张图"仍然成立。
+     */
+    private fun stripTransientLocked(message: QueuedMessage): QueuedMessage {
+        val hasTransient = message.transientImageUrls.isNotEmpty()
+        val hasToken = message.requestToken != null
+        if (!hasTransient && !hasToken) return message
+        return message.copy(
+            transientImageUrls = emptyList(),
+            transientSystemPrompt = if (hasTransient && !message.hasPermanentImage) {
+                message.transientSystemPromptWithoutImages ?: message.transientSystemPrompt
+            } else {
+                message.transientSystemPrompt
+            },
+            // 恢复队列是一次新请求：旧 token 绝不能复用。
+            requestToken = null,
+        )
+    }
+
+    /** 队列项被放弃时，这一轮的临时图片再没有任何持有者：交给终结回调删掉。 */
+    private fun discardTransientImages(message: QueuedMessage) {
+        if (message.transientImageUrls.isEmpty()) return
+        onDiscardTransientImages?.invoke(message)
+    }
+
+    /** 这一轮不会再有生成了：撤销它的通话授权（礼物/留影）。 */
+    private fun revokeRequestToken(message: QueuedMessage) {
+        val token = message.requestToken ?: return
+        onRequestTokenRevoked?.invoke(token)
     }
 }

@@ -1,0 +1,482 @@
+name: Video gifts dual build
+
+# 视频礼物双版本构建：共存可安装 APK + 更新候选（unsigned，不能安装）。
+#
+# 只在特性分支 push 和手动触发时运行；不使用 pull_request_target。
+# fork 友好：
+#   * permissions 只有 contents: read，不创建 Release、不写仓库；
+#   * 默认不读取任何 secrets，没有 secrets 的 fork 也能完整跑通并产出共存包；
+#   * 只有自行配置了「新名字」的 VIDEO_UPDATE_* secrets 才会尝试签名更新候选，
+#     绝不读取也不覆盖原有的 KEY_BASE64 / SIGNING_CONFIG；
+#   * 私钥只还原到 runner 临时目录，签完立即删除，不会上传，也不会打印。
+
+on:
+  push:
+    branches:
+      - feature/video-call-gifts-ci
+  workflow_dispatch:
+    inputs:
+      update_version_code:
+        description: "Unsigned update candidate versionCode (integer, must be > 165; default 166)"
+        required: false
+        default: "166"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: video-gifts-dual-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # 新名字的 secrets（不碰原 KEY_BASE64 / SIGNING_CONFIG）；没配置就是 false。
+      UPDATE_SIGNING_CONFIGURED: ${{ secrets.VIDEO_UPDATE_KEYSTORE_BASE64 != '' }}
+      ANDROID_PLATFORM: "android-37.0"
+      ANDROID_BUILD_TOOLS: "37.0.0"
+      ANDROID_NDK: "28.2.13676358"
+      ANDROID_CMAKE: "3.22.1"
+    steps:
+      - name: Record run metadata
+        id: vars
+        run: |
+          echo "short_sha=${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Prepare submodules over HTTPS
+        run: |
+          set -euo pipefail
+          # .gitmodules 里 MNN 用的是 git@github.com: SSH URL，fork 没有部署密钥，
+          # 统一改写成 HTTPS。构建只依赖 color utilities（:material3 用）；
+          # ai/src/main/cpp/mnn 只被 ai 模块中已注释掉的 native 构建引用，不拉取。
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init --depth 1 material3/material-color-utilities
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$sdk_root" ]; then
+            echo "::error::Android SDK not found on the runner"
+            exit 1
+          fi
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager_bin" ]; then
+            sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ ! -x "$sdkmanager_bin" ]; then
+            echo "::error::sdkmanager not found"
+            exit 1
+          fi
+          ( yes 2>/dev/null | "$sdkmanager_bin" --sdk_root="$sdk_root" --licenses >/dev/null ) || true
+
+          # sdkmanager 在一条命令里接收多个包时，历史上有“只装最后一个包”的情况，
+          # 所以这里逐包安装，并在装完之后逐个确认落地路径真的存在。
+          packages=(
+            "platforms;$ANDROID_PLATFORM"
+            "build-tools;$ANDROID_BUILD_TOOLS"
+            "ndk;$ANDROID_NDK"
+            "cmake;$ANDROID_CMAKE"
+          )
+          for package in "${packages[@]}"; do
+            echo "Installing ${package}"
+            "$sdkmanager_bin" --sdk_root="$sdk_root" --install "$package"
+          done
+
+          missing=0
+          require_path() {
+            if [ ! -e "$1" ]; then
+              echo "::error::missing after sdkmanager install: $1"
+              missing=1
+            fi
+          }
+          platform_dir="$sdk_root/platforms/$ANDROID_PLATFORM"
+          if [ ! -d "$platform_dir" ]; then
+            # sdkmanager 有时把 "platforms;android-37.0" 装成 platforms/android-37。
+            platform_major="${ANDROID_PLATFORM#android-}"
+            platform_major="${platform_major%%.*}"
+            shopt -s nullglob
+            platform_fallbacks=("$sdk_root"/platforms/"android-${platform_major}"*)
+            shopt -u nullglob
+            if [ "${#platform_fallbacks[@]}" -gt 0 ]; then
+              platform_dir="${platform_fallbacks[0]}"
+              echo "Platform directory resolved as ${platform_dir}"
+            fi
+          fi
+          require_path "$platform_dir"
+          require_path "$sdk_root/build-tools/$ANDROID_BUILD_TOOLS/aapt2"
+          require_path "$sdk_root/build-tools/$ANDROID_BUILD_TOOLS/apksigner"
+          require_path "$sdk_root/ndk/$ANDROID_NDK"
+          require_path "$sdk_root/cmake/$ANDROID_CMAKE"
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::one or more Android SDK packages are not usable"
+            exit 1
+          fi
+
+          echo "AAPT2=$sdk_root/build-tools/$ANDROID_BUILD_TOOLS/aapt2" >> "$GITHUB_ENV"
+          echo "APKSIGNER=$sdk_root/build-tools/$ANDROID_BUILD_TOOLS/apksigner" >> "$GITHUB_ENV"
+          chmod +x gradlew
+
+      - name: Install web-ui dependencies
+        working-directory: web-ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate update version code input
+        env:
+          RAW_UPDATE_VERSION_CODE: ${{ inputs.update_version_code }}
+        run: |
+          set -euo pipefail
+          # input 只以环境变量进入脚本，不拼进命令行；这里只接受纯十进制数字。
+          raw="${RAW_UPDATE_VERSION_CODE:-166}"
+          case "$raw" in
+            *[!0-9]*)
+              echo "::error::update_version_code must contain decimal digits only"
+              exit 1
+              ;;
+          esac
+          if [ "${#raw}" -gt 10 ]; then
+            echo "::error::update_version_code is too long"
+            exit 1
+          fi
+          code=$((10#$raw))
+          if [ "$code" -le 165 ]; then
+            echo "::error::update_version_code must be greater than the installed versionCode 165 (got $code)"
+            exit 1
+          fi
+          if [ "$code" -gt 2100000000 ]; then
+            echo "::error::update_version_code must be <= 2100000000"
+            exit 1
+          fi
+          echo "UPDATE_VERSION_CODE=$code" >> "$GITHUB_ENV"
+          echo "Update candidate versionCode: $code"
+
+      - name: Unit-test the verification tools
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools -p 'test_apk_identity.py'
+          python3 -m unittest discover -s tools -p 'test_verify_feature_tests.py'
+
+      - name: Feature unit tests (reviewed 224-test set)
+        run: |
+          set -euo pipefail
+          # 与项目既有 feature 过滤集一致：21 个类、224 个测试方法。
+          # 只要有一个类不跑、少一个测试、出现失败或跳过，整条流水线都会失败。
+          ./gradlew :app:testDebugUnitTest --no-daemon --console=plain \
+            --tests '*VideoCall*' \
+            --tests '*VideoGift*' \
+            --tests '*VideoFrame*' \
+            --tests '*VideoPreview*' \
+            --tests '*VideoDanmaku*' \
+            --tests '*MessageQueueTest' \
+            --tests '*VoiceCall*' \
+            --tests '*JpegOrientation*' \
+            --tests '*FrameFile*'
+          python3 tools/verify_feature_tests.py --results app/build/test-results/testDebugUnitTest
+
+      - name: Build coexist APK and unsigned update candidate
+        run: |
+          set -euo pipefail
+          ./gradlew :app:assembleVideoCoexist :app:assembleVideoUpdate \
+            --no-daemon --console=plain \
+            -PorangechatAbis=arm64-v8a \
+            -PorangechatUniversalApk=false \
+            "-PorangechatVideoUpdateVersionCode=${UPDATE_VERSION_CODE}"
+
+      - name: Verify APK package, version, ABI and signing rules
+        id: verify
+        run: |
+          set -euo pipefail
+          coexist_apk="$(find app/build/outputs/apk/videoCoexist -name '*arm64-v8a*.apk' -print -quit)"
+          update_apk="$(find app/build/outputs/apk/videoUpdate -name '*arm64-v8a*.apk' -print -quit)"
+          if [ -z "$coexist_apk" ]; then
+            echo "::error::coexist APK not found"
+            exit 1
+          fi
+          if [ -z "$update_apk" ]; then
+            echo "::error::update candidate APK not found"
+            exit 1
+          fi
+
+          # 共存包：包名必须是 .videogifts、桌面名、arm64-v8a、共享 debug 签名，
+          # 且不能等于正式包 / liquidglass 包，也不能使用正式证书。
+          python3 tools/apk_identity.py verify-coexist --apk "$coexist_apk"
+          # 更新候选：正式包名、versionCode 严格等于输入、> 165、arm64-v8a、必须 unsigned。
+          python3 tools/apk_identity.py verify-update-candidate \
+            --apk "$update_apk" \
+            --expected-version-code "$UPDATE_VERSION_CODE"
+
+          build_config="$(find app/build/generated -path '*videoUpdate*' -name 'BuildConfig.java' -print -quit)"
+          if [ -z "$build_config" ]; then
+            echo "::error::generated BuildConfig.java for videoUpdate not found"
+            exit 1
+          fi
+          update_metadata="$(python3 tools/apk_identity.py inspect --apk "$update_apk")"
+          update_version_name="$(printf '%s\n' "$update_metadata" | sed -n 's/^versionName=//p')"
+          python3 tools/apk_identity.py check-buildconfig \
+            --file "$build_config" \
+            --expected-version-code "$UPDATE_VERSION_CODE" \
+            --expected-version-name "$update_version_name"
+
+          python3 tools/apk_identity.py inspect --apk "$coexist_apk" | tee coexist-apk-metadata.txt
+          python3 tools/apk_identity.py inspect --apk "$update_apk" | tee update-candidate-metadata.txt
+
+          {
+            echo "coexist_apk=$coexist_apk"
+            echo "update_apk=$update_apk"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign the update candidate with the original key (optional)
+        id: sign_update
+        if: env.UPDATE_SIGNING_CONFIGURED == 'true'
+        env:
+          UPDATE_APK: ${{ steps.verify.outputs.update_apk }}
+          UPDATE_KEYSTORE_BASE64: ${{ secrets.VIDEO_UPDATE_KEYSTORE_BASE64 }}
+          UPDATE_STORE_PASSWORD: ${{ secrets.VIDEO_UPDATE_KEYSTORE_PASSWORD }}
+          UPDATE_KEY_ALIAS: ${{ secrets.VIDEO_UPDATE_KEY_ALIAS }}
+          UPDATE_KEY_PASSWORD: ${{ secrets.VIDEO_UPDATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # 私钥只存在 runner 的临时目录：umask 077 保证还原出来的 keystore 只有本用户可读，
+          # trap 覆盖成功/失败/中断，任何情况下都会删除，不打印、不上传。
+          umask 077
+          tmpdir="$(mktemp -d)"
+          cleanup() { rm -rf "$tmpdir"; }
+          trap cleanup EXIT INT TERM
+          printf '%s' "$UPDATE_KEYSTORE_BASE64" | base64 -d > "$tmpdir/update.p12"
+          chmod 600 "$tmpdir/update.p12"
+          signed_apk="${UPDATE_APK%.apk}"
+          signed_apk="${signed_apk%-unsigned}-signed.apk"
+          # 密码通过 env: 前缀从环境变量读取，不出现在命令行参数或日志里。
+          "$APKSIGNER" sign \
+            --ks "$tmpdir/update.p12" \
+            --ks-pass env:UPDATE_STORE_PASSWORD \
+            --ks-key-alias "$UPDATE_KEY_ALIAS" \
+            --key-pass env:UPDATE_KEY_PASSWORD \
+            --out "$signed_apk" \
+            "$UPDATE_APK"
+          # 只有证书等于原正式证书（49ceec2c...）、包名/版本/ABI 都对，才算更新 APK。
+          python3 tools/apk_identity.py verify-signed-update \
+            --apk "$signed_apk" \
+            --expected-version-code "$UPDATE_VERSION_CODE"
+          python3 tools/apk_identity.py inspect --apk "$signed_apk" | tee update-signed-metadata.txt
+          echo "signed_apk=$signed_apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coexist APK (installable, shared debug key)
+        # 构建/校验已通过就上传；即使后面的可选签名步骤失败，共存包仍然可取。
+        if: always() && steps.verify.outputs.coexist_apk != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-coexist-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: ${{ steps.verify.outputs.coexist_apk }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload unsigned update candidate (NOT installable)
+        # 同上：签名失败时更要留下 unsigned 候选，交给原构建者离线签名。
+        if: always() && steps.verify.outputs.update_apk != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-update-UNSIGNED-NOT-INSTALLABLE-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: ${{ steps.verify.outputs.update_apk }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload signed update APK (original certificate only)
+        if: steps.sign_update.outputs.signed_apk != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-update-SIGNED-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: ${{ steps.sign_update.outputs.signed_apk }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload public APK metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-apk-metadata-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: |
+            coexist-apk-metadata.txt
+            update-candidate-metadata.txt
+            update-signed-metadata.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload videoUpdate R8 mapping (crash triage, not a secret)
+        # 崩溃栈回溯必需：mapping.txt + 配置/资源/种子/usage。只是构建产物，
+        # 不含任何密钥或凭证，单独一个 artifact，便于按版本号取回对应映射。
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-update-mapping-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: |
+            app/build/outputs/mapping/videoUpdate/mapping.txt
+            app/build/outputs/mapping/videoUpdate/configuration.txt
+            app/build/outputs/mapping/videoUpdate/seeds.txt
+            app/build/outputs/mapping/videoUpdate/usage.txt
+            app/build/outputs/mapping/videoUpdate/resources.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload feature test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-test-results-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: app/build/test-results/testDebugUnitTest
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write build summary
+        if: always()
+        env:
+          COEXIST_APK: ${{ steps.verify.outputs.coexist_apk }}
+          UPDATE_APK: ${{ steps.verify.outputs.update_apk }}
+          SIGNED_UPDATE_APK: ${{ steps.sign_update.outputs.signed_apk }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          SIGN_OUTCOME: ${{ steps.sign_update.outcome }}
+        run: |
+          set -uo pipefail
+          summary_file="$(mktemp)"
+
+          # summary 必须描述“实际发生了什么”，不能笼统声称“只产出候选 / 没有原私钥”：
+          # 测试或构建失败时根本没有 APK；配置了密钥但签名校验失败时也不是“没有私钥”。
+          have_coexist=false
+          if [ -n "${COEXIST_APK:-}" ] && [ -f "${COEXIST_APK:-}" ]; then
+            have_coexist=true
+          fi
+          have_candidate=false
+          if [ -n "${UPDATE_APK:-}" ] && [ -f "${UPDATE_APK:-}" ]; then
+            have_candidate=true
+          fi
+          have_signed=false
+          if [ -n "${SIGNED_UPDATE_APK:-}" ] && [ -f "${SIGNED_UPDATE_APK:-}" ]; then
+            have_signed=true
+          fi
+
+          if [ "$have_coexist" = true ]; then
+            coexist_cell="已产出（可安装，共享 debug 签名）"
+          else
+            coexist_cell="未产出 / 未上传"
+          fi
+          if [ "$have_candidate" = true ]; then
+            candidate_cell="已产出（unsigned，不可安装）"
+          else
+            candidate_cell="未产出 / 未上传"
+          fi
+          if [ "$have_signed" = true ]; then
+            signed_cell="成功：已用原证书签名并通过证书校验"
+          elif [ "${UPDATE_SIGNING_CONFIGURED:-false}" = "true" ]; then
+            signed_cell="失败：已配置签名密钥，但签名或证书校验未通过"
+          else
+            signed_cell="未执行：本仓库未配置签名密钥"
+          fi
+
+          {
+            echo "## Video gifts dual build"
+            echo
+            echo "- run: \`$GITHUB_RUN_ID\`"
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- update versionCode: \`${UPDATE_VERSION_CODE:-not validated}\`"
+            echo "- verify step: \`${VERIFY_OUTCOME:-unknown}\`, sign step: \`${SIGN_OUTCOME:-skipped}\`"
+            echo
+            echo "### 产物状态"
+            echo
+            echo "| 项目 | 状态 |"
+            echo "| --- | --- |"
+            echo "| 共存版 APK | $coexist_cell |"
+            echo "| unsigned 更新候选 | $candidate_cell |"
+            echo "| 原证书签名 | $signed_cell |"
+            echo
+          } > "$summary_file"
+
+          if [ "$have_coexist" = false ] && [ "$have_candidate" = false ] && [ "$have_signed" = false ]; then
+            {
+              echo "> ### ⚠️ 本次没有可下载的 APK 产物"
+              echo ">"
+              echo "> 测试、构建或 APK 校验没有走完，因此既没有“只产出 unsigned 候选”，"
+              echo "> 也没有任何可安装/可下载的包。这不是签名密钥的问题，失败原因在上面的 step 日志里。"
+              echo ">"
+              echo "> 如果 APK 校验 step 失败，即使磁盘上生成了 APK 也不会被上传："
+              echo "> 宁可没有包，也不上传身份/签名不合规的包。"
+            } >> "$summary_file"
+          elif [ "$have_signed" = true ]; then
+            {
+              echo "### 已签名的更新 APK（原证书）"
+              echo
+              echo '```'
+              cat update-signed-metadata.txt
+              echo '```'
+            } >> "$summary_file"
+          elif [ "${UPDATE_SIGNING_CONFIGURED:-false}" = "true" ]; then
+            {
+              echo "> ### ⚠️ 已配置签名密钥，但签名/证书校验失败"
+              echo ">"
+              echo "> 本流水线配置了 \`VIDEO_UPDATE_*\` secrets 并执行了签名 step，但签名或校验没有通过"
+              echo "> （证书必须等于原证书 \`49ceec2c9d193a1b515ff7c5aa3a8bb745e2dbcfdb8eb0b99aa184b88472ae64\`，"
+              echo "> 包名/versionCode/ABI 也必须匹配）。因此本次没有可安装的更新包。"
+              echo ">"
+              echo "> 这与“没有原私钥”无关——密钥是配置了的，失败详情看签名 step 的日志。"
+            } >> "$summary_file"
+          else
+            {
+              echo "> ### ⚠️ 更新版尚不可安装"
+              echo ">"
+              echo "> 本仓库没有配置原证书私钥（\`VIDEO_UPDATE_*\`），所以本次没有尝试签名，只产出 **unsigned 更新候选**："
+              echo "> 不能安装、不能覆盖已安装版本。"
+              echo "> 必须由原构建者用原证书离线签名后，才会成为可安装的更新 APK。"
+              echo "> 请下载产物名带 \`UNSIGNED-NOT-INSTALLABLE\` 的那个文件。"
+            } >> "$summary_file"
+          fi
+
+          if [ "$have_coexist" = true ] && [ -f coexist-apk-metadata.txt ]; then
+            {
+              echo
+              echo "### 共存版 APK metadata（\`me.rerere.orangechat.videogifts\`）"
+              echo
+              echo '```'
+              cat coexist-apk-metadata.txt
+              echo '```'
+            } >> "$summary_file"
+          fi
+          if [ "$have_candidate" = true ] && [ -f update-candidate-metadata.txt ]; then
+            {
+              echo
+              echo "### 更新候选 metadata（unsigned）"
+              echo
+              echo '```'
+              cat update-candidate-metadata.txt
+              echo '```'
+            } >> "$summary_file"
+          fi
+
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$summary_file"

@@ -164,6 +164,9 @@ class SettingsStore(
         val SELECTED_ASR_PROVIDER = stringPreferencesKey("selected_asr_provider")
         val VOICE_CALL_KEEP_LISTENING_DURING_REPLY = booleanPreferencesKey("voice_call_keep_listening_during_reply")
 
+        // 视频通话（礼物默认关闭）
+        val VIDEO_CALL_SETTING = stringPreferencesKey("video_call_setting")
+
         // Web Server
         val WEB_SERVER_ENABLED = booleanPreferencesKey("web_server_enabled")
         val WEB_SERVER_PORT = intPreferencesKey("web_server_port")
@@ -345,6 +348,11 @@ class SettingsStore(
                 asrProviders = preferences.readPlaintextOrMigrate(ASR_PROVIDERS, emptyList()) { JsonInstant.decodeFromString(it) },
                 selectedASRProviderId = preferences[SELECTED_ASR_PROVIDER]?.let { Uuid.parse(it) },
                 voiceCallKeepListeningDuringReply = preferences[VOICE_CALL_KEEP_LISTENING_DURING_REPLY] ?: true,
+                videoCallSetting = runCatching {
+                    preferences[VIDEO_CALL_SETTING]?.let {
+                        JsonInstant.decodeFromString<me.rerere.rikkahub.data.video.VideoCallSetting>(it)
+                    }
+                }.getOrNull() ?: me.rerere.rikkahub.data.video.VideoCallSetting(),
                 modeInjections = runCatching { preferences[MODE_INJECTIONS]?.let { JsonInstant.decodeFromString<List<PromptInjection.ModeInjection>>(it) } }.getOrNull() ?: emptyList(),
                 lorebooks = runCatching { preferences[LOREBOOKS]?.let { JsonInstant.decodeFromString<List<Lorebook>>(it) } }.getOrNull() ?: emptyList(),
                 quickMessages = runCatching { preferences[QUICK_MESSAGES]?.let { JsonInstant.decodeFromString<List<QuickMessage>>(it) } }.getOrNull() ?: emptyList(),
@@ -690,6 +698,7 @@ class SettingsStore(
                 preferences[SELECTED_ASR_PROVIDER] = it.toString()
             } ?: preferences.remove(SELECTED_ASR_PROVIDER)
             preferences[VOICE_CALL_KEEP_LISTENING_DURING_REPLY] = settings.voiceCallKeepListeningDuringReply
+            preferences[VIDEO_CALL_SETTING] = JsonInstant.encodeToString(settings.videoCallSetting)
             preferences[MODE_INJECTIONS] = JsonInstant.encodeToString(settings.modeInjections)
             preferences[LOREBOOKS] = JsonInstant.encodeToString(settings.lorebooks)
             preferences[QUICK_MESSAGES] = JsonInstant.encodeToString(settings.quickMessages)
@@ -912,6 +921,7 @@ data class Settings(
     val asrProviders: List<ASRProviderSetting> = emptyList(),
     val selectedASRProviderId: Uuid? = null,
     val voiceCallKeepListeningDuringReply: Boolean = true,
+    val videoCallSetting: me.rerere.rikkahub.data.video.VideoCallSetting = me.rerere.rikkahub.data.video.VideoCallSetting(),
     val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
     val lorebooks: List<Lorebook> = emptyList(),
     val quickMessages: List<QuickMessage> = emptyList(),

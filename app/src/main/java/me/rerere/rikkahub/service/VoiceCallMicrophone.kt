@@ -7,12 +7,8 @@ import me.rerere.asr.ASRStatus
 import me.rerere.rikkahub.ui.hooks.CustomAsrState
 import me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus
 
-internal fun voiceCallShouldListen(status: VoiceCallStatus, muted: Boolean, keepListeningDuringReply: Boolean): Boolean =
-    !muted && when (status) {
-        VoiceCallStatus.Listening -> true
-        VoiceCallStatus.Processing, VoiceCallStatus.Speaking -> keepListeningDuringReply
-        VoiceCallStatus.Idle, VoiceCallStatus.Error -> false
-    }
+// "要不要继续听"这条纯判断在 VoiceCallListening.kt（纯 Kotlin，可直接 JVM 单测）；
+// 这里只负责把它落到真实的 ASR 生命周期上。
 
 /** Owns call recording on the main thread, including callbacks delivered after stop(). */
 internal class VoiceCallMicrophone(

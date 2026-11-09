@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
   xmlns:tools="http://schemas.android.com/tools">
 
@@ -15,6 +15,9 @@
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <!-- 视频通话的服务声明了 microphone|camera 两种前台类型；Android 14+ 每个类型都要有对应权限
+       （缺 FOREGROUND_SERVICE_CAMERA 会在 startForeground 时抛 SecurityException）。 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -335,11 +338,11 @@
         android:value="qq bot websocket message polling" />
     </service>
 
-    <!-- Voice Call Background Service -->
+    <!-- Voice Call Background Service（视频模式额外声明 camera，语音通话行为不变） -->
     <service
       android:name=".service.VoiceCallService"
       android:exported="false"
-      android:foregroundServiceType="microphone" />
+      android:foregroundServiceType="microphone|camera" />
 
     <!-- KeepAlive Restart Receiver（提升国产 ROM 存活率） -->
     <receiver

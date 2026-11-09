@@ -843,6 +843,23 @@ sealed class UIMessageAnnotation {
         val error: String? = null,
         // Null marks legacy calls whose words must be recovered from their time window.
         val callTranscript: List<CallTranscriptEntry>? = null,
+        // 视频通话结束汇总："小心心 ×2 · 花束 ×1"；语音通话为空。
+        val giftSummary: String = "",
+    ) : UIMessageAnnotation()
+
+    /**
+     * Purely virtual video-call gift record. It never carries money, wallet ids or payment state:
+     * the gift itself is only a tag-driven visual event inside an ongoing video call.
+     */
+    @Serializable
+    @SerialName("video_call_gift")
+    data class VideoCallGift(
+        val id: String,
+        val giftId: String,
+        val giftName: String = "",
+        val conversationId: String = "",
+        val turnMessageId: String = "",
+        val createdAtMillis: Long = 0,
     ) : UIMessageAnnotation()
 
     /** Preserve sibling-fork backup metadata without turning it into a citation or model input. */

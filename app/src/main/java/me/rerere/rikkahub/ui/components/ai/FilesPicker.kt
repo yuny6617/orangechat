@@ -209,6 +209,19 @@ internal fun FilesPicker(
                     toaster.show("当前有通话进行中，请先挂断", type = ToastType.Warning)
                 }
             }
+            // 视频通话是独立入口：保留上面的语音入口，二者共用同一条通话对话链。
+            BigIconTextButton(
+                icon = { Icon(HugeIcons.Video01, null) },
+                text = { Text("视频通话") },
+            ) {
+                val activeId = VoiceCallService.activeConversationId.value
+                if (activeId == null || activeId == conversation.id.toString()) {
+                    onDismiss()
+                    navController.navigate(Screen.VideoCall(conversation.id.toString()))
+                } else {
+                    toaster.show("当前有通话进行中，请先挂断", type = ToastType.Warning)
+                }
+            }
             BigIconTextButton(icon = { Icon(androidx.compose.ui.res.painterResource(R.drawable.action_red_packet), null) }, text = { Text("红包") }) { sendGift("red_packet") }
             BigIconTextButton(icon = { Icon(androidx.compose.ui.res.painterResource(R.drawable.action_transfer), null) }, text = { Text("转账") }) { sendGift("transfer") }
         }

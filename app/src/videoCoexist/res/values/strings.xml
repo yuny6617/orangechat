@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!--
+    共存版专用桌面名。只存在于 videoCoexist 源集，主源集和各语言 values-* 都没有
+    同名资源，所以任何系统语言下都不会被 app_name（西瓜瓣）覆盖。
+  -->
+  <string name="app_name_video_coexist">西瓜瓣·视频共存</string>
+</resources>

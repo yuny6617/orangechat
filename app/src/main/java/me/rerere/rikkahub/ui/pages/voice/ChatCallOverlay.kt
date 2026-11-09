@@ -62,6 +62,13 @@ internal fun ChatCallOverlay(conversation: Conversation) {
     FloatingCallPill(theme = assistant?.chatInteractionTheme ?: pending?.theme ?: "ice",
         name = assistant?.name?.ifBlank { "对方" } ?: "对方", incoming = activeId == null, busy = busy,
         onAccept = { respond("accept") },
-        onOpen = { nav.navigate(if (activeId != null) Screen.VoiceCall(targetId) else Screen.IncomingCall(targetId, pending?.id)) { launchSingleTop = true } },
+        onOpen = {
+            val target = when {
+                activeId != null && VoiceCallService.isVideoCall() -> Screen.VideoCall(targetId)
+                activeId != null -> Screen.VoiceCall(targetId)
+                else -> Screen.IncomingCall(targetId, pending?.id)
+            }
+            nav.navigate(target) { launchSingleTop = true }
+        },
         onEnd = { if (activeId != null) VoiceCallService.stop(context) else respond("decline") })
 }

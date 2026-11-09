@@ -43,6 +43,7 @@ import me.rerere.ai.ui.handleMessageChunk
 import me.rerere.rikkahub.data.ai.transformers.InputMessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.MessageTransformer
 import me.rerere.rikkahub.data.ai.transformers.OutputMessageTransformer
+import me.rerere.rikkahub.data.ai.transformers.VideoCallDirectiveSession
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
@@ -111,6 +112,27 @@ class GenerationHandler(
         onToolCheckpoint: (suspend (List<UIMessage>) -> Unit)? = null,
         reactionSourceMessages: List<UIMessage> = messages,
         onReactionContextPrepared: (ReactionContextTurn) -> Unit = {},
+        /**
+         * 只在本次请求里附带的图片（视频通话自动抓帧）。
+         *
+         * 约定：不写进聊天历史，只作为这一次（含工具多步）请求的临时图片输入，
+         * 请求结束后由 ChatService 删除对应临时文件；历史里只留文字。
+         */
+        transientImageUrls: List<String> = emptyList(),
+        /**
+         * 这一轮的触发用户消息 ID（视频通话临时图的锚点）。
+         *
+         * 临时图必须挂到**触发它的那条用户消息**上，而不是"请求里最后一条 USER"：
+         * 工具多步会插入新的消息，最后一条 USER 可能已经变成别的（甚至工具结果里的用户内容）。
+         */
+        transientImageAnchorMessageId: String? = null,
+        /**
+         * 视频通话这一轮的**请求 token**（授权凭证）。
+         *
+         * 由 VoiceCallService 生成、随队列项不可变地传下来；礼物/留影只认
+         * "有效通话 + 这个 token"，不再用消息历史推断身份。
+         */
+        requestToken: String? = null,
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = usageRecorder.wrap(
@@ -166,6 +188,10 @@ class GenerationHandler(
                 }
             },
             generateTurn = { turnMessages, toolsInternal, _ ->
+                // 视频通话指令的请求作用域：这一轮生成期间保存协议原文，
+                // 结束阶段用它执行礼物/留影；无论正常结束、取消还是打断都在 finally 清空。
+                val videoDirectives = VideoCallDirectiveSession()
+                try {
                 generateInternal(
                     assistant = assistant,
                     settings = settings,
@@ -179,6 +205,8 @@ class GenerationHandler(
                             model = model,
                             assistant = assistant,
                             settings = settings,
+                            conversationId = conversationId,
+                            videoDirectives = videoDirectives, requestToken = requestToken,
                         ))
                         emit(GenerationChunk.Messages(reactionTurn.markPending(messages.visualTransforms(
                             transformers = outputTransformers,
@@ -186,6 +214,8 @@ class GenerationHandler(
                             model = model,
                             assistant = assistant,
                             settings = settings,
+                            conversationId = conversationId,
+                            videoDirectives = videoDirectives, requestToken = requestToken,
                         ))))
                     },
                     transformers = inputTransformers,
@@ -201,6 +231,8 @@ class GenerationHandler(
                     workspaceCwd = workspaceCwd,
                     conversationId = conversationId,
                     reactionTurn = reactionTurn,
+                    transientImageUrls = transientImageUrls,
+                    transientImageAnchorMessageId = transientImageAnchorMessageId,
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
@@ -208,6 +240,8 @@ class GenerationHandler(
                     model = model,
                     assistant = assistant,
                     settings = settings,
+                    conversationId = conversationId,
+                    videoDirectives = videoDirectives, requestToken = requestToken,
                 )
                 messages = messages.onGenerationFinish(
                     transformers = outputTransformers,
@@ -215,12 +249,17 @@ class GenerationHandler(
                     model = model,
                     assistant = assistant,
                     settings = settings,
+                    conversationId = conversationId,
+                    videoDirectives = videoDirectives, requestToken = requestToken,
                 )
                 messages = reactionTurn.markPending(messages.dropLast(1) + messages.last().copy(
                     finishedAt = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()),
                 ))
                 emit(GenerationChunk.Messages(messages))
                 messages
+                } finally {
+                    videoDirectives.clear()
+                }
             },
             prepareTools = { calls, definitions ->
                 prepareGenerationToolApproval(
@@ -256,6 +295,7 @@ class GenerationHandler(
                             model = model,
                             assistant = assistant,
                             settings = settings,
+                            conversationId = conversationId,
                         ))
                     ))
                 }
@@ -290,6 +330,8 @@ class GenerationHandler(
         workspaceCwd: String? = null,
         conversationId: String? = null,
         reactionTurn: ReactionContextTurn? = null,
+        transientImageUrls: List<String> = emptyList(),
+        transientImageAnchorMessageId: String? = null,
     ) {
         val baseMessages = buildList {
             val system = buildString {
@@ -383,6 +425,8 @@ class GenerationHandler(
             processingStatus = processingStatus,
             workspaceCwd = workspaceCwd,
         ).let { filesManager.validAttachments(it, forSending = true) }.filterNot { it.parts.isEmpty() }
+            .withTransientRequestImages(transientImageUrls, transientImageAnchorMessageId)
+            .let { if (transientImageUrls.isEmpty()) it else filesManager.validAttachments(it, forSending = true) }
  
         var messages: List<UIMessage> = messages
         val params = buildAssistantGenerationParams(
@@ -498,6 +542,33 @@ class GenerationHandler(
     }.flowOn(Dispatchers.IO)
 }
  
+/**
+ * 把视频通话的自动抓帧作为"仅本次请求"的图片输入追加到**触发这一轮的用户消息**上。
+ *
+ * 锚点优先用 [anchorMessageId]（提交时分配的队列项 ID，也就是那条用户消息的 ID）。
+ * 工具多步之后"最后一条 USER"可能已经变了，所以只有确实找不到锚点时，
+ * 才退回到最后一条 USER。
+ *
+ * 只影响发给模型的 internalMessages：持久化的聊天消息里只有文字，
+ * 临时文件在请求结束时由 ChatService 删除（工具多步期间一直有效）。
+ */
+private fun List<UIMessage>.withTransientRequestImages(
+    urls: List<String>,
+    anchorMessageId: String? = null,
+): List<UIMessage> {
+    if (urls.isEmpty()) return this
+    val anchor = anchorMessageId?.trim()?.takeIf { it.isNotEmpty() }
+    val anchoredIndex = anchor?.let { id ->
+        indexOfLast { it.role == MessageRole.USER && it.id.toString() == id }
+    } ?: -1
+    val index = if (anchoredIndex >= 0) anchoredIndex else indexOfLast { it.role == MessageRole.USER }
+    if (index < 0) return this
+    val extra = urls.map { UIMessagePart.Image(url = it) }
+    return mapIndexed { position, message ->
+        if (position == index) message.copy(parts = message.parts + extra) else message
+    }
+}
+
 /**
  * 把原始 Flow 的高频发射节流成"每 periodMillis 毫秒最多发一次最新值"。
  *

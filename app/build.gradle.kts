@@ -1,4 +1,5 @@
-﻿import com.android.build.api.dsl.Packaging
+import com.android.build.api.dsl.Packaging
+import com.android.build.api.variant.BuildConfigField
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.FileInputStream
@@ -9,6 +10,34 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
+}
+
+// 视频礼物双版本构建的更新候选版本码：本流程专用属性，默认 166，必须 > 165。
+// 只在 videoUpdate variant 上生效；已存在的 debug/release/performance/baseline 版本保持不变。
+// 这个基线值是“当前已交付正式版的 versionCode”，正式版升到 166 以上后这里要跟着改。
+val videoUpdateVersionCodeProperty = "orangechatVideoUpdateVersionCode"
+val videoUpdateBaselineVersionCode = 165
+val videoUpdateVersionCode: Int = run {
+    val raw = providers.gradleProperty(videoUpdateVersionCodeProperty).orNull?.trim()
+    if (raw.isNullOrEmpty()) {
+        videoUpdateBaselineVersionCode + 1
+    } else {
+        if (!raw.matches(Regex("[0-9]{1,10}"))) {
+            throw GradleException(
+                "-P$videoUpdateVersionCodeProperty must be a plain integer, got '$raw'."
+            )
+        }
+        val parsed = raw.toIntOrNull()
+        if (parsed == null || parsed <= videoUpdateBaselineVersionCode || parsed > 2_100_000_000) {
+            throw GradleException(
+                "-P$videoUpdateVersionCodeProperty must be in " +
+                    "${videoUpdateBaselineVersionCode + 1}..2100000000, got '$raw'. " +
+                    "The update candidate must install over versionCode " +
+                    "$videoUpdateBaselineVersionCode."
+            )
+        }
+        parsed
+    }
 }
 
 android {
@@ -141,6 +170,27 @@ android {
             buildConfigField("String", "GIT_COMMIT", "\"$gitCommit\"")
             buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
         }
+        // 视频礼物共存版：与已安装的正式版/调试版并存。
+        // 使用仓库内共享 debug 密钥签名（与 debug 变体一致；密码是公开的 android），
+        // 明确不是发布安全签名，绝不使用 local.properties 里的 release 密钥，
+        // 因此没有 secrets 的 fork 也能构建。包名、provider authorities、taskAffinity
+        // 都由 applicationId 占位符推导，和 me.rerere.orangechat 及其 .liquidglass 变体互不冲突。
+        create("videoCoexist") {
+            initWith(getByName("debug"))
+            matchingFallbacks.add("debug")
+            // debug 默认带 .liquidglass 后缀，这里必须显式替换成共存包名。
+            applicationIdSuffix = ".videogifts"
+            signingConfig = signingConfigs.getByName("debug")
+        }
+        // 视频礼物更新候选：包名保持正式包 me.rerere.orangechat，复制 release 的
+        // 优化/ProGuard 设置，但明确 unsigned：没有原证书签名之前不能安装，也不能
+        // 用共享 debug 密钥或任何新生成的密钥伪装成覆盖更新。版本码在
+        // androidComponents.onVariants 里用 videoUpdateVersionCode 设置（默认 166）。
+        create("videoUpdate") {
+            initWith(getByName("release"))
+            matchingFallbacks.add("release")
+            signingConfig = null
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -194,6 +244,27 @@ android {
                 }
             }
         }
+    }
+}
+
+// 更新候选的版本码/包 metadata 一致性：BuildType DSL 不提供 versionCode，
+// 因此只在这个新 variant 的两个 output（ABI split 和 universal）上覆盖，
+// 并同步 BuildConfig.VERSION_CODE，保证包 metadata 与 BuildConfig 一致。
+// 其他 variant 的版本不受影响。
+androidComponents {
+    onVariants { variant ->
+        if (variant.buildType != "videoUpdate") return@onVariants
+        variant.outputs.forEach { output ->
+            output.versionCode.set(videoUpdateVersionCode)
+        }
+        val buildConfigFields = variant.buildConfigFields
+            ?: throw GradleException(
+                "videoUpdate requires buildConfig to be enabled so VERSION_CODE matches the APK metadata."
+            )
+        buildConfigFields.put(
+            "VERSION_CODE",
+            BuildConfigField("String", "\"$videoUpdateVersionCode\"", "Video update candidate version code")
+        )
     }
 }
 

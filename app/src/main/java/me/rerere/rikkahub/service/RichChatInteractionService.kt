@@ -118,14 +118,15 @@ suspend fun ChatService.respondChatInteraction(conversationId: Uuid, id: String,
 
 internal suspend fun ChatService.endChatInteractionCalls(conversationId: Uuid, startedAt: Long? = null,
     endedAt: Long = System.currentTimeMillis(), transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null,
-    connectingIds: Set<String> = emptySet()) {
+    connectingIds: Set<String> = emptySet(), giftSummary: String = "") {
     val session = getOrCreateSession(conversationId)
     session.saveMutex.withLock {
         val cards = session.state.value.currentMessages.flatMap { it.annotations }.filterIsInstance<ChatInteraction>()
             .filter { it.kind == "call" && it.status in setOf("accepted", "connecting") && it.conversationId == conversationId.toString() }
         cards.filter { it.belongsToEndingCall(startedAt, connectingIds) }.forEach {
             replaceChatInteractionLocked(conversationId, it.copy(status = "ended", endedAtMillis = endedAt,
-                callTranscript = transcript ?: it.callTranscript))
+                callTranscript = transcript ?: it.callTranscript,
+                giftSummary = giftSummary.ifBlank { it.giftSummary }))
         }
     }
 }

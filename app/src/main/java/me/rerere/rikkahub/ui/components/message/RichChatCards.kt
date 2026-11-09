@@ -154,6 +154,10 @@ fun RichChatCard(card: ChatInteraction, conversationId: Uuid?, readOnly: Boolean
                         color = colors.ink, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("✦ $callState · 点击查看", color = colors.ink.copy(alpha = .75f), fontSize = 10.sp, lineHeight = 15.sp,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (card.giftSummary.isNotBlank()) {
+                        Text("🎁 ${card.giftSummary}", color = colors.ink.copy(alpha = .85f), fontSize = 10.sp,
+                            lineHeight = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
         } else GiftChatBubble(card, state, senderName) { expanded = true }

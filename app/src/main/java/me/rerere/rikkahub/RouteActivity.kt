@@ -318,15 +318,17 @@ class RouteActivity : ComponentActivity() {
             }
         }
 
-        // 新增逻辑: 从语音通话通知点击, 回到通话页面
+        // 新增逻辑: 从语音/视频通话通知点击, 回到通话页面
         intent.getStringExtra("openVoiceCallConversationId")?.let { convId ->
             navStack?.let { stack ->
                 Snapshot.withMutableSnapshot {
-                    val alreadyOnVoiceCall = stack.lastOrNull().let {
-                        it is Screen.VoiceCall && it.conversationId == convId
+                    val video = me.rerere.rikkahub.service.VoiceCallService.isVideoCall()
+                    val alreadyOnCall = stack.lastOrNull().let {
+                        (it is Screen.VoiceCall && it.conversationId == convId) ||
+                            (it is Screen.VideoCall && it.conversationId == convId)
                     }
-                    if (!alreadyOnVoiceCall) {
-                        stack.add(Screen.VoiceCall(convId))
+                    if (!alreadyOnCall) {
+                        stack.add(if (video) Screen.VideoCall(convId) else Screen.VoiceCall(convId))
                     }
                 }
             }
@@ -796,6 +798,13 @@ class RouteActivity : ComponentActivity() {
                                 )
                             }
 
+                            entry<Screen.VideoCall> { key ->
+                                me.rerere.rikkahub.ui.pages.video.VideoCallPage(
+                                    conversationId = Uuid.parse(key.conversationId),
+                                    onBack = { backStack.removeLastOrNull() }
+                                )
+                            }
+
                             entry<Screen.IncomingCall> { key ->
                                 me.rerere.rikkahub.ui.pages.voice.IncomingCallRoute(
                                     conversationId = Uuid.parse(key.conversationId), interactionId = key.interactionId,
@@ -1096,6 +1105,10 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data class VoiceCall(val conversationId: String) : Screen
+
+    /** 视频通话面板：独立入口，和语音通话共用同一通电话的后台服务。 */
+    @Serializable
+    data class VideoCall(val conversationId: String) : Screen
 
     /**
      * AI 主动发起语音通话时弹出的来电界面.

@@ -156,6 +156,12 @@ fun SettingSpeechPage(vm: SettingVM = koinViewModel()) {
                     vm.updateSettings(settings.copy(voiceCallKeepListeningDuringReply = enabled))
                 },
             )
+            VideoCallSettingsSection(
+                setting = settings.videoCallSetting,
+                onUpdate = { updated ->
+                    vm.updateSettings(settings.copy(videoCallSetting = updated))
+                },
+            )
         when (selectedPage) {
             0 -> TTSProviderList(
                 settings = settings,

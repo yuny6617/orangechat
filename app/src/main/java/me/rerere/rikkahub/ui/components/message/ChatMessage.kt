@@ -308,7 +308,9 @@ fun ChatMessage(
             original
         }
     }
-    if (message.parts.isEmptyUIMessage() && !loading) return
+    if (message.parts.isEmptyUIMessage() && !loading &&
+        message.annotations.none { it is me.rerere.ai.ui.UIMessageAnnotation.VideoCallGift }
+    ) return
     if (message.avatarInteraction() != null) {
         Text(
             text = message.avatarInteractionText(),
@@ -492,6 +494,17 @@ fun ChatMessage(
                 timestamp = timestamp,
             )
  
+            message.annotations.filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.VideoCallGift>()
+                .lastOrNull()?.let { gift ->
+                    ChatBubbleRow(
+                        enabled = true,
+                        isUser = false,
+                        avatar = { ChatBubbleAvatar(false, model, assistant, avatarGesture) },
+                        timestamp = timestamp,
+                    ) {
+                        VideoCallGiftCard(gift)
+                    }
+                }
             message.translation?.let { translation ->
                 CollapsibleTranslationText(
                     content = translation,

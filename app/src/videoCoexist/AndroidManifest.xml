@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  视频礼物共存版（videoCoexist）的 manifest overlay，只用于这个 buildType。
+  只覆盖显示名：桌面图标名字必须和正式版不同，否则两个包在桌面上无法区分。
+  名字用独立资源名 app_name_video_coexist，它只在 videoCoexist 源集里定义，
+  因此不会被各语言 values-*/strings.xml 里的 app_name 覆盖
+  （直接改 app_name 会在中文/日文等语言下退回正式版名字）。
+  包名、provider authorities、taskAffinity 全部由 ${applicationId} 占位符推导，
+  coexist 包名是 me.rerere.orangechat.videogifts，与正式包互不冲突。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <application
+    android:label="@string/app_name_video_coexist"
+    tools:replace="android:label" />
+
+</manifest>

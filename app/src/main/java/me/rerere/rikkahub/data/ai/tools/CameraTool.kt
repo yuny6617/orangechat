@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -18,6 +18,7 @@ import me.rerere.ai.core.InputSchema
 import me.rerere.ai.core.Tool
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.service.CameraService
+import me.rerere.rikkahub.data.video.VideoCallRuntime
 import me.rerere.rikkahub.utils.ImageUtils
 import java.io.File
 
@@ -45,6 +46,16 @@ fun createCameraTool(context: Context): Tool {
         execute = { args ->
             val params = args.jsonObject
             try {
+                // 视频通话正在用相机时，明确告诉模型"现在别抢摄像头"，并引导走留影协议，
+                // 而不是靠抢占失败来碰运气。
+                if (VideoCallRuntime.cameraAvailable()) {
+                    return@Tool listOf(UIMessagePart.Text(
+                        buildJsonObject {
+                            put("success", false)
+                            put("error", "Video call is using the camera right now. Ask the user for a photo via the video call (a snapshot) instead of taking a new picture.")
+                        }.toString()
+                    ))
+                }
                 val useFlash = params["flash"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
                 val useFrontCamera = params["front_camera"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: false
 
