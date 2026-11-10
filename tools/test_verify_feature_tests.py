@@ -1,4 +1,4 @@
-"""Unit tests for tools/verify_feature_tests.py (CI guard for the 224 feature tests)."""
+"""Unit tests for tools/verify_feature_tests.py (CI guard for the reviewed feature tests)."""
 
 import tempfile
 import unittest
@@ -49,7 +49,7 @@ def write_results(directory, counts):
 
 
 def default_counts():
-    """Split the reviewed 224 tests across the expected classes."""
+    """Split the reviewed feature tests across the expected classes."""
 
     counts = {}
     remaining = MIN_TOTAL_TESTS
@@ -104,7 +104,7 @@ class CheckResultsTest(unittest.TestCase):
         results = self.valid_results()
         removed = EXPECTED_TEST_CLASSES[-1]
         results.total -= results.per_class.pop(removed)
-        # Keep the total at 224 so only the missing-class check can fail.
+        # Keep the total at MIN_TOTAL_TESTS so only the missing-class check can fail.
         results.total = MIN_TOTAL_TESTS
         errors = check_results(results)
         self.assertTrue(any(removed in error for error in errors))
@@ -112,7 +112,10 @@ class CheckResultsTest(unittest.TestCase):
     def test_too_few_tests_is_rejected(self):
         results = TestResults(total=MIN_TOTAL_TESTS - 1, per_class=default_counts())
         errors = check_results(results)
-        self.assertTrue(any("only 223 feature tests ran" in error for error in errors))
+        # 断言必须跟着 MIN_TOTAL_TESTS 走，不能再硬编码旧基线（否则改了计数之后这条测试自己就错）。
+        self.assertTrue(
+            any(f"only {MIN_TOTAL_TESTS - 1} feature tests ran" in error for error in errors)
+        )
 
     def test_failures_are_rejected(self):
         results = self.valid_results()

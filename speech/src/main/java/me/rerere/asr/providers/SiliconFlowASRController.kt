@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -15,6 +15,17 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Log
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,7 +61,10 @@ private const val TAG = "SiliconFlowASR"
 class SiliconFlowASRController(
     private val context: Context,
     private val httpClient: OkHttpClient,
-    private val provider: ASRProviderSetting.SiliconFlow
+    private val provider: ASRProviderSetting.SiliconFlow,
+    /** Ordinary chat retains successful audio; video text-only ASR owns only a request temp file. */
+    private val retainAudio: Boolean = true,
+    private val manualRecording: Boolean = false,
 ) : ASRController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -59,6 +73,8 @@ class SiliconFlowASRController(
 
     private var recorderJob: Job? = null
     private var vadJob: Job? = null
+    private var transcriptionJob: Job? = null
+    @Volatile private var disposed = false
     private var audioRecord: AudioRecord? = null
     private var onTranscriptChange: ((String) -> Unit)? = null
     private var audioBuffer: ByteArrayOutputStream? = null
@@ -66,7 +82,7 @@ class SiliconFlowASRController(
     private var amplitudesBuffer = mutableListOf<Float>()
 
     override fun start(onTranscriptChange: (String) -> Unit) {
-        if (state.value.isRecording) return
+        if (disposed || state.value.isRecording || transcriptionJob?.isActive == true) return
         if (ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO
@@ -88,28 +104,39 @@ class SiliconFlowASRController(
             )
         }
         startRecorder()
-        startLocalVad()
+        if (!manualRecording) startLocalVad()
     }
 
     override fun stop() {
+        if (disposed || transcriptionJob?.isActive == true) return
         vadJob?.cancel()
-        recorderJob?.cancel()
+        val recording = recorderJob
+        recording?.cancel()
         val buffer = audioBuffer
         audioBuffer = null
         releaseRecorder()
 
-        if (buffer != null && buffer.size() > 0) {
+        if (buffer != null) {
             _state.update { it.copy(status = ASRStatus.Stopping) }
-            scope.launch {
-                transcribeAudio(buffer.toByteArray())
+            transcriptionJob = scope.launch {
+                // The last read/write must finish before snapshotting this segment.
+                recording?.join()
+                if (buffer.size() > 0) transcribeAudio(buffer.toByteArray())
+                else _state.update { it.copy(status = ASRStatus.Idle) }
             }
-        } else {
-            _state.update { it.copy(status = ASRStatus.Idle) }
         }
+        // Repeated stop while idle must not overwrite a completed transcript.
+
     }
 
     override fun dispose() {
-        stop()
+        disposed = true
+        onTranscriptChange = null
+        audioBuffer = null
+        vadJob?.cancel()
+        recorderJob?.cancel()
+        transcriptionJob?.cancel()
+        releaseRecorder()
         scope.cancel()
     }
 
@@ -173,15 +200,20 @@ class SiliconFlowASRController(
         val durationMs = System.currentTimeMillis() - recordingStartTime
 
         withContext(Dispatchers.IO) {
+            var ownedFile: File? = null
+            var retained = false
             try {
                 // Convert PCM to WAV
                 val wavData = pcmToWav(pcmData, provider.sampleRate)
 
-                // Save to persistent voice file
-                val voiceDir = File(context.filesDir, "voice_messages")
+                val voiceDir = if (retainAudio) File(context.filesDir, "voice_messages")
+                    else File(context.cacheDir, "siliconflow_asr_requests")
                 voiceDir.mkdirs()
-                val audioFile = File(voiceDir, "voice_${System.currentTimeMillis()}.wav")
+                // Creation, not a guessed name or a directory scan, establishes ownership.
+                val audioFile = File.createTempFile("voice_", ".wav", voiceDir)
+                ownedFile = audioFile
                 FileOutputStream(audioFile).use { it.write(wavData) }
+                currentCoroutineContext().ensureActive()
 
                 // Build multipart request
                 val requestBody = MultipartBody.Builder()
@@ -205,16 +237,15 @@ class SiliconFlowASRController(
                     .post(requestBody)
                     .build()
 
-                val response = httpClient.newCall(request).execute()
-                val responseBody = response.body?.string()
+                val (responseCode, responseBody) = httpClient.newCall(request).awaitBody()
+                currentCoroutineContext().ensureActive()
 
                 if (responseBody == null) {
-                    audioFile.delete()
                     setError("API error: empty response")
                     return@withContext
                 }
 
-                Log.d(TAG, "API response: ${response.code} $responseBody")
+                Log.d(TAG, "API response: $responseCode")
                 val json = JSONObject(responseBody)
 
                 // SiliconFlow response: { code, message, data }
@@ -223,7 +254,6 @@ class SiliconFlowASRController(
 
                 // Check for error: code present and non-zero
                 if (code != -1 && code != 0) {
-                    audioFile.delete()
                     setError(message.ifEmpty { "API error code: $code" })
                     return@withContext
                 }
@@ -233,13 +263,15 @@ class SiliconFlowASRController(
                 }
                 val text = rawText.stripTrailingEmoji()
 
+                currentCoroutineContext().ensureActive()
+                if (disposed) return@withContext
                 if (text.isNotEmpty()) {
                     _state.update {
                         it.copy(
                             transcript = text,
                             status = ASRStatus.Idle,
                             errorMessage = null,
-                            audioFilePath = audioFile.absolutePath,
+                            audioFilePath = audioFile.absolutePath.takeIf { retainAudio },
                             durationMs = durationMs
                         )
                     }
@@ -249,16 +281,41 @@ class SiliconFlowASRController(
                         it.copy(
                             status = ASRStatus.Idle,
                             errorMessage = null,
-                            audioFilePath = audioFile.absolutePath,
+                            audioFilePath = audioFile.absolutePath.takeIf { retainAudio },
                             durationMs = durationMs
                         )
                     }
                 }
+                retained = retainAudio
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
-                Log.e(TAG, "Transcription failed", e)
-                setError(e.message ?: "Transcription failed")
+                if (!disposed) {
+                    Log.e(TAG, "Transcription failed", e)
+                    setError(e.message ?: "Transcription failed")
+                }
+            } finally {
+                if (!retained) ownedFile?.delete()
             }
         }
+    }
+
+    /** Cancellation cancels the actual HTTP call, including a stalled response body. */
+    private suspend fun Call.awaitBody(): Pair<Int, String?> = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { cancel() }
+        enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val result = response.use { it.code to it.body?.string() }
+                    if (continuation.isActive) continuation.resume(result)
+                } catch (e: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(e)
+                }
+            }
+        })
     }
 
     private fun pcmToWav(pcmData: ByteArray, sampleRate: Int): ByteArray {

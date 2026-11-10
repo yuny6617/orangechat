@@ -127,6 +127,23 @@ class VideoCallPolicyTest {
     }
 
     @Test
+    fun `manual video input disables every automatic listening path`() {
+        // 视频通话是手动采音：无论状态、是否静音、是否"回复期间继续听"，自动监听都必须是关的
+        // （否则 VAD 会自动分段发送、ASR monitor 会抢用户那一颗按钮的麦克风）。
+        VoiceCallStatus.entries.forEach { status ->
+            assertFalse(
+                "手动视频模式在 $status 下也不许自动监听",
+                VideoCallPolicy.shouldListen(
+                    status, muted = false, keepListeningDuringReply = true, manualVideoInput = true,
+                ),
+            )
+        }
+        // 纯语音（不传这个参数）行为完全不变。
+        assertTrue(VideoCallPolicy.shouldListen(VoiceCallStatus.Listening, muted = false, keepListeningDuringReply = true))
+        assertTrue(VideoCallPolicy.shouldListen(VoiceCallStatus.Speaking, muted = false, keepListeningDuringReply = true))
+    }
+
+    @Test
     fun `camera binds only when surface permission lifecycle and call all agree`() {
         assertTrue(
             VideoCallPolicy.shouldBindCamera(

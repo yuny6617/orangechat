@@ -27,6 +27,13 @@
 > 本仓库仅公开源代码，不用于商业用途。
 > 原项目及原有代码的版权归原作者和相关贡献者所有，许可条款请参阅根目录的 `LICENSE`。
 
+> [!TIP]
+> **视频礼物 fork**：本分支额外实现了原生视频通话与礼物功能。双版本构建、fork 构建与签名流程见
+> [docs/GITHUB_DUAL_BUILD.md](docs/GITHUB_DUAL_BUILD.md)，构建产物可在
+> [yuny6617/orangechat Actions](https://github.com/yuny6617/orangechat/actions) 找到。
+> 其中「共存版」是可安装的测试包（与正式版并存）；「更新候选」是 unsigned，**不能直接安装**，
+> 需要由持有原证书的构建者签名后才可用。原私钥不需要外传。
+
 ---
 
 ## 🍊 为什么做橘瓣

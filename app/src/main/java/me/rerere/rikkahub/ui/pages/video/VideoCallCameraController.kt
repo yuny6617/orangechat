@@ -42,6 +42,7 @@ import me.rerere.rikkahub.data.video.CameraFacing
 import me.rerere.rikkahub.data.video.CameraGenerationGate
 import me.rerere.rikkahub.data.video.CameraGenerationLifecycle
 import me.rerere.rikkahub.data.video.cameraStartAllowed
+import me.rerere.rikkahub.data.video.PreviewCalibration
 import me.rerere.rikkahub.data.video.PreviewTransform
 import me.rerere.rikkahub.data.video.VideoCallCameraGateway
 import me.rerere.rikkahub.data.video.VideoCallRuntime
@@ -135,9 +136,37 @@ class VideoCallCameraController(
     private val _status = MutableStateFlow(VideoCameraStatus())
     val status: StateFlow<VideoCameraStatus> = _status.asStateFlow()
 
-    /** 预览内容需要做的变换（旋转 + 等比填满 + 前摄镜像 + 抵消默认拉伸）。 */
+    /** 预览内容需要做的变换（旋转 + 等比填满 + 前摄镜像 + 抵消默认拉伸 + 用户校准）。 */
     private val _previewTransform = MutableStateFlow(PreviewTransform())
     val previewTransform: StateFlow<PreviewTransform> = _previewTransform.asStateFlow()
+
+    /**
+     * 预览方向的用户校准角度（**只作用于预览**，不影响抓帧 JPEG 的方向）。
+     *
+     * 故意放在控制器上、而不是放进 [Generation]：换镜头、退后台再回来、页面重建都会重建
+     * generation，如果角度跟着 generation 走，用户每切一次前后摄就得重新校一次。
+     * 这里它是控制器级状态，只有设置被改才变（来源是 `VideoCallSetting.previewCalibrationDegrees`）。
+     */
+    private var previewCalibrationDegrees: Int = PreviewCalibration.DEFAULT_DEGREES
+
+    /**
+     * 写入预览校准角度（面板按钮 / 设置页调用）。
+     *
+     * 只重算预览矩阵：不重启相机、不作废在飞的抓帧票据、不改变 JPEG 方向。
+     * 角度会先归一化到 0/90/180/270，非法值不会进矩阵。
+     */
+    fun setPreviewCalibrationDegrees(degrees: Int) {
+        val normalized = PreviewCalibration.normalize(degrees)
+        gate.exclusive {
+            if (normalized == previewCalibrationDegrees) return@exclusive
+            previewCalibrationDegrees = normalized
+            val generation = gate.currentOrNull() ?: return@exclusive
+            publishTransformLocked(generation)
+        }
+    }
+
+    /** 当前预览校准角度（面板显示用）。 */
+    fun previewCalibration(): Int = previewCalibrationDegrees
 
     /** 面板是否已经把一个可用的 SurfaceTexture 交了过来（Surface 就绪）。 */
     private val _surfaceReady = MutableStateFlow(false)
@@ -418,7 +447,20 @@ class VideoCallCameraController(
     /** 必须在门闩内调用。 */
     private fun publishTransformLocked(generation: Generation) {
         if (gate.currentOrNull() !== generation) return
-        _previewTransform.value = VideoPreviewGeometry.textureViewTransform(
+        // 尺寸没到位时**绝对不能**发布单位阵：单位阵的语义是"不旋转 + 按 buffer 拉伸到视图"，
+        // 在竖屏 + 后摄(sensor 90) 的真机上，画面正好就侧躺 90°。
+        // 旧实现会在这条路径上静默写出 [PreviewTransform]，等于把"还没算"显示成"不用转"。
+        if (generation.viewWidth <= 0 || generation.viewHeight <= 0 ||
+            generation.previewWidth <= 0 || generation.previewHeight <= 0
+        ) {
+            Log.i(
+                TAG,
+                "预览几何：尺寸未就绪，暂不发布变换 view=${generation.viewWidth}x${generation.viewHeight} " +
+                    "buffer=${generation.previewWidth}x${generation.previewHeight}",
+            )
+            return
+        }
+        val transform = VideoPreviewGeometry.textureViewTransform(
             sensorOrientation = generation.sensorOrientation,
             displayRotationDegrees = generation.displayRotationDegrees,
             frontFacing = generation.frontFacing,
@@ -426,7 +468,42 @@ class VideoCallCameraController(
             bufferHeight = generation.previewHeight,
             viewWidth = generation.viewWidth,
             viewHeight = generation.viewHeight,
+            // 用户校准只进预览矩阵：抓帧方向走 captureRotationDegrees，与这里无关。
+            calibrationDegrees = previewCalibrationDegrees,
         )
+        _previewTransform.value = transform
+        logPreviewGeometry(generation, transform)
+    }
+
+    /**
+     * 预览方向的几何日志（**不含任何画面内容**，只有角度/尺寸/矩阵）。
+     *
+     * 真机核对专用：一行里同时有 sensor / display / 前摄 / buffer / view / 用户校准 /
+     * 最终矩阵，任何一处取值不对都能直接看出来。只在数值变化时打一次，不刷屏。
+     *
+     * 这里**不再打印 `SurfaceTexture.getTransformMatrix()`**：那份矩阵表示采样坐标变换，
+     * 常规就带 Y-flip 与 crop/scale，"非单位阵 = 厂商多转了一次"是错误因果
+     * （见 RESPONSE_DEVICE_FIX_R4 §1），据此推断方向只会误导排障。
+     */
+    private fun logPreviewGeometry(generation: Generation, transform: PreviewTransform) {
+        val matrix = transform.matrix
+        val line = buildString {
+            append("预览几何 camera=").append(generation.cameraId)
+            append(" facing=").append(if (generation.frontFacing) "front" else "back")
+            append(" sensor=").append(generation.sensorOrientation)
+            append(" display=").append(generation.displayRotationDegrees)
+            append(" buffer=").append(generation.previewWidth).append('x').append(generation.previewHeight)
+            append(" view=").append(generation.viewWidth).append('x').append(generation.viewHeight)
+            append(" rotate=").append(transform.rotationDegrees)
+            append(" calibration=").append(transform.calibrationDegrees)
+            append(" mirror=").append(transform.mirrorHorizontally)
+            append(" matrix=[")
+            append(listOf(matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f).joinToString(","))
+            append(']')
+        }
+        if (line == lastGeometryLog) return
+        lastGeometryLog = line
+        Log.i(TAG, line)
     }
 
     private fun hasPermission(): Boolean =
@@ -437,6 +514,9 @@ class VideoCallCameraController(
     // ------------------------------------------------------------------
 
     private var displayListenerRegistered = false
+
+    /** 上一次打过的一行几何日志（只用于去重，避免每次尺寸变化都刷屏）。 */
+    private var lastGeometryLog: String? = null
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
@@ -768,6 +848,7 @@ class VideoCallCameraController(
         _status.value = VideoCameraStatus(VideoCameraState.Idle, requestedFacing)
         _previewTransform.value = PreviewTransform()
         rotationTracker.reset()
+        lastGeometryLog = null
         return ended
     }
 
@@ -783,6 +864,7 @@ class VideoCallCameraController(
             _status.value = status
             _previewTransform.value = PreviewTransform()
             rotationTracker.reset()
+            lastGeometryLog = null
         }
         generation.release()
     }

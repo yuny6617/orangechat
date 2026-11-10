@@ -47,6 +47,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,10 +71,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.video.VIDEO_GIFT_EFFECT_DURATION_MS
 import me.rerere.rikkahub.data.video.DanmakuLine
+import me.rerere.rikkahub.data.video.PreviewCalibration
 import me.rerere.rikkahub.data.video.PreviewTransform
 import me.rerere.rikkahub.data.video.VideoCallPolicy
 import me.rerere.rikkahub.data.video.VideoCallRuntime
@@ -87,6 +90,24 @@ import me.rerere.rikkahub.data.video.VideoGiftEffectRequest
 import me.rerere.rikkahub.data.video.toAndroidMatrix
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.VoiceCallService
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.graphics.vector.ImageVector
+import me.rerere.hugeicons.HugeIcons
+import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Mic01
+import me.rerere.hugeicons.stroke.MicOff01
+import me.rerere.hugeicons.stroke.Record
+import me.rerere.hugeicons.stroke.Speaker01
+import me.rerere.hugeicons.stroke.Stop
+import me.rerere.rikkahub.data.video.VideoVoicePolicy
+import me.rerere.rikkahub.data.video.VideoVoiceStatus
+import me.rerere.rikkahub.data.video.VideoVoiceUiState
+import me.rerere.rikkahub.ui.components.message.InteractionColors
+import me.rerere.rikkahub.ui.components.message.interactionColors
 import me.rerere.rikkahub.ui.components.ui.UIAvatar
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionCamera
 import me.rerere.rikkahub.ui.components.ui.permission.PermissionRecordAudio
@@ -98,17 +119,21 @@ import kotlin.uuid.Uuid
 
 private const val TAG = "VideoCallPage"
 
-/** 弹幕气泡存活时长与同屏上限：动画有生命周期，数量有上限，不会一直堆在内存里。 */
-private const val DANMAKU_LIFETIME_MS = 6_000L
-private const val DANMAKU_MAX_VISIBLE = 6
+// 旧的"上浮弹幕"（6 秒淡出、同屏最多 6 条）已被常驻字幕列表取代：
+// 真机要求文字常驻可回看，寿命动画恰好是"看不到刚才那句"的原因。
+// 保留常量只为说明历史行为，界面上已经不再引用。
 
 /**
  * 视频通话面板。
  *
- * - 相机画面铺底，控件是黑玻璃；没有相机/没有权限时同一面板退化成黑底，文字/弹幕/礼物照常；
- * - 左上角头像+名字+计时徽章，点一下打断当前生成/TTS；
- * - 右上角挂断、夹帧、前后切换、礼物数量统计；
- * - 打完的字走语音通话同一条对话链（同一个队列、同一个 TTS、同一套挂断清理）。
+ * 视觉：与既有语音页同一套明亮玻璃主题（`interactionColors` 渐变底 + 白色玻璃卡 + 中文小字），
+ * **不再是覆盖整屏的黑色遮罩**。镜头画面缩进一张圆角卡里，始终可见但不铺满。
+ *
+ * 文字：常驻可回看。`CallTranscriptList` 用 LazyColumn + 稳定 id 渲染服务侧的有界历史
+ * （最多 400 行），不再 6 秒淡出、也不再只留最后 6 条；手动往上翻看时新消息不会把列表拽回底部。
+ *
+ * 控件：切前后 / 抓帧 / 麦克风（真 Mic01/MicOff01 图标 + 中文状态）/ 挂断，点身份行可打断
+ * 当前生成与朗读；礼物特效仍然盖在最上层。
  *
  * 生命周期：
  * - 相机同时受 Surface / 权限 / 生命周期 STARTED / 通话进行中 四个条件约束，任一不成立就解绑；
@@ -223,6 +248,8 @@ fun VideoCallPage(
     LaunchedEffect(cameraGranted, micGranted, callActive, boundService) {
         if (!callActive) return@LaunchedEffect
         boundService?.refreshSessionPermissions(ourConversationId)
+        // 麦克风授权/ASR 配置变化会让"录一段"从可用变不可用（或反过来），按钮状态跟着刷新。
+        boundService?.refreshVideoVoiceInput()
     }
 
     /**
@@ -266,6 +293,39 @@ fun VideoCallPage(
     val cameraStatusState by cameraController.status.collectAsStateWithLifecycle()
     val previewTransform by cameraController.previewTransform.collectAsStateWithLifecycle()
 
+    /**
+     * 预览方向的人工校准（**只作用于预览画面**，不改抓帧 JPEG，见 [PreviewCalibration]）。
+     *
+     * 角度是**设置**（持久化），不是本页的临时状态：换镜头、退后台再回来、页面重建
+     * 都不会把它清掉。真机上画面偏了就点「右转/左转」，角度会立刻生效并写回设置。
+     */
+    val previewCalibrationDegrees = settings.videoCallSetting.previewCalibrationDegrees
+        ?.let(PreviewCalibration::normalize)
+        ?: PreviewCalibration.deviceDefault(
+            android.os.Build.MANUFACTURER,
+            android.os.Build.MODEL,
+            android.os.Build.VERSION.SDK_INT,
+        )
+    val settingsStore: SettingsStore = org.koin.compose.koinInject()
+    val uiScope = rememberCoroutineScope()
+    LaunchedEffect(cameraController, previewCalibrationDegrees) {
+        cameraController.setPreviewCalibrationDegrees(previewCalibrationDegrees)
+    }
+    fun applyPreviewCalibration(degrees: Int) {
+        val normalized = PreviewCalibration.normalize(degrees)
+        // 先让画面转起来（不等写盘），再落库；两处都以同一个归一化角度为准。
+        cameraController.setPreviewCalibrationDegrees(normalized)
+        uiScope.launch {
+            settingsStore.update { current ->
+                current.copy(
+                    videoCallSetting = current.videoCallSetting.copy(
+                        previewCalibrationDegrees = normalized,
+                    ),
+                )
+            }
+        }
+    }
+
     // 相机入口按**通话作用域**注册：进另一个会话的视频页不会替换本通话的相机。
     // 通话在跑但协调器还没建好（启动中）时不注册，等 panelState.active 变成 true 再注册。
     LaunchedEffect(cameraController, callActive, panelState.active) {
@@ -301,6 +361,8 @@ fun VideoCallPage(
                     // 旧帧（自动 + 手动）一律作废：不在没有相机的时候留用旧图。
                     // 同样只针对本会话这一通。
                     VideoCallRuntime.clearPendingFrame(ourConversationId)
+                    // 正在录的那一段跟着作废（退回后台就不再采音，也不偷偷发出去）。
+                    boundService?.onHostBackground()
                     // 绑定模式的通话跟着可见性走：退后台就结束。
                     // 正常的前台语音/视频通话不受影响（isBoundOnly 为 false）。
                     boundService?.endBoundCallOnHostStop()
@@ -434,6 +496,8 @@ fun VideoCallPage(
 
     val boundForUs = boundService?.boundConversationId() == ourConversationId
     val canSend = callActive && boundForUs && !otherCallActive
+    // 手动录音这一段的状态（安全 Idle 初值；纯语音通话恒为 Idle）。
+    val voiceInput = callState.voiceInput
 
     val sendText: () -> Unit = {
         val text = input.trim()
@@ -476,208 +540,305 @@ fun VideoCallPage(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        val previewing = cameraStatusState.state == VideoCameraState.Previewing ||
-            cameraStatusState.state == VideoCameraState.Requesting
-        // TextureView 必须一直存在，并且由它自己把 SurfaceTexture 交给相机；
-        // 未就绪时在上面盖一层黑底说明，同一面板退化成"黑底纯文字模式"。
-        CameraPreviewSurface(
-            controller = cameraController,
-            transform = previewTransform,
-            modifier = Modifier.fillMaxSize(),
-        )
-        if (!previewing) {
-            BlackStage(
-                status = cameraStatusState,
-                permissionGranted = cameraGranted,
-                onRequestPermission = { cameraPermission.requestPermissions() },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        // 顶部/底部压暗，保证黑玻璃控件在任何画面上都可读
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(
-                    listOf(
-                        Color.Black.copy(alpha = 0.55f),
-                        Color.Transparent,
-                        Color.Black.copy(alpha = 0.72f),
-                    ),
-                ),
-            ),
-        )
+    // 明亮玻璃主题：与既有语音页（GlassCallPanel / interactionColors）同一套色板，
+    // 不再是覆盖整屏的黑色遮罩。镜头画面缩进一张圆角卡里，文字改成常驻可回看的列表。
+    val theme = assistant?.chatInteractionTheme ?: "ice"
+    val colors = interactionColors(theme)
+    val previewing = cameraStatusState.state == VideoCameraState.Previewing ||
+        cameraStatusState.state == VideoCameraState.Requesting
 
-        VideoGiftEffectOverlay(activeEffect, Modifier.fillMaxSize())
-
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
+    Box(
+        Modifier.fillMaxSize()
+            .background(Brush.linearGradient(listOf(colors.top, colors.bottom)))
+            .statusBarsPadding(),
+    ) {
+        Column(
+            Modifier.fillMaxSize().imePadding().navigationBarsPadding().padding(horizontal = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                Modifier.clip(RoundedCornerShape(22.dp))
-                    .background(Color.Black.copy(alpha = 0.42f), RoundedCornerShape(22.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(22.dp))
-                    .clickable(enabled = canSend) { boundService?.requestInterrupt() }
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                // 用项目已有的助手头像组件（不是主题吉祥物）。
-                Box(
-                    Modifier.size(30.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    UIAvatar(
-                        name = assistant?.name.orEmpty().ifBlank { "AI 助手" },
-                        modifier = Modifier.size(26.dp),
-                        value = assistant?.avatar ?: Avatar.Dummy,
-                        interactive = false,
-                        loading = false,
-                    )
+            // 顶部：折叠 + 「视频通话」+ 礼物计数
+            Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                GlassTextChip(label = "↙", ink = colors.ink, onClick = onBack)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "视频通话",
+                    Modifier.background(Color.White.copy(alpha = .65f), CircleShape)
+                        .border(1.dp, Color.White, CircleShape)
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.ink,
+                )
+                Spacer(Modifier.weight(1f))
+                if (panelState.tally.total > 0) {
+                    GlassTextChip(label = "🎁 ${panelState.tally.total}", ink = colors.ink, onClick = null)
+                } else {
+                    Spacer(Modifier.size(36.dp))
                 }
-                Column {
+            }
+
+            // 身份行：头像 + 名字 + 状态·时长；点一下打断当前生成/朗读（保留原有打断入口）。
+            Row(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color.White.copy(alpha = .45f), RoundedCornerShape(22.dp))
+                    .border(1.dp, Color.White.copy(alpha = .8f), RoundedCornerShape(22.dp))
+                    .clickable(enabled = canSend) { boundService?.requestInterrupt() }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                UIAvatar(
+                    name = assistant?.name.orEmpty().ifBlank { "AI 助手" },
+                    modifier = Modifier.size(34.dp),
+                    value = assistant?.avatar ?: Avatar.Dummy,
+                    interactive = false,
+                    loading = false,
+                )
+                Column(Modifier.weight(1f)) {
                     Text(
-                        text = assistant?.name?.ifBlank { "AI 助手" } ?: "AI 助手",
-                        color = Color.White,
-                        fontSize = 13.sp,
+                        assistant?.name?.ifBlank { "AI 助手" } ?: "AI 助手",
+                        color = colors.ink,
+                        fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                     )
                     Text(
-                        text = "${callStatusLabel(callState.status)} · $duration",
-                        color = Color.White.copy(alpha = 0.72f),
-                        fontSize = 10.sp,
+                        "${callStatusLabel(callState.status)} · $duration",
+                        color = colors.ink.copy(alpha = .7f),
+                        fontSize = 11.sp,
                         maxLines = 1,
                     )
                 }
+                // 音频路由：外放 / 听筒。与"麦克风开闭"是两个不同的开关，绝不重复同一个开关。
+                GlassTextChip(
+                    label = if (callState.isSpeakerOn) "外放" else "听筒",
+                    ink = colors.ink,
+                    onClick = if (canSend) ({ boundService?.toggleSpeaker() }) else null,
+                )
+                Text(
+                    "打断",
+                    Modifier.clip(CircleShape)
+                        .background(Color.White.copy(alpha = .55f), CircleShape)
+                        .border(1.dp, Color.White.copy(alpha = .9f), CircleShape)
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    color = colors.ink.copy(alpha = if (canSend) .9f else .35f),
+                    fontSize = 11.sp,
+                )
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (panelState.tally.total > 0) {
-                    GlassChip("🎁 ${panelState.tally.total}")
-                }
-                GlassChip(label = "⇄", onClick = { if (shouldBindCamera) cameraController.switchCamera() })
-                GlassChip(label = "📸", onClick = { clipFrame() })
-                GlassChip(label = "✕", tint = Color(0xFFFFA6BE), onClick = { hangUp() })
-            }
-        }
 
-        Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .padding(bottom = 86.dp).padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
+            // 镜头：始终可见，但只占一张圆角卡，不再铺满整屏。
+            Box(
+                Modifier.fillMaxWidth().weight(1.15f)
+                    .clip(RoundedCornerShape(26.dp))
+                    .background(Color(0xFF1E2A33), RoundedCornerShape(26.dp))
+                    .border(1.5.dp, Color.White.copy(alpha = .85f), RoundedCornerShape(26.dp)),
+            ) {
+                CameraPreviewSurface(
+                    controller = cameraController,
+                    transform = previewTransform,
+                    modifier = Modifier.matchParentSize(),
+                )
+                if (!previewing) {
+                    CameraOffCard(
+                        status = cameraStatusState,
+                        permissionGranted = cameraGranted,
+                        onRequestPermission = { cameraPermission.requestPermissions() },
+                        modifier = Modifier.matchParentSize(),
+                    )
+                }
+                // 方向校准：只转预览画面，不动抓帧/照片的方向。
+                // 真机（OPPO/ColorOS 竖屏后摄）画面左转 90°，默认 +90° 已经补正；
+                // 这里把角度直接写在按钮中间，点一次就能看出转没转对，也能往回转/复位。
+                PreviewCalibrationControls(
+                    degrees = previewCalibrationDegrees,
+                    onRotateLeft = {
+                        applyPreviewCalibration(PreviewCalibration.rotateLeft(previewCalibrationDegrees))
+                    },
+                    onRotateRight = {
+                        applyPreviewCalibration(PreviewCalibration.rotateRight(previewCalibrationDegrees))
+                    },
+                    onReset = { applyPreviewCalibration(PreviewCalibration.reset()) },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                )
+            }
+
+            // 常驻文字：LazyColumn + 稳定 id + 有界历史，可上下回看，不会 6 秒就消失。
+            CallTranscriptList(
+                lines = panelState.history,
+                colors = colors,
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            )
+
             if (otherCallActive) {
                 Text(
                     "另一个会话正在通话中。这里不会发送消息，也不会控制那通电话；请先挂断它。",
-                    Modifier.clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF3A1520).copy(alpha = 0.78f))
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFFFFD9E1).copy(alpha = .8f), RoundedCornerShape(14.dp))
                         .padding(horizontal = 10.dp, vertical = 6.dp),
-                    color = Color(0xFFFFC2CE),
+                    color = Color(0xFF8A2340),
                     fontSize = 11.sp,
                 )
             }
             notice?.let {
                 Text(
                     it,
-                    Modifier.clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = 0.6f))
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = .6f), RoundedCornerShape(14.dp))
                         .padding(horizontal = 10.dp, vertical = 5.dp),
-                    color = Color.White.copy(alpha = 0.85f),
+                    color = colors.ink.copy(alpha = .85f),
                     fontSize = 11.sp,
                 )
             }
             callState.errorMessage?.takeIf { it.isNotBlank() }?.let { error ->
                 Text(
                     error,
-                    Modifier.clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF3A1520).copy(alpha = 0.72f))
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFFFFD9E1).copy(alpha = .7f), RoundedCornerShape(14.dp))
                         .padding(horizontal = 10.dp, vertical = 5.dp),
-                    color = Color(0xFFFFC2CE),
+                    color = Color(0xFF8A2340),
                     fontSize = 11.sp,
                 )
             }
             if (!micGranted) {
                 Text(
                     "麦克风未开启，当前是纯文字模式",
-                    Modifier.clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = 0.6f))
+                    Modifier.clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = .6f), RoundedCornerShape(14.dp))
                         .padding(horizontal = 10.dp, vertical = 5.dp),
-                    color = Color.White.copy(alpha = 0.8f),
+                    color = colors.ink.copy(alpha = .8f),
                     fontSize = 11.sp,
                 )
             }
             if (pendingFrameAt != null) {
                 Text(
                     "📸 已夹住一帧，会随下一句发送",
-                    Modifier.clip(RoundedCornerShape(12.dp)).background(Color.Black.copy(alpha = 0.6f))
+                    Modifier.clip(RoundedCornerShape(14.dp))
+                        .background(Color.White.copy(alpha = .6f), RoundedCornerShape(14.dp))
                         .padding(horizontal = 10.dp, vertical = 5.dp),
-                    color = Color.White.copy(alpha = 0.85f),
+                    color = colors.ink.copy(alpha = .85f),
                     fontSize = 11.sp,
                 )
             }
-            FloatingDanmaku(
-                lines = panelState.bubbles,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-
-        Row(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().imePadding().navigationBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(22.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(22.dp))
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            BasicTextField(
-                value = input,
-                onValueChange = { input = it.take(200) },
-                modifier = Modifier.weight(1f),
-                enabled = !otherCallActive,
-                textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
-                cursorBrush = SolidColor(Color.White),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { sendText() }),
-                decorationBox = { inner ->
-                    if (input.isEmpty()) {
-                        Text("说点什么…", color = Color.White.copy(alpha = 0.45f), fontSize = 14.sp)
-                    }
-                    inner()
-                },
-            )
-            AudioToggleChip(
-                muted = callState.isMuted,
-                enabled = canSend,
-                onToggle = { boundService?.toggleMute() },
-            )
-            Box(
-                Modifier.clip(CircleShape)
-                    .background(Color.White.copy(alpha = if (input.isBlank() || !canSend) 0.12f else 0.9f))
-                    .clickable(enabled = input.isNotBlank() && canSend) { sendText() }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) {
+            // 手动录音这一段的状态：录音中显示时长上限，不可用时**必须**说清原因（不假装在听）。
+            if (voiceInput.isRecording || voiceInput.isBusy || voiceInput.endedByLimit) {
+                VoiceRecordingBanner(voiceInput, colors)
+            }
+            if (voiceInput.status == VideoVoiceStatus.Unavailable && voiceInput.reason.isNotBlank()) {
                 Text(
-                    "发送",
-                    color = if (input.isBlank() || !canSend) Color.White.copy(alpha = 0.4f) else Color(0xFF1B1B22),
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    voiceInput.reason,
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFFFFD9E1).copy(alpha = .6f), RoundedCornerShape(14.dp))
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    color = Color(0xFF8A2340),
+                    fontSize = 11.sp,
                 )
             }
+
+            // 控制行放在输入框**上面**：键盘弹起时先被压缩的是上面的列表，控制不会被挤掉。
+            Row(
+                Modifier.fillMaxWidth()
+                    .background(Color.White.copy(alpha = .45f), RoundedCornerShape(26.dp))
+                    .border(1.dp, Color.White.copy(alpha = .8f), RoundedCornerShape(26.dp))
+                    .padding(vertical = 8.dp, horizontal = 6.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GlassCallAction(
+                    icon = null,
+                    emoji = "⇄",
+                    label = "切前后",
+                    tint = colors.accent,
+                    enabled = shouldBindCamera,
+                    onClick = { cameraController.switchCamera() },
+                )
+                GlassCallAction(
+                    icon = null,
+                    emoji = "📸",
+                    label = "抓帧",
+                    tint = colors.accent,
+                    enabled = cameraStatusState.isPreviewing && shouldBindCamera,
+                    onClick = { clipFrame() },
+                )
+                // 录音：同一颗按钮既是"开始录音"也是"结束并发送"。转写中/发送中禁用（防重复提交）。
+                GlassCallAction(
+                    icon = if (voiceInput.isRecording) HugeIcons.Stop else HugeIcons.Record,
+                    emoji = null,
+                    label = VideoVoicePolicy.buttonLabel(voiceInput),
+                    tint = if (voiceInput.isRecording) Color(0xFFCF5C7A) else colors.accent,
+                    enabled = canSend && voiceInput.route != null &&
+                        (voiceInput.status == VideoVoiceStatus.Idle || voiceInput.isRecording),
+                    onClick = { boundService?.toggleVideoVoiceInput() },
+                )
+                // 麦克风：真正的 Mic01/MicOff01 图标 + 中文状态。闭麦会取消未发送的那一段（不自动提交）。
+                GlassCallAction(
+                    icon = if (callState.isMuted) HugeIcons.MicOff01 else HugeIcons.Mic01,
+                    emoji = null,
+                    label = if (callState.isMuted) "已闭麦" else "麦克风",
+                    tint = if (callState.isMuted) Color(0xFF9C3352) else colors.accent,
+                    enabled = canSend,
+                    onClick = { boundService?.toggleMute() },
+                )
+                GlassCallAction(
+                    icon = HugeIcons.Cancel01,
+                    emoji = null,
+                    label = "挂断",
+                    tint = Color(0xFFCF5C7A),
+                    enabled = true,
+                    onClick = { hangUp() },
+                )
+            }
+
+            // 输入框常驻：键盘弹起时整列一起上移，不会被挡住。
+            // 注意：麦克风开关只在上面那颗按钮上出现**一次**，这里不再重复第二个同样的开关。
+            Row(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(Color.White.copy(alpha = .72f), RoundedCornerShape(22.dp))
+                    .border(1.dp, Color.White.copy(alpha = .95f), RoundedCornerShape(22.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                BasicTextField(
+                    value = input,
+                    onValueChange = { input = it.take(200) },
+                    modifier = Modifier.weight(1f),
+                    enabled = !otherCallActive,
+                    textStyle = TextStyle(color = colors.ink, fontSize = 14.sp),
+                    cursorBrush = SolidColor(colors.accent),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { sendText() }),
+                    decorationBox = { inner ->
+                        if (input.isEmpty()) {
+                            Text("说点什么…", color = colors.ink.copy(alpha = .45f), fontSize = 14.sp)
+                        }
+                        inner()
+                    },
+                )
+                Box(
+                    Modifier.clip(CircleShape)
+                        .background(
+                            if (input.isBlank() || !canSend) colors.ink.copy(alpha = .12f)
+                            else colors.accent,
+                            CircleShape,
+                        )
+                        .clickable(enabled = input.isNotBlank() && canSend) { sendText() }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "发送",
+                        color = if (input.isBlank() || !canSend) colors.ink.copy(alpha = .4f) else Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            Spacer(Modifier.size(2.dp))
         }
-        if (otherCallActive) {
-            Text(
-                "另一个会话正在通话",
-                Modifier.align(Alignment.Center).padding(horizontal = 24.dp)
-                    .clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.72f))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                color = Color.White.copy(alpha = 0.88f),
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
-                textAlign = TextAlign.Center,
-            )
-        }
+
+        VideoGiftEffectOverlay(activeEffect, Modifier.fillMaxSize())
     }
 }
 
@@ -686,51 +847,66 @@ private fun serviceUsableSend(service: VoiceCallService?, text: String): Boolean
     service?.submitTypedText(text) == true
 
 /**
- * 真正"上浮 + 淡出"的弹幕：每条按到达时间做生命周期动画，同屏最多 [DANMAKU_MAX_VISIBLE] 条，
- * 过期就从布局里消失，不会越堆越多。
+ * 常驻字幕列表。
+ *
+ * 真机反馈的两条硬要求都在这里：
+ * 1. 文字**常驻可回看**：不再 6 秒淡出、不再只留最后 6 条；
+ * 2. 长通话不炸内存：行来自服务侧 `history`（有界 400 条、稳定 id），列表用 LazyColumn，
+ *    只有可见行才组合。
+ *
+ * 自动贴底只在**用户本来就在底部**时发生：手动往上翻看旧内容时，新一句话不会把他拽回底部。
  */
 @Composable
-private fun FloatingDanmaku(
+private fun CallTranscriptList(
     lines: List<DanmakuLine>,
+    colors: InteractionColors,
     modifier: Modifier = Modifier,
 ) {
-    val visible = lines.takeLast(DANMAKU_MAX_VISIBLE)
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(visible.isNotEmpty()) {
-        while (visible.isNotEmpty()) {
-            now = System.currentTimeMillis()
-            delay(80L)
+    val listState = rememberLazyListState()
+    val count = lines.size
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
+            last >= info.totalItemsCount - 1
         }
     }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        visible.forEach { line ->
-            val progress = ((now - line.atMillis).toFloat() / DANMAKU_LIFETIME_MS).coerceIn(0f, 1f)
-            if (progress >= 1f) return@forEach
-            val alpha = when {
-                progress < 0.1f -> progress / 0.1f
-                progress > 0.72f -> (1f - progress) / 0.28f
-                else -> 1f
-            }.coerceIn(0f, 1f)
+    LaunchedEffect(count) {
+        if (count > 0 && atBottom) listState.animateScrollToItem(count - 1)
+    }
+    if (lines.isEmpty()) {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Text(
+                "开始说话，文字会留在这里，可以随时往上翻。",
+                color = colors.ink.copy(alpha = .45f),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+            )
+        }
+        return
+    }
+    LazyColumn(
+        modifier = modifier,
+        state = listState,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(lines, key = { it.id }) { line ->
             Row(
-                Modifier.fillMaxWidth()
-                    .graphicsLayer {
-                        this.alpha = alpha
-                        translationY = -(progress * 26.dp.toPx())
-                    },
+                Modifier.fillMaxWidth(),
                 horizontalArrangement = if (line.fromUser) Arrangement.End else Arrangement.Start,
             ) {
                 Text(
                     text = line.text,
-                    modifier = Modifier.widthIn(max = 280.dp)
+                    modifier = Modifier.widthIn(max = 290.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .background(
-                            if (line.fromUser) Color(0xFF2B2B33).copy(alpha = 0.78f)
-                            else Color.Black.copy(alpha = 0.66f),
+                            if (line.fromUser) colors.accent.copy(alpha = .22f)
+                            else Color.White.copy(alpha = .68f),
                             RoundedCornerShape(16.dp),
                         )
-                        .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = .9f), RoundedCornerShape(16.dp))
                         .padding(horizontal = 12.dp, vertical = 8.dp),
-                    color = Color.White,
+                    color = colors.ink,
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
                 )
@@ -739,6 +915,149 @@ private fun FloatingDanmaku(
     }
 }
 
+/** 圆角小玻璃片（文字）。 */
+@Composable
+private fun GlassTextChip(label: String, ink: Color, onClick: (() -> Unit)?) {
+    Box(
+        Modifier.clip(CircleShape)
+            .background(Color.White.copy(alpha = .55f), CircleShape)
+            .border(1.dp, Color.White.copy(alpha = .9f), CircleShape)
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+            .padding(horizontal = 11.dp, vertical = 7.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * 底部的图标 + 中文小字动作（与语音页 GlassCallButton 同一套观感）。
+ *
+ * [emoji] 与 [icon] 二选一：切镜头/抓帧暂时用符号，麦克风/挂断用真正的图标
+ * （Mic01/MicOff01/Cancel01），避免再用 🔇/🎙 这种"看不出是静音还是没开"的写法。
+ */
+@Composable
+private fun GlassCallAction(
+    icon: ImageVector?,
+    emoji: String?,
+    label: String,
+    tint: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Column(
+        Modifier.clip(RoundedCornerShape(16.dp))
+            .then(if (enabled) Modifier.clickable { onClick() } else Modifier)
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Box(
+            Modifier.size(42.dp)
+                .background(tint.copy(alpha = if (enabled) .28f else .12f), CircleShape)
+                .border(1.dp, Color.White.copy(alpha = .8f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = if (enabled) tint else tint.copy(alpha = .4f),
+                    modifier = Modifier.size(20.dp),
+                )
+            } else {
+                Text(emoji ?: "", fontSize = 17.sp, color = tint.copy(alpha = if (enabled) 1f else .4f))
+            }
+        }
+        Text(
+            label,
+            color = tint.copy(alpha = if (enabled) .95f else .4f),
+            fontSize = 10.sp,
+        )
+    }
+}
+
+/**
+ * 手动录音的状态条：录音中显示"已录多久 / 上限多少 + 再点一次才发送"，
+ * 转写中/发送中/已到上限都明确写出来，绝不用"正在聆听"这种含糊或骗人的说法。
+ */
+@Composable
+private fun VoiceRecordingBanner(voice: VideoVoiceUiState, colors: InteractionColors) {
+    val text = when {
+        voice.isRecording ->
+            "🔴 正在录：${VideoVoicePolicy.formatDuration(voice.elapsedMs)} / " +
+                "${voice.maxDurationMs / 1000}秒 · 再点一次结束并发送（不会自动发）"
+
+        voice.status == VideoVoiceStatus.Transcribing -> "⏳ 正在转写，等最后一段文字…"
+        voice.status == VideoVoiceStatus.Sending -> "📤 发送中…"
+        voice.endedByLimit -> "⏱️ 已到 ${voice.maxDurationMs / 1000} 秒上限，这一段已自动结束并发送"
+        else -> VideoVoicePolicy.hintLabel(voice)
+    }
+    Text(
+        text,
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(Color.White.copy(alpha = .62f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        color = colors.ink.copy(alpha = .85f),
+        fontSize = 11.sp,
+    )
+}
+/**
+ * 预览卡右下角的方向校准小控件：`↺ 左转 | 90° | ↻ 右转 | 复位`。
+ *
+ * 为什么要有它：camera2 buffer 朝向 + `TextureView` 默认拉伸 + 生产者隐式变换的真实符号
+ * 约定只能靠真机确认。实测 OPPO/ColorOS 竖屏后摄画面左转 90°，点一次「右转」即可转正；
+ * 转多了就点「左转」回退，或「复位」回到不做人工校准。
+ *
+ * 它**只改预览矩阵**：抓帧/落盘 JPEG 的方向由 sensor/display 几何单独决定，不受影响。
+ * 角度来源是设置（持久化），所以换镜头、退后台再进来仍然是这个角度。
+ */
+@Composable
+private fun PreviewCalibrationControls(
+    degrees: Int,
+    onRotateLeft: () -> Unit,
+    onRotateRight: () -> Unit,
+    onReset: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier.clip(RoundedCornerShape(18.dp))
+            .background(Color.White.copy(alpha = .86f), RoundedCornerShape(18.dp))
+            .border(1.dp, Color.White, RoundedCornerShape(18.dp))
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        PreviewCalibrationButton("↺", "预览左转 90°", onRotateLeft)
+        Text(
+            PreviewCalibration.label(degrees),
+            color = Color(0xFF2F4858),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 2.dp),
+        )
+        PreviewCalibrationButton("↻", "预览右转 90°", onRotateRight)
+        PreviewCalibrationButton("复位", "预览方向复位", onReset)
+    }
+}
+
+/** 校准控件里的单个小按钮（玻璃风格，与预览卡同一套观感）。 */
+@Composable
+private fun PreviewCalibrationButton(
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Text(
+        label,
+        Modifier.clip(RoundedCornerShape(12.dp))
+            .clickable(onClickLabel = contentDescription) { onClick() }
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        color = Color(0xFF2F4858),
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+}
 /**
  * 预览：TextureView + 显式变换矩阵。
  *
@@ -758,6 +1077,10 @@ private fun CameraPreviewSurface(
     transform: PreviewTransform,
     modifier: Modifier = Modifier,
 ) {
+    // 回调里要读到**当前**的矩阵：AndroidView 的 update 只在状态变化时跑一次，
+    // 而 SurfaceTexture 回调可能在视图尺寸就绪/变化时后到。两边都套一遍，
+    // 才不会出现"矩阵算对了但没落到 TextureView 上"（真机表现为侧躺 90°）。
+    val latestTransform = rememberUpdatedState(transform)
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -766,10 +1089,12 @@ private fun CameraPreviewSurface(
                     override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
                         // 是否立刻开相机由门禁决定；控制器的 Surface 所有权在 detach 时释放。
                         controller.attachSurface(texture, width, height)
+                        applyPreviewTransform(this@apply, latestTransform.value, width, height)
                     }
 
                     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
                         controller.updateViewSize(width, height)
+                        applyPreviewTransform(this@apply, latestTransform.value, width, height)
                     }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
@@ -793,43 +1118,56 @@ private fun CameraPreviewSurface(
  * [VideoPreviewGeometry.textureViewAffine]），这里只做一次坐标转换，不再自己拼旋转/缩放，
  * 否则就等于把几何算错两次。
  */
-private fun applyPreviewTransform(view: TextureView, transform: PreviewTransform) {
-    if (view.width <= 0 || view.height <= 0) return
-    view.setTransform(transform.matrix.toAndroidMatrix())
+private fun applyPreviewTransform(
+    view: TextureView,
+    transform: PreviewTransform,
+    width: Int = view.width,
+    height: Int = view.height,
+) {
+    if (width <= 0 || height <= 0) return
+    runCatching { view.setTransform(transform.matrix.toAndroidMatrix()) }
 }
 
+/**
+ * 镜头没起来时的提示：**只在这张预览卡内部**说明原因。
+ *
+ * 旧实现用整屏黑底 + 覆盖全屏的黑色渐变把明亮玻璃控件压成黑底白字；现在相机不可用
+ * 只是卡片里的一段说明，页面其余部分仍然是明亮主题。
+ */
 @Composable
-private fun BlackStage(
+private fun CameraOffCard(
     status: VideoCameraStatus,
     permissionGranted: Boolean,
     onRequestPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+    Box(
+        modifier.background(Brush.verticalGradient(listOf(Color(0xFF23323D), Color(0xFF2E4152)))),
+        contentAlignment = Alignment.Center,
+    ) {
         Column(
-            Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 32.dp),
+            Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("镜头未开启", color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("镜头未开启", color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text(
                 cameraStatusReason(status),
-                color = Color.White.copy(alpha = 0.6f),
+                color = Color.White.copy(alpha = 0.68f),
                 fontSize = 12.sp,
                 lineHeight = 17.sp,
                 textAlign = TextAlign.Center,
             )
             Text(
-                "文字、弹幕和礼物仍然可用",
+                "文字、礼物和留影照常可用",
                 color = Color.White.copy(alpha = 0.5f),
                 fontSize = 11.sp,
                 textAlign = TextAlign.Center,
             )
             if (!permissionGranted) {
-                Spacer(Modifier.size(4.dp))
                 Box(
-                    Modifier.clip(RoundedCornerShape(18.dp)).background(Color.White.copy(alpha = 0.14f))
-                        .border(1.dp, Color.White.copy(alpha = 0.24f), RoundedCornerShape(18.dp))
+                    Modifier.clip(RoundedCornerShape(18.dp)).background(Color.White.copy(alpha = 0.18f))
+                        .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(18.dp))
                         .clickable { onRequestPermission() }
                         .padding(horizontal = 16.dp, vertical = 9.dp),
                 ) {
@@ -849,44 +1187,16 @@ private fun cameraStatusReason(status: VideoCameraStatus): String = when (status
     VideoCameraState.Previewing -> ""
 }
 
-@Composable
-private fun AudioToggleChip(muted: Boolean, enabled: Boolean, onToggle: () -> Unit) {
-    Box(
-        Modifier.clip(CircleShape)
-            .background(Color.White.copy(alpha = if (enabled) 0.16f else 0.08f), CircleShape)
-            .clickable(enabled = enabled) { onToggle() }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            if (muted) "🔇" else "🎙",
-            fontSize = 14.sp,
-            color = Color.White.copy(alpha = if (enabled) 0.9f else 0.4f),
-        )
-    }
-}
 
-@Composable
-private fun GlassChip(
-    label: String,
-    tint: Color = Color.White,
-    onClick: (() -> Unit)? = null,
-) {
-    Box(
-        Modifier.clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.42f), CircleShape)
-            .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
-            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(label, color = tint, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
+/**
+ * 状态文案。
+ *
+ * 视频通话是**手动**采音，所以 `Listening` 在这里不能显示成"正在聆听"——
+ * 那会让人以为麦克风一直在录。它只表示"在线、可以点录音也可以打字"。
+ */
 private fun callStatusLabel(status: me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus): String = when (status) {
     me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Idle -> "准备就绪"
-    me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Listening -> "正在聆听"
+    me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Listening -> "在线"
     me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Processing -> "正在思考"
     me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Speaking -> "正在说话"
     me.rerere.rikkahub.ui.pages.voice.VoiceCallStatus.Error -> "出错了"

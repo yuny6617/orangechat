@@ -57,4 +57,49 @@ class VideoDanmakuTest {
         assertTrue(stream.flush("").isEmpty())
         assertTrue(stream.flush("   ").isEmpty())
     }
+
+    /**
+     * 常驻历史（真机要求"文字常驻可回看"）的边界：内容按顺序保留、只截掉最旧的、
+     * 稳定 id 不重建。这几条同时是"长通话不会无限攒字符串"的证据。
+     */
+    @Test
+    fun `常驻历史保留顺序并只截掉最旧的`() {
+        var history = emptyList<DanmakuLine>()
+        repeat(5) { index ->
+            history = history.appendBounded(
+                DanmakuLine(id = "line-$index", fromUser = index % 2 == 0, text = "第 $index 句", atMillis = index.toLong()),
+                limit = 3,
+            )
+        }
+        assertEquals(listOf("line-2", "line-3", "line-4"), history.map { it.id })
+        assertEquals("第 4 句", history.last().text)
+    }
+
+    @Test
+    fun `常驻历史在未超上限时逐条追加`() {
+        val first = DanmakuLine("a", true, "一", 1L)
+        val second = DanmakuLine("b", false, "二", 2L)
+        val two = emptyList<DanmakuLine>().appendBounded(first, 10).appendBounded(second, 10)
+        assertEquals(listOf("a", "b"), two.map { it.id })
+    }
+
+    @Test
+    fun `常驻历史上限非法时退化成空而不是无限增长`() {
+        var history = emptyList<DanmakuLine>()
+        repeat(3) { index ->
+            history = history.appendBounded(DanmakuLine("x$index", false, "字", index.toLong()), limit = 0)
+        }
+        assertTrue(history.isEmpty())
+    }
+
+    /** 同一句话被流式改写时用同一个 key 顶替，历史里不会出现两条同 id（LazyColumn key 冲突）。 */
+    @Test
+    fun `流式改写用稳定 id 不会产生重复 key`() {
+        val key = "assistant:1:0"
+        val history = emptyList<DanmakuLine>()
+            .appendBounded(DanmakuLine(key, false, "半句", 1L), 10)
+        val updated = history.dropLast(1) + DanmakuLine(key, false, "完整的一句", 1L)
+        assertEquals(1, updated.count { it.id == key })
+        assertEquals("完整的一句", updated.single().text)
+    }
 }

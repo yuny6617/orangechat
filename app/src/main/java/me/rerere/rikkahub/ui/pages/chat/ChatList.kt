@@ -112,6 +112,7 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.interaction.MessageReaction
 import me.rerere.rikkahub.data.interaction.avatarInteraction
+import me.rerere.rikkahub.data.interaction.withoutVideoCallCardMessages
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.message.ChatMessage
 import me.rerere.rikkahub.utils.repliedUserMessageIds
@@ -348,16 +349,25 @@ private fun ChatListNormal(
         }
         val displayNodes = remember(conversation.messageNodes, conversation.compressionRevision, showCompressedHistory) {
             val legacyGiftFollowups = me.rerere.rikkahub.data.interaction.legacyGiftFollowupIds(conversation.currentMessages)
+            val visibleForDisplay =
+                (if (showCompressedHistory) conversation.messageNodes else conversation.visibleMessageNodes).map { it.currentMessage }
+            // 视频通话卡吸收的逐条消息（**只影响显示**）。
+            // 关联来自卡上的持久字段 `videoCallMessageIds`：没写关联的老数据 / 语音通话 / 卡被删
+            // 一律为空，于是这些消息照常显示。上下文（messagesForGeneration）一个字节都不改。
+            val videoCallCovered = me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(visibleForDisplay)
             me.rerere.rikkahub.data.interaction.interactionDisplayNodes(
                 if (showCompressedHistory) conversation.messageNodes else conversation.visibleMessageNodes
-            ).filter { node ->
-                val msg = node.currentMessage
-                val text = msg.toText().trim()
-                msg.id !in legacyGiftFollowups &&
-                msg.annotations.filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction>().none { it.id in inlineCards } &&
-                !(msg.role == MessageRole.ASSISTANT && text == "[SKIP]") &&
-                !(msg.role == MessageRole.USER && text.contains("[主动消息上下文]"))
-            }
+            )
+                // 视频通话卡吸收的纯文字气泡：只在显示层去掉，上下文原文一个字节都不动。
+                .withoutVideoCallCardMessages(videoCallCovered)
+                .filter { node ->
+                    val msg = node.currentMessage
+                    val text = msg.toText().trim()
+                    msg.id !in legacyGiftFollowups &&
+                    msg.annotations.filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction>().none { it.id in inlineCards } &&
+                    !(msg.role == MessageRole.ASSISTANT && text == "[SKIP]") &&
+                    !(msg.role == MessageRole.USER && text.contains("[主动消息上下文]"))
+                }
         }
 
         val compressionDividers = remember(conversation, displayNodes, showCompressedHistory) {

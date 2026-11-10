@@ -27,6 +27,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.video.DanmakuLine
+import me.rerere.rikkahub.data.video.appendBounded
 import me.rerere.rikkahub.data.video.DanmakuStream
 import me.rerere.rikkahub.data.video.FramePersistence
 import me.rerere.rikkahub.data.video.FrameFileOwnership
@@ -37,17 +38,31 @@ import me.rerere.rikkahub.data.video.VideoCallSetting
 import me.rerere.rikkahub.data.video.VideoFrame
 import me.rerere.rikkahub.data.video.VideoFramePolicy
 import me.rerere.rikkahub.data.video.VideoFrameStore
+import me.rerere.rikkahub.data.video.VideoGiftCustomization
 import me.rerere.rikkahub.data.video.VideoGiftEvent
 import me.rerere.rikkahub.data.video.VideoGiftTally
 import me.rerere.rikkahub.data.video.VideoSnapshotRequest
 import me.rerere.rikkahub.data.video.giftSummaryLine
+import me.rerere.rikkahub.data.video.videoCallContextFromSetting
 import kotlin.uuid.Uuid
 
 /** 视频面板用的通话侧状态（相机状态由面板自己的控制器维护）。 */
 internal data class VideoCallPanelState(
     val active: Boolean = false,
     val visionSupported: Boolean = true,
+    /**
+     * 最近几条"上浮气泡"（有寿命、会淡出）。只用于需要动画的旧位置；
+     * 面板正文改成 [history] 那种常驻可回看的列表。
+     */
     val bubbles: List<DanmakuLine> = emptyList(),
+    /**
+     * 这一通电话到目前为止的**全部**文字（有界：最多 [MAX_HISTORY_LINES] 条）。
+     *
+     * 是真机反馈的直接产物：原来面板上只有 6 条、6 秒就消失的气泡，用户没法回看
+     * "刚才那句到底说了什么"。这里保留稳定 id + 有界缓存，面板用 LazyColumn 渲染，
+     * 滚动/回看都不再依赖动画寿命；真正持久的那份仍然是通话记录卡里的 transcript。
+     */
+    val history: List<DanmakuLine> = emptyList(),
     val tally: VideoGiftTally = VideoGiftTally(),
     val latestGift: me.rerere.rikkahub.data.video.VideoGift? = null,
     val notice: String? = null,
@@ -159,21 +174,29 @@ internal class VideoCallCoordinator(
      * 一轮请求要注入的视频上下文。
      *
      * [pictureAttached] 必须是**本轮实际有没有附图**的结果，不能只看 cameraAvailable。
+     * [audioAttached] 同理：只有音频直传路线真的把这一段录音挂上去时才为 true
+     * （ASR 路线只有文字、录音被取消/暂停时也没有音频）。
      * [includeTurnNotes] 为 false 时不消费本轮备注，用于生成"附图说明被摘掉之后"的兜底文案
      * （同一份备注不能被两个变体各消费一次）。
      */
-    fun turnContext(pictureAttached: Boolean, includeTurnNotes: Boolean = true): String {
+    fun turnContext(
+        pictureAttached: Boolean,
+        includeTurnNotes: Boolean = true,
+        audioAttached: Boolean = false,
+    ): String {
         val current = setting()
         val cameraAvailable = VideoCallRuntime.cameraAvailable()
         val vision = visionSupported()
-        val context = VideoCallContext(
+        // 上下文的拼装是纯逻辑（[videoCallContextFromSetting]）：设置里的自定义礼物名/赠礼文案
+        // 在这里进入提示词，不在这里再判断一次。
+        val context = videoCallContextFromSetting(
+            setting = current,
             cameraAvailable = cameraAvailable,
-            cameraUnavailableReason = if (cameraAvailable) "" else VideoCallRuntime.cameraUnavailableReason(),
+            cameraUnavailableReason = VideoCallRuntime.cameraUnavailableReason(),
             visionSupported = vision,
-            giftsEnabled = current.giftsEnabled,
-            captureMode = current.frameCaptureMode,
+            pictureAttached = pictureAttached,
+            audioAttached = audioAttached,
             giftsSent = VideoCallRuntime.tally(),
-            pictureAttached = pictureAttached && vision,
         )
         val notes = if (includeTurnNotes) takeTurnNotes() else emptyList()
         return (listOf(VideoCallPrompts.turnContext(context)) + notes).filter { it.isNotBlank() }.joinToString("\n\n")
@@ -278,7 +301,9 @@ internal class VideoCallCoordinator(
         }
     }
 
-    fun giftSummary(): String = giftSummaryLine(VideoCallRuntime.tally())
+    /** 结束通话卡上的礼物汇总：名字用**这一刻**的设置（历史卡上的字符串不会回改）。 */
+    fun giftSummary(): String =
+        giftSummaryLine(VideoCallRuntime.tally(), VideoGiftCustomization.sanitizedNames(setting()))
 
     fun notify(text: String?) {
         _state.update { it.copy(notice = text) }
@@ -306,7 +331,11 @@ internal class VideoCallCoordinator(
 
     private fun appendBubble(line: DanmakuLine) {
         _state.update { current ->
-            current.copy(bubbles = (current.bubbles + line).takeLast(MAX_BUBBLES))
+            current.copy(
+                bubbles = (current.bubbles + line).takeLast(MAX_BUBBLES),
+                // 常驻历史用同一批行（同一个稳定 id），只是不做寿命淘汰，只做有界截断。
+                history = current.history.appendBounded(line, MAX_HISTORY_LINES),
+            )
         }
     }
 
@@ -317,11 +346,13 @@ internal class VideoCallCoordinator(
                 latestGift = event.gift,
             )
         }
+        // 气泡上的名字用当前设置（与提示词清单、结束卡汇总同一份取值顺序）。
+        val names = VideoGiftCustomization.sanitizedNames(setting())
         appendBubble(
             DanmakuLine(
                 id = "gift:${event.id}",
                 fromUser = false,
-                text = "${event.gift.emoji} ${event.gift.displayName}",
+                text = "${event.gift.emoji} ${VideoGiftCustomization.nameOf(names, event.gift)}",
                 atMillis = event.atMillis,
             ),
         )
@@ -422,6 +453,9 @@ internal class VideoCallCoordinator(
 
     private companion object {
         const val MAX_BUBBLES = 16
+
+        /** 面板常驻历史的条数上限（有界缓存；真正持久的记录在通话卡里）。 */
+        const val MAX_HISTORY_LINES = 400
         const val MAX_BUBBLE_CHARS = 140
         const val MAX_TURN_NOTES = 4
     }

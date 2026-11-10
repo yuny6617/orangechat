@@ -368,14 +368,18 @@ class ChatService(
     internal val pendingIncomingCall = MutableStateFlow<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction?>(null)
 
     fun finishInteractionCalls(conversationId: Uuid, startJob: Job? = null, startedAt: Long? = null,
-        transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null, giftSummary: String = "") {
+        transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null, giftSummary: String = "",
+        videoCall: Boolean = false, linkedUserMessageIds: List<String> = emptyList()) {
         val endedAt = System.currentTimeMillis()
         val connectingIds = getConversationFlow(conversationId).value.currentMessages.flatMap { it.annotations }
             .filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction>()
             .filter { it.kind == "call" && it.status == "connecting" }.map { it.id }.toSet()
         appScope.launch {
             startJob?.join()
-            runCatching { endChatInteractionCalls(conversationId, startedAt, endedAt, transcript, connectingIds, giftSummary) }
+            runCatching {
+                endChatInteractionCalls(conversationId, startedAt, endedAt, transcript, connectingIds, giftSummary,
+                    videoCall = videoCall, linkedUserMessageIds = linkedUserMessageIds)
+            }
         }
     }
     fun respondIncomingInteraction(conversationId: Uuid, action: String, onReady: () -> Unit) {
@@ -653,6 +657,14 @@ class ChatService(
          * 入队与授权要么一起成立，要么都不成立，不存在"回调失败但消息已经进队列"的中间态。
          */
         requestToken: String? = null,
+        /**
+         * 这一轮**只为本次请求**提供的一段录音（视频通话手动录的那一段）。
+         *
+         * 所有权在 [me.rerere.rikkahub.data.video.TransientAudioClip] 上：
+         * 请求开始（job 体）时认领，请求结束（正常/失败/取消）时释放并删除文件。
+         * 聊天历史里**不会**出现 audio part，所以下一轮不会再 base64 一次旧录音。
+         */
+        transientAudio: me.rerere.rikkahub.data.video.TransientAudioClip? = null,
     ): QueuedMessage? {
         if ((content.isEmptyInputMessage() && existingMessageId == null) || conversationId in deletedConversationIds) return null
         val session = getOrCreateSession(conversationId)
@@ -672,6 +684,7 @@ class ChatService(
                 transientImageUrls = transientImageUrls,
                 ownedImageUrls = ownedImageUrls,
                 requestToken = requestToken,
+                transientAudio = transientAudio,
             )
         } ?: return null
         queued.completion.invokeOnCompletion { cause ->
@@ -724,6 +737,11 @@ class ChatService(
         val transientImageAnchorMessageId = (queued.existingMessageId ?: queued.id).toString()
         // 这一轮的授权 token（视频通话）；非通话请求为 null。
         val requestToken = queued.requestToken
+        // 这一轮仅本次请求可用的录音（视频通话手动录音，直传路线）。
+        val transientAudio = queued.transientAudio
+        val audioOwnership = transientAudio?.let {
+            me.rerere.rikkahub.data.video.TransientAudioClip.RequestOwnership(it)
+        }
         // 用户一开口就立即撤销旧主动闹钟。新的休眠计时必须等本轮正常回复结束后再开始，
         // 避免 AI 正在聊天时主动器到点，也避免长回复吃掉休眠间隔。
         val currentProactiveSetting = settingsStore.settingsFlow.value.proactiveMessageSetting
@@ -749,6 +767,11 @@ class ChatService(
         val job = appScope.launch(start = CoroutineStart.LAZY) {
             var failure: Throwable? = null
             try {
+                // 录音的所有权先交给请求：在构造 provider payload 之前认领，
+                // 这样"重新派发队列/暂停/撤回"都不可能把正在序列化的文件删掉。
+                check(audioOwnership == null || audioOwnership.beginRequest()) {
+                    "本轮录音已释放或正被其他请求使用，已停止发送"
+                }
                 trace.stage("initializing conversation")
                 initializeConversation(conversationId, updateSelectedAssistant = false)
                 val settings = settingsStore.settingsFlow.first()
@@ -838,6 +861,9 @@ class ChatService(
                         transientImageUrls = transientImageUrls,
                         transientImageAnchorMessageId = transientImageAnchorMessageId,
                         requestToken = requestToken,
+                        // 音频锚点与图片锚点是同一条用户消息（队列项 ID）；工具多步不会把它顶掉。
+                        transientAudioUrl = transientAudio?.fileUrl,
+                        transientAudioAnchorMessageId = transientImageAnchorMessageId,
                     )
                     if (!completed) {
                         failure = IllegalStateException("生成失败，请检查会话中的错误信息")
@@ -875,6 +901,9 @@ class ChatService(
                 // 请求作用域结束：删除本次专用的临时帧（自动抓帧），聊天历史里只有文字。
                 // 临时帧的所有权始终在本请求，任何队列清理都不会提前删掉它们。
                 VideoFrameStore.deleteTransient(context, transientImageUrls)
+                // 这一轮的录音到此为止：请求结束（完成/失败/取消）后立刻删文件，
+                // 不留任何"受管音频"在磁盘上；历史里本来就只有占位文字。
+                audioOwnership?.release()
                 // 本次**新建**的永久帧（手动夹帧）：只有"从未被历史引用"才删。
                 // 落库了它就是历史的一部分（旧实现按目录删 parts 里的 Image，会把历史照片删掉）。
                 // claimDeletion 是幂等的 CAS：这个 finally 和下面的 invokeOnCompletion 兜底
@@ -913,6 +942,8 @@ class ChatService(
             // 连协程体都没跑起来就被取消：临时帧和授权都必须在这里收尾。
             if (cause != null) {
                 VideoFrameStore.deleteTransient(context, transientImageUrls)
+                // 未启动只释放 QUEUED；已启动只凭本 job 的认领释放，不能删其他请求的录音。
+                audioOwnership?.release()
                 if (frameOwnership.claimDeletion()) {
                     ownedImageUrls.forEach { url -> VideoFrameStore.deleteOwned(context, url) }
                 }
@@ -1451,6 +1482,9 @@ class ChatService(
         transientImageUrls: List<String> = emptyList(),
         transientImageAnchorMessageId: String? = null,
         requestToken: String? = null,
+        /** 这一轮仅本次请求可用的录音（视频通话直传）；历史里永远不存 audio part。 */
+        transientAudioUrl: String? = null,
+        transientAudioAnchorMessageId: String? = null,
     ): Boolean {
         diagnosticTrace?.stage("reading generation settings")
         val initialConversation = bindConversationConfig(conversationId)
@@ -1617,8 +1651,11 @@ class ChatService(
                 assistant = assistant,
                 conversationSystemPrompt = listOfNotNull(
                     conversation.customSystemPrompt?.takeIf { it.isNotBlank() },
-                    transientSystemPrompt?.takeIf { it.isNotBlank() },
+                    // 视频通话轮：这一轮的通话上下文走 appendedSystemContext（**追加**在主文后面），
+                    // 不再混进"对话级 prompt"里被 allowConversationSystemPrompt 开关整段丢掉。
+                    transientSystemPrompt?.takeIf { it.isNotBlank() && requestToken == null },
                 ).joinToString("\n\n").ifBlank { null },
+                appendedSystemContext = transientSystemPrompt?.takeIf { it.isNotBlank() && requestToken != null },
                 workspaceCwd = conversation.workspaceCwd,
                 memories = if (assistant.useGlobalMemory) {
                     memoryRepository.getGlobalMemories()
@@ -1667,6 +1704,9 @@ class ChatService(
                 // 视频通话自动抓帧：只作为本次请求的临时图片输入，不写聊天历史。
                 transientImageUrls = transientImageUrls,
                 transientImageAnchorMessageId = transientImageAnchorMessageId,
+                // 视频通话手动录音：只作为本次请求的临时音频输入，不写聊天历史。
+                transientAudioUrl = transientAudioUrl,
+                transientAudioAnchorMessageId = transientAudioAnchorMessageId,
                 requestToken = requestToken,
                 onReactionContextPrepared = { reactionTurn = it },
                 onToolCheckpoint = { checkpointMessages ->

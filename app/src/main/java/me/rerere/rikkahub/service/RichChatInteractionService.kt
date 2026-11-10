@@ -116,19 +116,80 @@ suspend fun ChatService.respondChatInteraction(conversationId: Uuid, id: String,
     }
 }
 
+/**
+ * 结束通话卡。
+ *
+ * [linkedUserMessageIds] 只对**视频通话**有意义：它是这通电话真正提交过的用户消息 id。
+ * 逐条消息 → 助手回复的关联在这里按队列同一套回复边界展开
+ * （见 [me.rerere.rikkahub.data.interaction.videoCallLinkedMessageIds]），
+ * 所以"哪些消息属于这通电话"不是按开始/结束时间猜的。
+ *
+ * 写入点在 `saveMutex` 里，和"标记 ended / 写 transcript"是**同一次**保存：
+ * - 不会出现"卡更新完、关联还没写"的半截状态；
+ * - 也不会用旧快照覆盖掉这期间新落库的消息（这里只改卡自己那条消息的注解）；
+ * - 同一条消息 id 会从本会话其它通话卡上摘掉（一条消息只属于一通电话）。
+ */
 internal suspend fun ChatService.endChatInteractionCalls(conversationId: Uuid, startedAt: Long? = null,
     endedAt: Long = System.currentTimeMillis(), transcript: List<me.rerere.ai.ui.CallTranscriptEntry>? = null,
-    connectingIds: Set<String> = emptySet(), giftSummary: String = "") {
+    connectingIds: Set<String> = emptySet(), giftSummary: String = "",
+    videoCall: Boolean = false, linkedUserMessageIds: List<String> = emptyList()) {
     val session = getOrCreateSession(conversationId)
     session.saveMutex.withLock {
         val cards = session.state.value.currentMessages.flatMap { it.annotations }.filterIsInstance<ChatInteraction>()
-            .filter { it.kind == "call" && it.status in setOf("accepted", "connecting") && it.conversationId == conversationId.toString() }
-        cards.filter { it.belongsToEndingCall(startedAt, connectingIds) }.forEach {
-            replaceChatInteractionLocked(conversationId, it.copy(status = "ended", endedAtMillis = endedAt,
-                callTranscript = transcript ?: it.callTranscript,
-                giftSummary = giftSummary.ifBlank { it.giftSummary }))
+            .filter { it.kind == "call" && it.conversationId == conversationId.toString() }
+        if (cards.isEmpty()) return@withLock
+        val endingIds = cards.filter { it.status in setOf("accepted", "connecting") }
+            .filter { it.belongsToEndingCall(startedAt, connectingIds) }.map { it.id }.toSet()
+        val links = if (videoCall) {
+            videoCallLinkedMessageIds(
+                session.state.value.currentMessages,
+                linkedUserMessageIds.mapNotNull { runCatching { Uuid.parse(it) }.getOrNull() },
+            )
+        } else {
+            emptyList()
         }
+        val linkSet = links.toSet()
+        val updated = cards.map { card ->
+            if (card.id in endingIds) {
+                val ended = card.copy(status = "ended", endedAtMillis = endedAt,
+                    callTranscript = transcript ?: card.callTranscript,
+                    giftSummary = giftSummary.ifBlank { card.giftSummary })
+                val video = videoCall || ended.videoCall
+                when {
+                    !video -> ended
+                    links.isEmpty() -> ended.copy(videoCall = true)
+                    else -> {
+                        val linked = ended.copy(videoCall = true).withVideoCallMessages(links)
+                        val userName = interactionSettings.settingsFlow.value.displaySetting.userNickname.ifBlank { "我" }
+                        val assistantName = interactionSettings.settingsFlow.value.assistants
+                            .firstOrNull { it.id.toString() == linked.assistantId }?.name?.ifBlank { "对方" } ?: "对方"
+                        // Build from the same locked, real messages as the IDs, never a UI monitor's partial snapshot.
+                        linked.copy(callTranscript = linked.linkedVideoCallTranscript(
+                            session.state.value.currentMessages, userName, assistantName,
+                        ))
+                    }
+                }
+            } else if (linkSet.isNotEmpty()) card.withoutVideoCallMessages(linkSet) else card
+        }
+        if (updated == cards) return@withLock
+        replaceChatInteractionsLocked(conversationId, updated.associateBy { it.id })
     }
+}
+
+/** 一次保存里替换多张卡：只改它们各自那条消息的注解与兜底正文。 */
+private suspend fun ChatService.replaceChatInteractionsLocked(
+    conversationId: Uuid,
+    cards: Map<String, ChatInteraction>,
+) {
+    val session = getOrCreateSession(conversationId)
+    check(session.state.value.assistantId.toString() == cards.values.first().assistantId)
+    saveConversationLocked(conversationId, session.state.value.copy(messageNodes = session.state.value.messageNodes.map { node ->
+        node.copy(messages = node.messages.map { message ->
+            val card = message.annotations.filterIsInstance<ChatInteraction>().firstOrNull()?.let { cards[it.id] }
+            if (card == null) message
+            else message.copy(parts = listOf(UIMessagePart.Text(card.readableText())), annotations = listOf(card))
+        })
+    }))
 }
 
 internal suspend fun ChatService.beginChatInteractionCall(conversationId: Uuid, startedAt: Long) {

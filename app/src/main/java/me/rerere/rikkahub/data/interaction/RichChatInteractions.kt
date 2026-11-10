@@ -28,7 +28,13 @@ fun parseChatGiftAmount(kind: String, value: String): Long {
 }
 
 fun ChatInteraction.readableText(): String {
-    val title = when (kind) { "red_packet" -> "红包"; "transfer" -> "转账"; else -> "语音通话" }
+    val title = when {
+        kind == "red_packet" -> "红包"
+        kind == "transfer" -> "转账"
+        // 视频通话的卡与语音通话分开说：用户看到的是"同一张 P4 通话记录卡"，但类型要写对。
+        videoCall -> "视频通话"
+        else -> "语音通话"
+    }
     val state = when (status) {
         "syncing" -> "正在核对钱包"
         "unconfirmed" -> "钱包结果待核实"

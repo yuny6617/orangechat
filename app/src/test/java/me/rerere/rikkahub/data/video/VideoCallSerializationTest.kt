@@ -41,6 +41,30 @@ class VideoCallSerializationTest {
     }
 
     @Test
+    fun `preview calibration defaults to automatic and preserves explicit angles`() {
+        assertEquals(null, VideoCallSetting().previewCalibrationDegrees)
+        // 老版本缺字段或显式 null 都表示自动，不向未知设备强加90°。
+        val legacy = JsonInstant.decodeFromString<VideoCallSetting>("""{"giftsEnabled":true}""")
+        assertEquals(null, legacy.previewCalibrationDegrees)
+        val automatic = JsonInstant.decodeFromString<VideoCallSetting>("""{"previewCalibrationDegrees":null}""")
+        assertEquals(null, automatic.previewCalibrationDegrees)
+        assertEquals(
+            null,
+            JsonInstant.decodeFromString<VideoCallSetting>(JsonInstant.encodeToString(automatic))
+                .previewCalibrationDegrees,
+        )
+        // 显式0（复位）和所有已保存角度必须保留，不能被设备默认覆盖。
+        listOf(0, 90, 180, 270).forEach { angle ->
+            val encoded = JsonInstant.encodeToString(VideoCallSetting(previewCalibrationDegrees = angle))
+            assertTrue(encoded.contains("\"previewCalibrationDegrees\":$angle"))
+            assertEquals(
+                angle,
+                JsonInstant.decodeFromString<VideoCallSetting>(encoded).previewCalibrationDegrees,
+            )
+        }
+    }
+
+    @Test
     fun `legacy chat interaction json without gift summary still decodes`() {
         val legacy = """
             {"type":"chat_interaction","id":"i1","conversationId":"c1","assistantId":"a1",
@@ -50,6 +74,45 @@ class VideoCallSerializationTest {
         val card = decoded as me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction
         assertEquals("", card.giftSummary)
         assertEquals("ended", card.status)
+        // 老数据一定**没有**视频关联：默认空 → 显示层不猜、不隐藏。
+        assertFalse(card.videoCall)
+        assertTrue(card.videoCallMessageIds.isEmpty())
+    }
+
+    @Test
+    fun `video call card keeps its message links across reload`() {
+        val userId = kotlin.uuid.Uuid.random()
+        val replyId = kotlin.uuid.Uuid.random()
+        val card = me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction(
+            id = "i2",
+            conversationId = "c1",
+            assistantId = "a1",
+            actor = "user",
+            kind = "call",
+            status = "ended",
+            callTranscript = listOf(
+                me.rerere.ai.ui.CallTranscriptEntry("user", "我", "你好", 1L),
+                me.rerere.ai.ui.CallTranscriptEntry("assistant", "对方", "我在", 2L),
+            ),
+            videoCall = true,
+            videoCallMessageIds = listOf(userId.toString(), replyId.toString()),
+        )
+        val decoded = JsonInstant.decodeFromString<me.rerere.ai.ui.UIMessageAnnotation>(
+            JsonInstant.encodeToString<me.rerere.ai.ui.UIMessageAnnotation>(card),
+        ) as me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction
+        assertTrue(decoded.videoCall)
+        assertEquals(listOf(userId.toString(), replyId.toString()), decoded.videoCallMessageIds)
+        // 重启后必须同时有真实关联原文和完整卡内文字，不能凭空隐藏不存在的消息。
+        val originals = listOf(
+            me.rerere.ai.ui.UIMessage.user("你好").copy(id = userId),
+            me.rerere.ai.ui.UIMessage.assistant("我在").copy(id = replyId),
+        )
+        assertEquals(
+            setOf(userId, replyId),
+            me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(
+                listOf(me.rerere.ai.ui.UIMessage.user("卡").copy(annotations = listOf(decoded))) + originals,
+            ),
+        )
     }
 
     @Test

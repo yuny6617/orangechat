@@ -13,6 +13,10 @@ import kotlinx.serialization.Serializable
  *
  * 礼物默认关闭：功能与提示词在被人类审定之前不会主动启用（设置页里写明了原因）。
  * 抓帧默认"每轮一帧"，只影响下一轮请求，不会在后台自动发消息。
+ *
+ * [voiceInputMode] 是"我说一句"的路由偏好（默认 [VideoVoiceInputMode.AUTO]）：
+ * 视频通话**不会**自动采音，一律由用户点那一次按钮开始、再点一次结束并发送；
+ * 这个开关只决定那一段录音是直接发给模型，还是先转成文字。
  */
 @Serializable
 data class VideoCallSetting(
@@ -20,6 +24,31 @@ data class VideoCallSetting(
     val frameCaptureMode: VideoFrameCaptureMode = VideoFrameCaptureMode.EVERY_REPLY,
     val frameQuality: VideoFrameQuality = VideoFrameQuality.P512,
     val showUserDanmaku: Boolean = true,
+    val voiceInputMode: VideoVoiceInputMode = VideoVoiceInputMode.AUTO,
+    /**
+     * 礼物展示名（**有限映射**）：key 只能是 [VideoGiftCatalog] 里那 5 个稳定 id。
+     *
+     * 用户改的是"看起来叫什么"，不是协议本身：id、特效映射、白名单全部由程序固定，
+     * 未知 key 一律被 [VideoGiftCustomization] 丢掉，永远不会把标签 id 变成用户随便写的未知值。
+     * 空字符串表示"用内置名"。
+     */
+    val giftDisplayNames: Map<String, String> = emptyMap(),
+    /**
+     * 用户偏好的赠礼文案（只是措辞偏好，**不能**改变协议规则：仍然每条一次、只用合法 id、
+     * 没有真实金额）。超长会被截断到 [VideoGiftCustomization.MAX_GIFT_MESSAGE_LENGTH]。
+     */
+    val giftMessage: String = "",
+    /**
+     * 预览方向的人工校准角度（0/90/180/270），**只影响预览画面**。
+     *
+     * null 表示自动选择 [PreviewCalibration.deviceDefault] 的窄范围设备建议，未知设备为 0°。
+     * 显式角度始终覆盖自动建议；复位保存 0°，不会再次应用设备补偿。
+     * 设备建议来自用户实测反馈，不代表已证实的 HAL 行为。
+     *
+     * 抓帧/落盘 JPEG 的方向**不包含**这个值（见 [VideoPreviewGeometry.captureRotationDegrees]），
+     * 所以调预览不会把存下来的照片转歪。
+     */
+    val previewCalibrationDegrees: Int? = null,
 ) {
     val giftsAvailable: Boolean
         get() = giftsEnabled

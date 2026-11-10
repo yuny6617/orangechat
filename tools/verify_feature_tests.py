@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Guard that the targeted video-gift feature test set really ran.
 
-The video-call/gift feature is covered by a fixed filter set (see
-``docs/GITHUB_DUAL_BUILD.md``): 21 test classes, 224 test methods.  Gradle
+The video-call/gift/voice-input feature is covered by a fixed filter set (see
+``docs/GITHUB_DUAL_BUILD.md``): 33 test classes, 360 test methods.  Gradle
 silently "succeeds" when a ``--tests`` pattern matches nothing at all only in
 some configurations, and a deleted or renamed class would quietly leave the
 feature untested.  This script makes the CI build fail closed unless every
 expected class produced results, the total test count did not drop below the
-reviewed 224, and nothing failed or was skipped.
+reviewed 360, and nothing failed or was skipped.
 
 Usage:
     python tools/verify_feature_tests.py --results app/build/test-results/testDebugUnitTest
@@ -25,6 +25,13 @@ from typing import Sequence
 EXPECTED_TEST_CLASSES = (
     "me.rerere.rikkahub.data.ai.transformers.VideoCallDirectiveStageTest",
     "me.rerere.rikkahub.data.ai.transformers.VideoCallDirectivesTest",
+    # R3: 视频通话卡与逐条消息的持久关联（显示收敛，不改上下文）
+    "me.rerere.rikkahub.data.interaction.VideoCallCardLinkTest",
+    "me.rerere.rikkahub.data.interaction.CallHistoryTest",
+    "me.rerere.rikkahub.data.service.ProactiveWakeupHistoryTest",
+    "me.rerere.rikkahub.data.service.ProactiveWakeupTest",
+    "me.rerere.rikkahub.ui.pages.setting.ProactiveWakeupRecordDetailsTest",
+    "me.rerere.rikkahub.ui.pages.setting.ProactiveWakeupSettingsCardTest",
     "me.rerere.rikkahub.data.video.FrameFileOwnershipTest",
     "me.rerere.rikkahub.data.video.JpegOrientationPolicyTest",
     "me.rerere.rikkahub.data.video.VideoCallCameraLifecycleTest",
@@ -37,17 +44,26 @@ EXPECTED_TEST_CLASSES = (
     "me.rerere.rikkahub.data.video.VideoDanmakuTest",
     "me.rerere.rikkahub.data.video.VideoFramePolicyTest",
     "me.rerere.rikkahub.data.video.VideoGiftAnnotationTest",
+    # R3: 礼物自定义展示名 / 赠礼文案偏好（有限映射 + 提示词 + 注解快照）
+    "me.rerere.rikkahub.data.video.VideoGiftCustomizationTest",
+    "me.rerere.rikkahub.data.video.VideoGiftPromptContractTest",
     "me.rerere.rikkahub.data.video.VideoGiftEffectQueueTest",
     "me.rerere.rikkahub.data.video.VideoGiftProtocolTest",
     "me.rerere.rikkahub.data.video.VideoPreviewGeometryTest",
+    # R2: 视频通话的手动录音、临时音频所有权与真实 provider 音频 payload
+    "me.rerere.rikkahub.data.video.VideoCallVoiceInputTest",
+    "me.rerere.rikkahub.data.video.VideoCallTransientAudioTest",
+    "me.rerere.rikkahub.data.video.VideoCallAudioPayloadTest",
+    "me.rerere.rikkahub.ui.hooks.DirectAudioRecorderTest",
     "me.rerere.rikkahub.service.MessageQueueTest",
     "me.rerere.rikkahub.service.VoiceCallMicrophoneTest",
     "me.rerere.rikkahub.service.VoiceCallServiceLifecycleTest",
     "me.rerere.rikkahub.service.VoiceCallTranscriptTest",
 )
 
-# Number of test methods the reviewed feature set contained (2026-... review).
-MIN_TOTAL_TESTS = 224
+# R5 independently verified XML: video/media + exact call history + wakeup record UI.
+# All 33 classes must run; deleting a class or skipping a test must fail closed.
+MIN_TOTAL_TESTS = 360
 
 
 @dataclass

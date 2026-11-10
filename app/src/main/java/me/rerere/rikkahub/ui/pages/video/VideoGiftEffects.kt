@@ -10,17 +10,30 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import me.rerere.rikkahub.data.video.VIDEO_GIFT_EFFECT_DURATION_MS
 import me.rerere.rikkahub.data.video.VideoGift
 import me.rerere.rikkahub.data.video.VideoGiftEffect
@@ -70,6 +83,76 @@ internal fun VideoGiftEffectOverlay(
 }
 
 private fun VideoGift.isFullScreenEffect(): Boolean = effect != VideoGiftEffect.Bubble
+
+/** 低档礼物（心心/花束）的预览：它们本来就不是全屏动画，只挂全屏 overlay 会什么都看不见。 */
+internal data class VideoGiftBubblePreviewState(
+    val key: String,
+    val gift: VideoGift,
+    val label: String,
+)
+
+/** 气泡预览的展示时长；比 8.2 秒的全屏特效短，不长时间压住页面。 */
+internal const val VIDEO_GIFT_BUBBLE_PREVIEW_MS: Long = 2_600L
+
+/**
+ * 心心 / 花束这类"只出气泡"的礼物的可见预览。
+ *
+ * 关键约束：
+ * - **纯绘制，不拦截触摸**（没有 clickable/pointerInput）：预览期间返回、关闭、底部按钮照常可点；
+ * - 只在页面上浮一颗气泡，不是全屏遮罩，所以也不会挡住顶栏；
+ * - 和通话里一样显示 `emoji + 当前展示名`，用户改完名字就能立刻看到效果。
+ */
+@Composable
+internal fun VideoGiftBubblePreview(
+    preview: VideoGiftBubblePreviewState?,
+    modifier: Modifier = Modifier,
+) {
+    if (preview == null) return
+    key(preview.key) {
+        val progress = remember { Animatable(0f) }
+        LaunchedEffect(Unit) {
+            progress.snapTo(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(
+                    durationMillis = VIDEO_GIFT_BUBBLE_PREVIEW_MS.toInt(),
+                    easing = LinearEasing,
+                ),
+            )
+        }
+        val value = progress.value
+        // 0.0-0.15 淡入上浮，0.75-1.0 淡出，中段稳定可读。
+        val alpha = when {
+            value < 0.15f -> value / 0.15f
+            value > 0.75f -> ((1f - value) / 0.25f).coerceIn(0f, 1f)
+            else -> 1f
+        }
+        val rise = (1f - value) * 24f
+        Box(
+            modifier
+                .fillMaxSize()
+                .padding(bottom = 96.dp)
+                .graphicsLayer {
+                    this.alpha = alpha
+                    translationY = -rise
+                },
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(Color.White.copy(alpha = 0.82f))
+                    .border(1.dp, Color.White, RoundedCornerShape(50))
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(preview.gift.emoji, fontSize = 18.sp)
+                Text(preview.label, fontSize = 13.sp, color = Color(0xFF2B2F44))
+            }
+        }
+    }
+}
 
 /** 稳定的伪随机：每帧都相同，避免粒子抖动。 */
 private fun noise(seed: Int): Float {

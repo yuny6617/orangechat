@@ -9,7 +9,12 @@ package me.rerere.rikkahub.data.video
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import android.app.Application
+import android.graphics.Matrix
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * 预览 / 抓帧方向的**逐点几何**测试。
@@ -23,6 +28,8 @@ import org.junit.Test
  * 2. 直接用代表性像素点验证落点（角点、中心点）；
  * 3. 验证等比性（各向放大倍数一致）与"铺满不留黑边"。
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [28], manifest = Config.NONE, application = Application::class)
 class VideoPreviewGeometryTest {
     private val delta = 0.01f
 
@@ -341,6 +348,203 @@ class VideoPreviewGeometryTest {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 预览人工校准（PreviewCalibration）：只转预览，绝不动抓帧
+    // ------------------------------------------------------------------
+
+    /**
+     * 校准必须真的把**最终画面**转过去。
+     *
+     * 交给 `TextureView` 的 M 满足 `M ∘ S = F`（S 是它的默认拉伸，F 是想要的画面），
+     * 校准后重新 cover：`M' = K ∘ Rot ∘ M`。此例基准旋转 90° 后再右转 90°，
+     * 最终 1280x720 内容须等比放大 8/3 倍，才能填满 1080x1920。
+     */
+    @Test
+    fun `manual calibration rotates the final preview around the view centre`() {
+        val bufferWidth = 1280
+        val bufferHeight = 720
+        val viewWidth = 1080
+        val viewHeight = 1920
+        val transform = VideoPreviewGeometry.textureViewTransform(
+            sensorOrientation = 90,
+            displayRotationDegrees = 0,
+            frontFacing = false,
+            bufferWidth = bufferWidth,
+            bufferHeight = bufferHeight,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight,
+            calibrationDegrees = 90,
+        )
+        assertEquals("几何角度不受校准影响", 90, transform.rotationDegrees)
+        assertEquals(90, transform.calibrationDegrees)
+
+        val stretch = textureViewDefaultStretch(bufferWidth, bufferHeight, viewWidth, viewHeight)
+        // 独立像素公式：最终旋转180°，中心不动，s=max(1080/1280,1920/720)。
+        val expected = Affine.translate(-640f, -360f)
+            .then(Affine.scale(-8f / 3f))
+            .then(Affine.translate(540f, 960f))
+        for (px in listOf(0f, 640f, 1280f)) {
+            for (py in listOf(0f, 360f, 720f)) {
+                val shown = stretch.then(transform.matrix).map(px, py)
+                val want = expected.map(px, py)
+                assertPoint(want.x, want.y, shown)
+            }
+        }
+    }
+
+    @Test
+    fun `calibration wraps to right angles and can be undone`() {
+        assertEquals(0, PreviewCalibration.normalize(360))
+        assertEquals(270, PreviewCalibration.normalize(-90))
+        assertEquals(90, PreviewCalibration.rotateRight(0))
+        assertEquals(0, PreviewCalibration.rotateRight(270))
+        assertEquals(270, PreviewCalibration.rotateLeft(0))
+        assertEquals(0, PreviewCalibration.rotateLeft(90))
+        // 转反了必须能原路退回：右转一次再左转一次 = 原地不动。
+        assertEquals(90, PreviewCalibration.rotateLeft(PreviewCalibration.rotateRight(90)))
+        assertEquals(listOf(0, 90, 180, 270), PreviewCalibration.STEPS)
+    }
+
+    @Test
+    fun `zero calibration changes nothing and unknown devices default to zero`() {
+        fun transform(calibrationDegrees: Int) = VideoPreviewGeometry.textureViewTransform(
+            sensorOrientation = 90,
+            displayRotationDegrees = 0,
+            frontFacing = false,
+            bufferWidth = 640,
+            bufferHeight = 480,
+            viewWidth = 480,
+            viewHeight = 640,
+            calibrationDegrees = calibrationDegrees,
+        )
+
+        val withoutCalibration = transform(0)
+        assertEquals("0° 校准必须等于完全不加校准", withoutCalibration.matrix, transform(0).matrix)
+        assertEquals(0, withoutCalibration.calibrationDegrees)
+        assertTrue("90° 校准必须真的改变矩阵", transform(90).matrix != withoutCalibration.matrix)
+        // 未知设备不附加旋转；目标机型的用户反馈由显式设备策略单独处理。
+        assertEquals(0, PreviewCalibration.DEFAULT_DEGREES)
+        assertEquals(0, PreviewCalibration.reset())
+        assertEquals("90°", PreviewCalibration.label(90))
+        assertEquals("0°", PreviewCalibration.label(360))
+    }
+
+    /** 校准只进预览矩阵：抓帧角度与它无关（用户要求"不改变 JPEG 方向"）。 */
+    @Test
+    fun `calibration never changes the capture angle`() {
+        // 预览矩阵里携带的 rotationDegrees 必须始终等于抓帧用的那个纯函数结果，
+        // 无论校准转了多少度——否则"调预览"就会顺手把存下来的照片转歪。
+        val captureAngle = VideoPreviewGeometry.captureRotationDegrees(
+            sensorOrientation = 90,
+            displayRotationDegrees = 0,
+            frontFacing = false,
+        )
+        listOf(0, 90, 180, 270).forEach { calibration ->
+            val preview = VideoPreviewGeometry.textureViewTransform(
+                sensorOrientation = 90,
+                displayRotationDegrees = 0,
+                frontFacing = false,
+                bufferWidth = 640,
+                bufferHeight = 480,
+                viewWidth = 480,
+                viewHeight = 640,
+                calibrationDegrees = calibration,
+            )
+            assertEquals("预览校准 $calibration° 不许改变抓帧角度", captureAngle, preview.rotationDegrees)
+            assertEquals(calibration, preview.calibrationDegrees)
+        }
+    }
+
+    @Test
+    fun `device default is narrow user reported guidance not a global OPPO fix`() {
+        assertEquals(90, PreviewCalibration.deviceDefault("OPPO", "Reno14 Pro", 36))
+        assertEquals(90, PreviewCalibration.deviceDefault("oppo", "OPPO Reno14 Pro", 36))
+        assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "UNKNOWN-HARDWARE-CODE", 36))
+        assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "Reno14", 36))
+        assertEquals(0, PreviewCalibration.deviceDefault("other", "Reno14 Pro", 36))
+        assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "Reno14 Pro", 35))
+        assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "Reno14 Pro", 37))
+    }
+
+    /** 实际调用生产 toAndroidMatrix 桥接，独立用 Android Matrix 拼合 M S 并逆映射 view。
+     * 这验证矩阵布局/拼接/像素几何，不模拟 TextureView 的 framework/OEM 渲染管线。
+     */
+    @Test
+    fun `android matrix bridge covers every calibrated view without stretch or holes`() {
+        val buffers = listOf(1280 to 720, 640 to 480, 720 to 1280)
+        val views = listOf(1080 to 1920, 1080 to 2400, 2400 to 1080, 800 to 800)
+        for ((bw, bh) in buffers) for ((vw, vh) in views) {
+            for (rotation in listOf(0, 90, 180, 270)) for (front in listOf(false, true)) {
+                for (calibration in listOf(0, 90, 180, 270)) {
+                    val displayRotation = 0
+                    val transform = VideoPreviewGeometry.textureViewTransform(
+                        rotation, displayRotation, front, bw, bh, vw, vh, calibration,
+                    )
+                    val stretch = Matrix().apply { setScale(vw.toFloat() / bw, vh.toFloat() / bh) }
+                    val shown = Matrix().apply {
+                        setConcat(transform.matrix.toAndroidMatrix(), stretch)
+                    }
+                    val tag = "buffer=${bw}x$bh view=${vw}x$vh r=$rotation front=$front c=$calibration"
+                    val finalRotation = (rotation + calibration) % 360
+                    val widthAfterRotation = if (finalRotation % 180 == 0) bw else bh
+                    val heightAfterRotation = if (finalRotation % 180 == 0) bh else bw
+                    val scale = maxOf(vw.toFloat() / widthAfterRotation, vh.toFloat() / heightAfterRotation)
+                    val vectors = floatArrayOf(1f, 0f, 0f, 1f)
+                    shown.mapVectors(vectors)
+                    assertEquals(tag, scale, kotlin.math.hypot(vectors[0], vectors[1]), delta)
+                    assertEquals(tag, scale, kotlin.math.hypot(vectors[2], vectors[3]), delta)
+                    assertEquals(tag, 0f, vectors[0] * vectors[2] + vectors[1] * vectors[3], delta)
+                    val determinant = vectors[0] * vectors[3] - vectors[1] * vectors[2]
+                    assertEquals(tag, front, determinant < 0f)
+
+                    // 覆盖不是只比角点包围盒：逆映射 view 四角和边中点必须全部位于源buffer内。
+                    val inverse = Matrix()
+                    assertTrue(tag, shown.invert(inverse))
+                    val viewPoints = floatArrayOf(
+                        0f, 0f, vw.toFloat(), 0f, vw.toFloat(), vh.toFloat(), 0f, vh.toFloat(),
+                        vw / 2f, 0f, vw / 2f, vh.toFloat(), 0f, vh / 2f, vw.toFloat(), vh / 2f,
+                    )
+                    inverse.mapPoints(viewPoints)
+                    for (index in viewPoints.indices step 2) {
+                        assertTrue(tag, viewPoints[index] >= -delta && viewPoints[index] <= bw + delta)
+                        assertTrue(tag, viewPoints[index + 1] >= -delta && viewPoints[index + 1] <= bh + delta)
+                    }
+                    val centre = floatArrayOf(bw / 2f, bh / 2f)
+                    shown.mapPoints(centre)
+                    assertEquals(tag, vw / 2f, centre[0], delta)
+                    assertEquals(tag, vh / 2f, centre[1], delta)
+
+                    // 方向使用独立的直角整数公式；镜像发生在基础旋转后、校准前。
+                    val baseRight = when (rotation) {
+                        0 -> Point2(1f, 0f)
+                        90 -> Point2(0f, 1f)
+                        180 -> Point2(-1f, 0f)
+                        else -> Point2(0f, -1f)
+                    }
+                    val x = if (front) -baseRight.x else baseRight.x
+                    val y = baseRight.y
+                    val expectedRight = when (calibration) {
+                        0 -> Point2(x, y)
+                        90 -> Point2(-y, x)
+                        180 -> Point2(-x, -y)
+                        else -> Point2(y, -x)
+                    }
+                    assertEquals(tag, expectedRight.x * scale, vectors[0], delta)
+                    assertEquals(tag, expectedRight.y * scale, vectors[1], delta)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `android matrix bridge preserves asymmetric affine layout and translation`() {
+        val mapped = floatArrayOf(7f, 11f)
+        Affine(a = 2f, b = 3f, c = 5f, d = 7f, e = 11f, f = 13f)
+            .toAndroidMatrix().mapPoints(mapped)
+        assertEquals(80f, mapped[0], delta)
+        assertEquals(111f, mapped[1], delta)
     }
 
     private fun assertPoint(expectedX: Float, expectedY: Float, actual: Point2) {

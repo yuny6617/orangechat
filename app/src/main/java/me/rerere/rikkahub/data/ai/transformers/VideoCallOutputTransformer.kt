@@ -52,6 +52,7 @@ object VideoCallOutputTransformer : OutputMessageTransformer {
         conversationId = request.conversationId,
         requestToken = request.requestToken,
         session = request.session,
+        giftNames = request.giftNames,
     )
 }
 
@@ -61,6 +62,8 @@ data class VideoDirectiveRequest(
     val conversationId: String?,
     val requestToken: String?,
     val session: VideoCallDirectiveSession?,
+    /** 用户自定义的礼物展示名（写入礼物卡时按这份快照落库）。 */
+    val giftNames: Map<String, String> = emptyMap(),
 )
 
 internal fun TransformerContext.videoDirectiveRequest(): VideoDirectiveRequest = VideoDirectiveRequest(
@@ -68,4 +71,7 @@ internal fun TransformerContext.videoDirectiveRequest(): VideoDirectiveRequest =
     conversationId = conversationId,
     requestToken = requestToken,
     session = videoDirectives,
+    giftNames = me.rerere.rikkahub.data.video.VideoGiftCustomization.sanitizedNames(
+        settings.videoCallSetting.giftDisplayNames,
+    ),
 )

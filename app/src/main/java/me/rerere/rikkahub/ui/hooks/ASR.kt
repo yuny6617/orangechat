@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -88,8 +88,10 @@ suspend fun createCustomAsrState(
     context: Context,
     httpClient: OkHttpClient,
     settingsStore: SettingsStore,
+    retainAudio: Boolean = true,
+    manualRecording: Boolean = false,
 ): CustomAsrState {
-    val asrState = CustomAsrStateImpl(context.applicationContext, httpClient)
+    val asrState = CustomAsrStateImpl(context.applicationContext, httpClient, retainAudio, manualRecording)
     try {
         val settings = settingsStore.settingsFlow.first()
         asrState.updateProvider(settings.getSelectedASRProvider())
@@ -108,7 +110,9 @@ interface CustomAsrState {
  
 internal class CustomAsrStateImpl(
     private val context: Context,
-    private val httpClient: OkHttpClient
+    private val httpClient: OkHttpClient,
+    private val retainAudio: Boolean = true,
+    private val manualRecording: Boolean = false,
 ) : CustomAsrState {
     private var controller: ASRController? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -223,7 +227,8 @@ internal class CustomAsrStateImpl(
                         Log.w(ASR_TAG, "createController: SiliconFlow apiKey 为空")
                         return null
                     }
-                    SiliconFlowASRController(context, httpClient, provider)
+                    SiliconFlowASRController(context, httpClient, provider,
+                        retainAudio = retainAudio, manualRecording = manualRecording)
                 }
  
                 is ASRProviderSetting.Volcengine -> {

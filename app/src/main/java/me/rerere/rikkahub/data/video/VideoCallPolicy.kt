@@ -72,13 +72,20 @@ object VideoCallPolicy {
      *
      * `audioUnavailable`（ASR/TTS 初始化失败或没权限）时必须返回 false，
      * 否则语音链会持续尝试并打断纯文字通话。
+     *
+     * [manualVideoInput] 是视频通话的**手动**输入模式：麦克风只在用户点"录一段"时开，
+     * 所以自动监听（VAD 自动发送、回复期间继续听、打断检测）在这里必须是关的。
+     * 纯语音通话不传这个参数（默认 false），既有行为一个字都不变。
      */
     fun shouldListen(
         status: VoiceCallStatus,
         muted: Boolean,
         keepListeningDuringReply: Boolean,
         audioUnavailable: Boolean = false,
-    ): Boolean = !audioUnavailable && voiceCallShouldListen(status, muted, keepListeningDuringReply)
+        manualVideoInput: Boolean = false,
+    ): Boolean =
+        !manualVideoInput && !audioUnavailable &&
+            voiceCallShouldListen(status, muted, keepListeningDuringReply)
 
     /**
      * 相机绑定门禁：Surface 就绪 + 有相机权限 + 生命周期 STARTED + 通话还在进行，

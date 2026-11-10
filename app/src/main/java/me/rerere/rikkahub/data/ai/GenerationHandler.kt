@@ -47,6 +47,7 @@ import me.rerere.rikkahub.data.ai.transformers.VideoCallDirectiveSession
 import me.rerere.rikkahub.data.ai.transformers.onGenerationFinish
 import me.rerere.rikkahub.data.ai.transformers.transforms
 import me.rerere.rikkahub.data.ai.transformers.visualTransforms
+import me.rerere.rikkahub.data.video.withTransientRequestAudio
 import me.rerere.rikkahub.data.ai.tools.buildMemoryTools
 import me.rerere.rikkahub.data.ai.tools.buildWriteFilesTool
 import me.rerere.rikkahub.data.datastore.Settings
@@ -127,12 +128,30 @@ class GenerationHandler(
          */
         transientImageAnchorMessageId: String? = null,
         /**
+         * 只在本次请求里附带的一段录音（视频通话手动录音，音频直传路线）。
+         *
+         * 与 [transientImageUrls] 同一套约定：不写进聊天历史，只作为这一次（含工具多步）
+         * 请求的音频输入；请求结束后由 ChatService 释放并删除临时文件，历史里只有占位文字。
+         * 下一条请求不会再带这段音频（它已经被删掉了，历史里也没有 audio part）。
+         */
+        transientAudioUrl: String? = null,
+        /** 录音挂到的那条用户消息（与临时图同一个锚点：队列项 ID，禁止"最后一条 USER"猜测）。 */
+        transientAudioAnchorMessageId: String? = null,
+        /**
          * 视频通话这一轮的**请求 token**（授权凭证）。
          *
          * 由 VoiceCallService 生成、随队列项不可变地传下来；礼物/留影只认
          * "有效通话 + 这个 token"，不再用消息历史推断身份。
          */
         requestToken: String? = null,
+        /**
+         * 只在**这一轮**有效的系统上下文（视频通话的画面/音频说明与礼物能力清单）。
+         *
+         * 与 [conversationSystemPrompt] 分开是刻意的：后者会被 `allowConversationSystemPrompt`
+         * 开关整段丢掉（默认关闭），而通话上下文丢掉之后模型就会说"我没有 ws_gift 这个工具"
+         * （P9 的真实原因）。这里一律**追加**在系统提示词主文后面，不替换主文。
+         */
+        appendedSystemContext: String? = null,
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = usageRecorder.wrap(
@@ -228,11 +247,14 @@ class GenerationHandler(
                     processingStatus = processingStatus,
                     conversationSystemPrompt = conversationSystemPrompt,
                     conversationContextSummary = conversationContextSummary,
+                    appendedSystemContext = appendedSystemContext,
                     workspaceCwd = workspaceCwd,
                     conversationId = conversationId,
                     reactionTurn = reactionTurn,
                     transientImageUrls = transientImageUrls,
                     transientImageAnchorMessageId = transientImageAnchorMessageId,
+                    transientAudioUrl = transientAudioUrl,
+                    transientAudioAnchorMessageId = transientAudioAnchorMessageId,
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
@@ -332,17 +354,26 @@ class GenerationHandler(
         reactionTurn: ReactionContextTurn? = null,
         transientImageUrls: List<String> = emptyList(),
         transientImageAnchorMessageId: String? = null,
+        transientAudioUrl: String? = null,
+        transientAudioAnchorMessageId: String? = null,
+        /** 只在本轮生效、**追加**在系统提示词主文后面的上下文（视频通话）。 */
+        appendedSystemContext: String? = null,
     ) {
         val baseMessages = buildList {
             val system = buildString {
-                val effectiveSystemPrompt =
-                    if (assistant.allowConversationSystemPrompt && !conversationSystemPrompt.isNullOrBlank()) {
-                        conversationSystemPrompt
-                    } else {
-                        assistant.systemPrompt
-                    }
-                if (effectiveSystemPrompt.isNotBlank()) {
-                    append(effectiveSystemPrompt)
+                // 主文：助手自带 prompt，或（开关打开时）对话级重写；随后**追加**本轮通话上下文。
+                // 后者带着"本轮有没有画面/音频"和礼物能力清单，绝不能被 allowConversationSystemPrompt
+                // 开关整段丢掉（否则模型会回答"我没有 ws_gift 这个工具"，见 P9）。
+                val effective = appendTurnSystemContext(
+                    composeSystemPromptText(
+                        assistantSystemPrompt = assistant.systemPrompt,
+                        conversationSystemPrompt = conversationSystemPrompt,
+                        allowConversationSystemPrompt = assistant.allowConversationSystemPrompt,
+                    ),
+                    appendedSystemContext,
+                )
+                if (effective.isNotBlank()) {
+                    append(effective)
                 }
  
                 // 记忆
@@ -426,7 +457,12 @@ class GenerationHandler(
             workspaceCwd = workspaceCwd,
         ).let { filesManager.validAttachments(it, forSending = true) }.filterNot { it.parts.isEmpty() }
             .withTransientRequestImages(transientImageUrls, transientImageAnchorMessageId)
-            .let { if (transientImageUrls.isEmpty()) it else filesManager.validAttachments(it, forSending = true) }
+            .withTransientRequestAudio(transientAudioUrl, transientAudioAnchorMessageId)
+            .let {
+                // 注入之后再校验一次附件（与图片那条路径一致）：文件确实存在才发给 provider。
+                if (transientImageUrls.isEmpty() && transientAudioUrl.isNullOrBlank()) it
+                else filesManager.validAttachments(it, forSending = true)
+            }
  
         var messages: List<UIMessage> = messages
         val params = buildAssistantGenerationParams(

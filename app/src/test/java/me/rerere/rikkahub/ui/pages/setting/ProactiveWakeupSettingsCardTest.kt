@@ -63,6 +63,8 @@ class ProactiveWakeupSettingsCardTest {
             }
             }
         }
+        compose.onNodeWithText("后台活动记录").assertIsDisplayed()
+        compose.onNodeWithText("查看主动唤醒记录").performClick()
         try {
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("等待执行", substring = true).fetchSemanticsNodes().isNotEmpty()
@@ -78,6 +80,14 @@ class ProactiveWakeupSettingsCardTest {
         compose.onNodeWithText("未完成", substring = true).assertIsDisplayed()
         compose.onNodeWithText("晚饭后聊聊", substring = true).assertIsDisplayed()
         compose.onAllNodesWithText("取消").assertCountEquals(1)
+        val beforeViewing = store.snapshot()
+        compose.onNodeWithText("晚饭后聊聊", substring = true).performClick()
+        compose.onNodeWithText("后台活动详情").assertIsDisplayed()
+        compose.onNodeWithText("约定原因：\n晚饭后聊聊", substring = true).assertExists()
+        compose.onNodeWithText("会话 ID：pending", substring = true).assertExists()
+        compose.onNodeWithText("关闭").performClick()
+        assertEquals(beforeViewing, store.snapshot())
+        assertEquals(0, reschedules.get())
         compose.runOnIdle {
             val view = compose.activity.window.decorView
             val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)

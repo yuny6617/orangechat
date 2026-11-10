@@ -51,6 +51,29 @@ class CallHistoryTest {
         assertTrue(card.copy(connectedAtMillis = null).transcriptFrom(messages, "我", "你").isEmpty())
     }
 
+    @Test fun videoLinkedRecoveryKeepsFullLongTextAndFallsBackOnlyWhenOriginalsAreGone() {
+        val words = "完整原文不能裁切。".repeat(3000)
+        val user = at(UIMessage.user("问题"), 1100)
+        val assistant = at(UIMessage.assistant("[[voice emotion=happy]]$words[[/voice]]"), 1500)
+        val video = card.copy(videoCall = true,
+            videoCallMessageIds = listOf(user.id.toString(), assistant.id.toString()),
+            callTranscript = emptyList())
+        val rows = video.linkedVideoCallTranscript(listOf(user, assistant), "我", "对方")
+        assertEquals(listOf("问题", words), rows.map { it.text })
+        val persisted = video.copy(callTranscript = rows)
+        assertEquals(rows, persisted.transcriptFrom(emptyList(), "我", "对方"))
+        assertEquals(rows, persisted.transcriptFrom(listOf(user), "我", "对方"))
+        val protocol = assistant.copy(parts = listOf(me.rerere.ai.ui.UIMessagePart.Text(
+            "[[voice emotion=happy]]你好[[/voice]]<ws_gift id=\"heart\"/>再见",
+        )))
+        val cleaned = video.linkedVideoCallTranscript(listOf(protocol), "我", "对方").single().text
+        assertTrue(cleaned.contains("你好") && cleaned.contains("再见"))
+        assertFalse(cleaned.contains("ws_gift") || cleaned.contains("[[voice"))
+        val revised = assistant.copy(parts = listOf(me.rerere.ai.ui.UIMessagePart.Text("最终保存全文")))
+        assertEquals(listOf("问题", "最终保存全文"),
+            persisted.transcriptFrom(listOf(user, revised), "我", "对方").map { it.text })
+    }
+
     @Test fun dedicatedTranscriptIsAuthoritativeAndSurvivesBackupSerialization() {
         val row = CallTranscriptEntry("user", "严槿", "本次通话", 1200)
         val original: UIMessageAnnotation = card.copy(callTranscript = listOf(row))

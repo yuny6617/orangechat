@@ -15,6 +15,24 @@ data class DanmakuLine(
 )
 
 /**
+ * 往"常驻历史"里追加一行，并做**有界截断**（纯函数，便于单测）。
+ *
+ * 真机反馈：面板上原来只有 6 条、6 秒就淡出的气泡，用户没法回看刚说过什么。改成常驻列表
+ * 之后立刻多出一个新风险——长通话会无限攒字符串。所以截断规则写死在这里：
+ *
+ * - 保留原有顺序与稳定 id（LazyColumn 的 key 靠它，不能重新生成）；
+ * - 超过 [limit] 条时**从最旧的开始丢**，永远保留最新的 [limit] 条；
+ * - `limit <= 0` 直接返回空列表（调用方写错上限时不至于无限增长）。
+ *
+ * 真正持久的那份仍然是通话记录卡里的 transcript，这里只是显示缓存。
+ */
+fun List<DanmakuLine>.appendBounded(line: DanmakuLine, limit: Int): List<DanmakuLine> {
+    if (limit <= 0) return emptyList()
+    val appended = this + line
+    return if (appended.size <= limit) appended else appended.subList(appended.size - limit, appended.size)
+}
+
+/**
  * 把流式回复切成"一条一句"的气泡（纯逻辑）。
  *
  * - 只在句末标点后切，避免半句话上浮又立刻改写；

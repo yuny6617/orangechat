@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -352,7 +352,15 @@ class SettingsStore(
                     preferences[VIDEO_CALL_SETTING]?.let {
                         JsonInstant.decodeFromString<me.rerere.rikkahub.data.video.VideoCallSetting>(it)
                     }
-                }.getOrNull() ?: me.rerere.rikkahub.data.video.VideoCallSetting(),
+                }.getOrNull()?.let { stored ->
+                    // 预览校准角度只允许 0/90/180/270：手写过 datastore、或旧版本留下的
+                    // 任意整数在进矩阵之前先归一化，绝不让非法角度把预览转成一个奇怪的角度。
+                    stored.copy(
+                        previewCalibrationDegrees = stored.previewCalibrationDegrees?.let {
+                            me.rerere.rikkahub.data.video.PreviewCalibration.normalize(it)
+                        },
+                    )
+                } ?: me.rerere.rikkahub.data.video.VideoCallSetting(),
                 modeInjections = runCatching { preferences[MODE_INJECTIONS]?.let { JsonInstant.decodeFromString<List<PromptInjection.ModeInjection>>(it) } }.getOrNull() ?: emptyList(),
                 lorebooks = runCatching { preferences[LOREBOOKS]?.let { JsonInstant.decodeFromString<List<Lorebook>>(it) } }.getOrNull() ?: emptyList(),
                 quickMessages = runCatching { preferences[QUICK_MESSAGES]?.let { JsonInstant.decodeFromString<List<QuickMessage>>(it) } }.getOrNull() ?: emptyList(),

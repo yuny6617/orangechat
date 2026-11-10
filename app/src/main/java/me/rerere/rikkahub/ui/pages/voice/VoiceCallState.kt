@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -39,6 +39,14 @@ data class VoiceCallUiState(
     val isMuted: Boolean = false,
     val isSpeakerOn: Boolean = false,
     val autoSendEnabled: Boolean = true,
+    /**
+     * 视频通话里"手动录一段"这一段的状态。
+     *
+     * 纯语音通话恒为安全 Idle，不受影响；视频页从这里读按钮状态（不用另开一条 flow，
+     * 这样 binder 还没连上时也能拿到正确的初值）。
+     */
+    val voiceInput: me.rerere.rikkahub.data.video.VideoVoiceUiState =
+        me.rerere.rikkahub.data.video.VideoVoiceUiState(),
 ) {
     val isActive: Boolean
         get() = status != VoiceCallStatus.Idle

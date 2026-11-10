@@ -5,10 +5,15 @@
 - 影响范围：只新增 `videoCoexist` / `videoUpdate` 两个构建类型、一个新 workflow、以及 `tools/` 下的验证脚本。
   原有 `debug` / `release` / `performance` / `baseline` 的包名、默认版本和签名决策都没有改动，
   现有 workflow、`app/debug.keystore`、`local.properties` 也没有被覆盖。
-- 视频通话/礼物功能代码本身（67 个已交付文件、224 个 feature 测试）没有改动。
-- **事实界限**：写这份文档的实现过程没有提交、没有推送、也没有安装任何 APK。
-  用户已授权主模型把代码推到用户的 `yuny6617/orangechat` fork，并触发云端构建；
-  不直接修改默认分支、不自动发布 Release、不安装 APK。
+- 初次云构建 `42722493142`（`68a1769`）包含224个 feature 测试，是历史证据，不含后续实机反馈修复。
+- 当前 R5 包含视频手动录音、临时音频、礼物注入/自定义、通话卡全文、相机校准及主动唤醒记录详情；
+  主模型独立验收33类、360测试全通过，本地 ARM64 debug 构建成功。尚需新云构建和 OPPO 真机确认。
+- 详见 [DEVICE_ACCEPTANCE_R5.md](DEVICE_ACCEPTANCE_R5.md) 的功能与验收边界。
+- **事实界限**：本分支由主模型在用户授权下统一提交并推送到用户的 `yuny6617/orangechat` fork；
+  不安装任何 APK，不发布 Release，不覆盖签名配置。历史云端构建（run `42722493142`，head `68a1769`）：
+  这次推送**没有覆盖既有 `master`**，没有发布 Release，也没有安装任何 APK。
+  把 `feature/video-call-gifts-ci` 设为默认分支只在构建成功之后进行，且只改默认展示，
+  `master` 分支本身保留不动。
   本文不假设任何“不允许推送”的约束——下面描述的是 GitHub 上的实际行为。
 
 ## 1. 两个版本是什么
@@ -114,8 +119,8 @@ Node 24 + pnpm（`web-ui` 依赖），并初始化 `material3/material-color-uti
 
 1. 校验 `update_version_code` 输入（fail-closed）；
 2. 跑 `tools/` 下的 Python 单元测试；
-3. 跑视频礼物 feature 过滤集（21 个类、**224** 个测试）并用 `tools/verify_feature_tests.py` 校验：
-   类缺失、测试数少于 224、有失败/错误/跳过，都会让构建立即失败；
+3. 跑视频/通话历史/主动唤醒记录过滤集（33 个类、**360** 个测试）并用 `tools/verify_feature_tests.py` 校验：
+   类缺失、测试数少于 360、有失败/错误/跳过，都会让构建立即失败；
 4. 构建 `assembleVideoCoexist` + `assembleVideoUpdate`；
 5. 用 `tools/apk_identity.py` 校验产物：
    - 共存包：包名必须是 `me.rerere.orangechat.videogifts`（且不能等于正式包 / `.liquidglass`），
@@ -150,9 +155,32 @@ summary 按“实际发生了什么”分四种情况写，不会笼统声称“
 
 ### 4.1 朋友的 fork 怎么跑
 
-1. 在 GitHub 网页上 fork `yuny6617/orangechat`。fork 页面上默认勾选了
-   **“Copy the `main` branch only”（只复制默认分支）**，这里**一定要取消勾选**，
-   让它把上游所有分支都复制过来；否则 fork 里只有默认分支，
+推荐路径（默认分支 = 功能分支 + **Run workflow** 按钮）：
+
+1. fork 之后先把 fork 的默认分支切成 `feature/video-call-gifts-ci`
+   （Settings → General → Default branch）。这一步**只改默认展示**，`master` 分支本身保留不动，
+   随时可以切回去；反过来，如果 fork 时默认分支已经是这个功能分支，只复制默认分支也能拿到
+   workflow 文件（那种 fork 里没有 `master`，不影响这两个包的构建）；
+2. 在 fork 的 Actions 页面启用 Actions，然后在 `video-gifts-dual` 上点 **Run workflow**，
+   填入 `update_version_code`（默认 166）触发。
+
+在动手前先记住三件事：
+
+- **fork 里复制过来的历史提交不会重新触发 workflow**：创建 fork、复制分支都不是 `push` 事件；
+  分支已经在 fork 里、HEAD 没动时再 `git push` 一遍也不会触发（没有新提交）。要跑起来只能
+  **产生新提交再 push**（例：`git commit --allow-empty -m "ci: trigger"` 后 push），
+  或者默认分支已是该分支时用 **Run workflow**；
+- **fork 不会继承上游仓库的 secrets**，`VIDEO_UPDATE_*` 必须在 fork 里自己配置才有意义
+  （不配就只产出 unsigned 候选，签名只能按 §4.3 在持有原私钥的机器上离线做）；
+- 如果 fork 的默认分支**还是 `master`**（本次调整之前的状态），**Run workflow 里不会出现**
+  这个 workflow——GitHub 只从默认分支解析可手动触发的工作流。这种情况下走下面的 fallback。
+
+fallback（默认分支仍是 `master`，或不想改默认分支）：
+
+1. 在 GitHub 网页上 fork `yuny6617/orangechat`。fork 页面上默认勾选的是
+   **“只复制默认分支”**（按钮文字跟着默认分支走：默认是 `master` 就写作 `master`，
+   切过默认分支后就显示该分支名），
+   这里**一定要取消勾选**，让它把上游所有分支都复制过来；否则 fork 里只有默认分支，
    `feature/video-call-gifts-ci`（workflow 文件所在分支）根本不存在。
 2. 如果 fork 时不小心只复制了默认分支，或者想在自己的 clone 里补齐，就在**自己的 clone** 里从上游取一次：
 
@@ -177,12 +205,15 @@ summary 按“实际发生了什么”分四种情况写，不会笼统声称“
    只需要 `feature/video-call-gifts-ci` 这一个分支就够了，不必搬运所有分支。
 3. 在 fork 的 **Actions** 页面点 “I understand my workflows, go ahead and enable them” 启用 Actions
    （fork 默认是禁用状态）；
-4. 触发方式二选一：
-   - **首次 push 新分支就能触发**：`git push -u origin feature/video-call-gifts-ci` 本身就是一次
-     `push` 事件，workflow 文件只要在该分支上就会跑；
-   - 想用界面上的 **Run workflow** 按钮（`workflow_dispatch`）时，workflow 文件必须已经存在于
-     fork 的**默认分支**上——GitHub 只从默认分支解析可手动触发的工作流。文件只在
-     `feature/video-call-gifts-ci` 上时按钮不会出现，此时就用上面 `push` 的方式，别干等按钮。
+4. 触发方式（二选一，按默认分支决定用哪个）：
+   - **默认分支已切成 `feature/video-call-gifts-ci`**（推荐）：Actions 页面上会出现
+     **Run workflow** 按钮，可以直接选到 `video-gifts-dual`、填 `update_version_code` 手动触发；
+   - **默认分支还是 `master`**：GitHub 只从默认分支解析可手动触发的工作流，workflow 文件只在
+     `feature/video-call-gifts-ci` 上时按钮里看不到它，此时用 push 触发：
+     上面 `git push -u origin feature/video-call-gifts-ci` 只要是**把新分支推上去**（或推了
+     **新提交**）就是一次 `push` 事件，workflow 会跑；如果分支早已存在于 fork 且 HEAD 没变，
+     这次 push 什么都不会触发——需要先 `git commit --allow-empty -m "ci: trigger"` 再 push。
+     不要干等按钮。
 5. secrets 与签名能力（fork **不会继承**上游仓库的 secrets）：
    - 共存包照常构建（用仓库里已有的 `app/debug.keystore`，不需要额外 secret）；
    - 更新候选保持 unsigned，**不能安装**；
@@ -264,8 +295,16 @@ python tools/apk_identity.py verify-signed-update \
 1. `apksigner` 明确打印 `DOES NOT VERIFY`，并且诊断恰好在最小允许列表里
    （当前只有真实 unsigned APK 会输出的 `ERROR: Missing META-INF/MANIFEST.MF`）；
 2. ZIP 容器里既没有 `META-INF/MANIFEST.MF`、`*.SF`、`*.RSA`、`*.DSA`、`*.EC` 这类 JAR(v1) 签名条目，
-   最后一条 ZIP 记录与中央目录之间也没有 `APK Sig Block 42` 签名块（v2/v3/v4），
+   最后一条 ZIP 记录与中央目录之间也没有 `APK Sig Block 42` 签名块，
    而且这段间隙必须为 0 字节或正好是一个可识别的签名块——其它任何字节都算错误。
+
+关于签名方案的术语（别把 v4 说成 ZIP 里能扫到的东西）：
+
+- `APK Sig Block 42`（APK Signing Block）承载 **v2 / v3** 签名，它位于 ZIP 条目与中央目录之间，
+  所以 ZIP 扫描能看到它；
+- **v4** 签名不是 APK 容器的一部分，它是构建时另行生成的**外部 `.idsig` 文件**，
+  只在增量安装（`adb install --incremental` 之类）时用作补充校验，不在 APK 里，
+  因此 ZIP 扫描既不检测、也无法检测 v4。
 
 因此下面这些情况一律**不会**被当成 unsigned，而是直接失败：
 
@@ -276,7 +315,7 @@ python tools/apk_identity.py verify-signed-update \
 | JVM 崩溃 / APK 解析不了（`Exception in thread "main" … Malformed APK`） | 失败（exit 2） |
 | 签名损坏（`DOES NOT VERIFY` + `APK integrity check failed`） | 失败（诊断不在允许列表里） |
 | 证书摘要被截断/被篡改/大写 | 失败（malformed） |
-| APK 带 v1 或 v2/v3/v4 签名 | 失败（ZIP 证据与 apksigner 都会报） |
+| APK 带 v1 签名条目或 v2/v3 的 `APK Sig Block 42` | 失败（ZIP 证据与 apksigner 都会报） |
 | ZIP 读不了 / 尾部有无法解释的字节 | 失败 |
 
 ```bash
@@ -299,7 +338,7 @@ python tools/apk_identity.py check-buildconfig \
 python tools/verify_feature_tests.py --results app/build/test-results/testDebugUnitTest
 ```
 
-校验 21 个 feature 测试类都跑了、总数不少于 224、没有失败/错误/跳过。
+校验 28 个 feature 测试类都跑了、总数不少于 313、没有失败/错误/跳过。
 
 ### 单元测试
 
@@ -310,20 +349,28 @@ python -m unittest discover -s tools -p 'test_verify_feature_tests.py'
 
 ## 6. 已知边界（不假装通过）
 
-- 完整单元测试套件原本就有 2 个失败（与视频礼物功能无关），Lint 基线也有 1 个既有错误。
-  本次**没有**删除断言、没有放宽 Lint baseline，也**不声称**全套测试是绿的；
-  CI 只跑已审的 224 个 feature 测试，并把它当作阻断条件。
+- 本机跑完整单元测试套件（`./gradlew test`）的实际结果是 **1691 个测试、2 个失败、1 个跳过**，不是全绿；
+  Lint 也仍有 1 个既有错误（`NonObservableLocale`）。两个失败分别是：
+  - `GenerationFlowCompatibilityTest`：时间 roundtrip 相差 1ms。这个失败**没有**在干净的
+    baseline 上复现过，所以不能说它“原来就有”或“与功能无关”，只能记为**未解决的失败**；
+  - `WorkspaceRoutingTest`：本机 Windows 上 `mklink /J` 创建目录联接失败，是 Windows
+    环境/权限导致的失败，同样记为**未解决的失败**，没有为它放宽断言。
+  本次**没有**删除断言、没有放宽 Lint baseline，也**不声称**全部测试是绿的；
+  CI 只跑已审的 224 个 feature 测试（本地这 224 个已通过），并把它当作阻断条件。
 - 本 workflow 不做 `assembleDebug` / `assembleRelease`，也不跑 Lint；原有 workflow 的职责没变。
 - fork 只要没有原私钥就产不出“可覆盖更新”的包，这是签名数学决定的，不是配置问题；
   但“原私钥”和“fork”是两件事——私钥可以只留在原构建者机器上离线签（§4.3），
   也可以配进 fork 的 secrets（§4.4），只要证书是原证书就能通过校验。
 - workflow 里的 shell 逻辑（输入校验、逐包安装与落地检查、summary 四种状态、签名 step 的
   `umask 077` 与 cleanup）已经在真实的 bash 里跑过；
-  完整的 `assembleVideoCoexist` / `assembleVideoUpdate` 是本地 Gradle 跑过的（两个 variant 均 BUILD SUCCESSFUL），
-  GitHub runner 上的同一套构建与真机安装**没有**在本次实现中执行，不声称已验证。
-- 两个真实产物（`app/build/outputs/apk/videoCoexist/app-arm64-v8a-videoCoexist.apk`、
-  `app/build/outputs/apk/videoUpdate/app-arm64-v8a-videoUpdate-unsigned.apk`）
+  完整的 `assembleVideoCoexist` / `assembleVideoUpdate` 是本地 Gradle 跑过的（两个 variant 均 BUILD SUCCESSFUL）；
+  但**云端构建还在进行中**：`yuny6617/orangechat` 的 run `42722493142`（head `68a1769`）
+  在写这段时 `build` job 仍是 `in_progress`，本文不把它写成成功，结果以那次 run 的实际结论为准；
+  GitHub runner 上的完整流程与真机安装**没有**在本次实现中执行，不声称已验证。
+- 上面提到的两个真实产物是**本地构建**的
+  （`app/build/outputs/apk/videoCoexist/app-arm64-v8a-videoCoexist.apk`、
+  `app/build/outputs/apk/videoUpdate/app-arm64-v8a-videoUpdate-unsigned.apk`），
   已用 `tools/apk_identity.py` 实际校验通过：前者是共享 debug 证书的 v2/v3 签名，
-  后者被两个来源同时确认 unsigned。
+  后者被两个来源同时确认 unsigned；它们不是云端 run 的产物。
 - R8 mapping（尤其 `mapping.txt`）体积可观；它作为独立 artifact 上传，只用于崩溃回溯，
   不含密钥，也不要把它和 APK 混在同一个 artifact 里。

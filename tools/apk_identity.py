@@ -431,11 +431,13 @@ def _jar_signature_entries(names: Iterable[str]) -> tuple[str, ...]:
 def scan_zip_signature(apk: str | os.PathLike[str]) -> ZipSignatureEvidence:
     """Inspect the ZIP container without relying on apksigner's wording.
 
-    Detects a JAR (v1) signature by its ``META-INF`` entries and a v2/v3/v4
+    Detects a JAR (v1) signature by its ``META-INF`` entries and a v2/v3
     signature by the ``APK Sig Block 42`` magic that must sit immediately
-    before the central directory.  Any other bytes between the last local entry
-    and the central directory are reported as an error: an APK that cannot be
-    explained is not an APK this tool is willing to call unsigned.
+    before the central directory.  Scheme v4 is not part of the APK container
+    (it is an external ``.idsig`` file), so the ZIP scan neither sees nor needs
+    to see it.  Any other bytes between the last local entry and the central
+    directory are reported as an error: an APK that cannot be explained is not
+    an APK this tool is willing to call unsigned.
     """
 
     path = Path(apk)

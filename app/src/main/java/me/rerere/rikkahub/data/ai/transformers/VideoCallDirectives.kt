@@ -11,6 +11,7 @@ import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.video.VideoCallRuntime
+import me.rerere.rikkahub.data.video.VideoGiftCustomization
 import me.rerere.rikkahub.data.video.VideoGiftProtocol
 import me.rerere.rikkahub.data.video.videoGiftAnnotation
 
@@ -36,6 +37,7 @@ internal fun applyVideoCallDirectives(
     requestToken: String?,
     session: VideoCallDirectiveSession?,
     nowMillis: Long = System.currentTimeMillis(),
+    giftNames: Map<String, String> = emptyMap(),
 ): List<UIMessage> {
     val plan = stage.plan()
     // 只看"正在生成的这一条"：历史回复永远不会被补发礼物，也不会被重写。
@@ -84,6 +86,8 @@ internal fun applyVideoCallDirectives(
                                 conversationId = conversationId.orEmpty(),
                                 turnMessageId = messageId,
                                 createdAtMillis = nowMillis,
+                                // 名字按**这一刻**的设置快照落库：以后改名不会改写这条历史。
+                                displayName = VideoGiftCustomization.nameOf(giftNames, gift),
                             ),
                         )
                     }

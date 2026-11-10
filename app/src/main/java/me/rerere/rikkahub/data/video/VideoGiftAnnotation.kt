@@ -16,23 +16,35 @@ import me.rerere.ai.ui.UIMessageAnnotation
  * 编译执行（见 RUN_CORE_TESTS.ps1），不需要为了测协议解析而去 stub 一个消息类型。
  */
 
-/** 把一次生效的礼物变成可持久化的聊天礼物卡注解。 */
+/**
+ * 把一次生效的礼物变成可持久化的聊天礼物卡注解。
+ *
+ * [displayName] 是**写入当时**的展示名快照（来自用户当时的设置）。
+ * 之后用户再改名字，这条历史记录也不会跟着变 —— 打印在卡上的还是当时那一次的名字。
+ */
 fun videoGiftAnnotation(
     gift: VideoGift,
     conversationId: String,
     turnMessageId: String,
     createdAtMillis: Long,
+    displayName: String = gift.displayName,
 ): UIMessageAnnotation.VideoCallGift = UIMessageAnnotation.VideoCallGift(
     id = "$turnMessageId:${gift.id}",
     giftId = gift.id,
-    giftName = gift.displayName,
+    giftName = displayName.ifBlank { gift.displayName },
     conversationId = conversationId,
     turnMessageId = turnMessageId,
     createdAtMillis = createdAtMillis,
 )
 
-/** 聊天礼物卡/气泡上的说明文字。 */
+/**
+ * 聊天礼物卡/气泡上的说明文字。
+ *
+ * 优先用注解里记录的快照名（[UIMessageAnnotation.VideoCallGift.giftName]）：
+ * 老数据没有名字时退回内置名，历史记录因此既不会显示空白，也不会被后来的改名覆盖。
+ */
 fun UIMessageAnnotation.VideoCallGift.caption(): String {
     val gift = VideoGiftCatalog.byId(giftId)
-    return if (gift == null) giftName.ifBlank { "视频礼物" } else "${gift.emoji} ${gift.displayName}"
+    val label = giftName.ifBlank { gift?.displayName ?: "视频礼物" }
+    return gift?.let { "${it.emoji} $label" } ?: label
 }

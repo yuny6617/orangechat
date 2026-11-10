@@ -145,11 +145,12 @@ fun RichChatCard(card: ChatInteraction, conversationId: Uuid?, readOnly: Boolean
                     Image(painterResource(illustration), null, Modifier.size(24.dp), colorFilter = interactionIconColorFilter(illustration, colors.accent))
                 }
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    val callLabel = if (card.videoCall) "视频通话" else "语音通话"
                     Text(when (card.status) {
-                        "pending" -> "语音通话邀请"
-                        "declined" -> "语音通话 · 未接听"
-                        "ended" -> if (seconds == null) "语音通话 · 已结束" else "通话结束 · %02d:%02d".format(seconds / 60, seconds % 60)
-                        else -> if (seconds == null) "语音通话" else "语音通话 · %02d:%02d".format(seconds / 60, seconds % 60)
+                        "pending" -> if (card.videoCall) "视频通话邀请" else "语音通话邀请"
+                        "declined" -> "$callLabel · 未接听"
+                        "ended" -> if (seconds == null) "$callLabel · 已结束" else "通话结束 · %02d:%02d".format(seconds / 60, seconds % 60)
+                        else -> if (seconds == null) callLabel else "$callLabel · %02d:%02d".format(seconds / 60, seconds % 60)
                     },
                         color = colors.ink, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text("✦ $callState · 点击查看", color = colors.ink.copy(alpha = .75f), fontSize = 10.sp, lineHeight = 15.sp,

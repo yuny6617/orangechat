@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -845,6 +845,16 @@ sealed class UIMessageAnnotation {
         val callTranscript: List<CallTranscriptEntry>? = null,
         // 视频通话结束汇总："小心心 ×2 · 花束 ×1"；语音通话为空。
         val giftSummary: String = "",
+        // 这一通是不是视频通话（纯语音通话保持原显示，不受通话卡收敛影响）。
+        val videoCall: Boolean = false,
+        /**
+         * 这通视频通话覆盖的持久消息 id（逐条文字气泡在聊天页里被隐藏，但原文仍在
+         * `Conversation.messagesForGeneration` 里，模型照常读到一次）。
+         *
+         * 默认空列表是**故意的**：老数据没有关联时一律"不猜、不隐藏"，
+         * 用户至少还能看到原来的逐条消息；只有本字段真的写进来了才做显示收敛。
+         */
+        val videoCallMessageIds: List<String> = emptyList(),
     ) : UIMessageAnnotation()
 
     /**

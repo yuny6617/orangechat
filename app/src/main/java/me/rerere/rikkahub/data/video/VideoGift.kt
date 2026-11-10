@@ -266,6 +266,9 @@ data class VideoGiftTally(val counts: Map<VideoGift, Int> = emptyMap()) {
     }
 }
 
-/** 通话结束后写进结束通话卡的那一行。 */
-fun giftSummaryLine(tally: VideoGiftTally): String =
-    if (tally.isEmpty) "" else "视频礼物：${tally.summary()}"
+/**
+ * 通话结束后写进结束通话卡的那一行。
+ *
+ * 真正的实现（可以带自定义展示名）在 `VideoGiftCustomization.kt` 里；这里不再重复一份，
+ * 避免"改名之后卡上还是旧名字"这种两套实现各自漂移。
+ */

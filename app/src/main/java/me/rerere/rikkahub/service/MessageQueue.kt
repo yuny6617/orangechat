@@ -49,12 +49,24 @@ data class QueuedMessage(
      * 不再用"最后一条用户消息"这种可复用的伪身份。
      */
     val requestToken: String? = null,
+    /**
+     * 这一轮的**临时录音**（视频通话手动录的那一段，直传路线）。
+     *
+     * 约定与 `transientImageUrls` 一致：不进聊天历史、不持久化；只在这一条请求里
+     * 作为音频输入出现一次。所有权在 [me.rerere.rikkahub.data.video.TransientAudioClip]：
+     * 队列丢弃只能删"还没交给请求"的段，正在序列化的那一段由请求自己释放。
+     */
+    val transientAudio: me.rerere.rikkahub.data.video.TransientAudioClip? = null,
     val completion: CompletableDeferred<Unit> = CompletableDeferred(),
     val reply: CompletableDeferred<String?> = CompletableDeferred(),
 ) {
     /** 本消息是否还带着**永久**图片（手动夹帧）；暂停时用它决定要不要换掉"附图"说明。 */
     val hasPermanentImage: Boolean
         get() = parts.any { it is UIMessagePart.Image }
+
+    /** 这一条是否带着只在本轮有效的附件（临时图或临时录音）。 */
+    val hasTransientAttachment: Boolean
+        get() = transientImageUrls.isNotEmpty() || transientAudio != null
 }
 
 data class MessageQueueState(
@@ -117,6 +129,7 @@ class MessageQueue internal constructor(
         transientImageUrls: List<String> = emptyList(),
         ownedImageUrls: List<String> = emptyList(),
         requestToken: String? = null,
+        transientAudio: me.rerere.rikkahub.data.video.TransientAudioClip? = null,
     ): QueuedMessage? {
         if (parts.isEmptyInputMessage() && existingMessageId == null) return null
         if (existingMessageId != null && (state.value.messages + inFlight.values).any { it.existingMessageId == existingMessageId }) return null
@@ -129,6 +142,7 @@ class MessageQueue internal constructor(
             transientImageUrls = transientImageUrls.toList(),
             ownedImageUrls = ownedImageUrls.toList(),
             requestToken = requestToken,
+            transientAudio = transientAudio,
         )
         // Resolve a blocked caller before publishing the entry: no observer can attach under this monitor.
         // Content and completion remain available for an explicit user resume.
@@ -198,26 +212,29 @@ class MessageQueue internal constructor(
     /**
      * 暂停队列。
      *
-     * 仍然留在队列里、尚未派发的项：它们的"本轮附图"其实已经不属于任何一个请求了
-     * （将来 resume 时是一次全新的请求），所以在这里就把临时文件删掉、把 URL 从队列项上
-     * 摘掉。否则 resume/重试会带着一个已经不存在的图片路径，让模型以为有图其实没有。
+     * 仍然留在队列里、尚未派发的项：它们的"本轮附图/本轮录音"其实已经不属于任何一个请求了
+     * （将来 resume 时是一次全新的请求），所以在这里就把临时文件删掉、把地址从队列项上
+     * 摘掉。否则 resume/重试会带着一个已经不存在的路径，让模型以为有图/有音频其实没有。
      *
-     * 同时还要做两件事（否则恢复的是一个"看起来很合法的旧请求"）：
-     * 1. 把 [QueuedMessage.transientSystemPrompt] 换成**无图版本**
-     *    （永久手动夹帧仍在 parts 里，那种情况保持原说明）；
+     * 同时还要做三件事（否则恢复的是一个"看起来很合法的旧请求"）：
+     * 1. 把 [QueuedMessage.transientSystemPrompt] 换成**无临时附件版本**
+     *    （永久手动夹帧仍在 parts 里，那种情况由提交方按实际附图重算）；
      * 2. 撤销这个 token 的送礼/留影授权并把它从队列项上摘掉：
-     *    恢复队列是一次新请求，不能复用暂停前的权限。
+     *    恢复队列是一次新请求，不能复用暂停前的权限；
+     * 3. 录了一段但没发出去的那条消息，**追加一句"录音已失效"的说明**：
+     *    它仍然可以恢复成一条普通文字消息，但绝不能在被当成"完整语音请求"自动送出去。
      */
     fun pause() {
         val (stripped, waiters) = synchronized(this) {
             val pending = state.value.messages
             val updated = pending.map { message -> stripTransientLocked(message) }
             publish(state.value.copy(paused = true, messages = updated))
-            // 回调拿到的是**原始的**队列项（带着 token 与临时图地址），便于终结方准确清理。
+            // 回调拿到的是**原始的**队列项（带着 token 与临时附件地址），便于终结方准确清理。
             pending.zip(updated).filter { (before, after) -> before !== after } to pending.toList()
         }
         stripped.forEach { (before, _) ->
             discardTransientImages(before)
+            discardTransientAudio(before)
             // 暂停之后这一轮不会再被执行：token 的送礼/留影授权必须当场撤销，不能留着。
             revokeRequestToken(before)
         }
@@ -280,22 +297,35 @@ class MessageQueue internal constructor(
         message.reply.complete(null)
         message.completion.cancel(CancellationException("Queued message was withdrawn"))
         discardTransientImages(message)
+        discardTransientAudio(message)
         revokeRequestToken(message)
         onMessageDiscarded?.invoke(message)
     }
 
     /**
-     * 暂停时把一个队列项上的"本轮附图"摘干净。
+     * 暂停时把一个队列项上的"本轮临时附件"摘干净。
      *
-     * 注意永久手动夹帧仍在 [QueuedMessage.parts] 里：那种情况不改写系统提示，
-     * 因为"本轮确实附了一张图"仍然成立。
+     * 注意永久手动夹帧仍在 [QueuedMessage.parts] 里：那种情况不改写系统提示的内容来源，
+     * 由提交方按"实际还剩什么"重算（见 VoiceCallService 的提示词变体）。
      */
     private fun stripTransientLocked(message: QueuedMessage): QueuedMessage {
-        val hasTransient = message.transientImageUrls.isNotEmpty()
+        val hasTransient = message.hasTransientAttachment
         val hasToken = message.requestToken != null
         if (!hasTransient && !hasToken) return message
         return message.copy(
             transientImageUrls = emptyList(),
+            transientAudio = null,
+            // 追加"录音已失效"的说明：这条消息仍然会作为**普通文字**送出去，
+            // 但不能让模型以为它还能听到那段（或者替用户编一段逐字稿）。
+            parts = if (message.transientAudio != null) {
+                message.parts + UIMessagePart.Text(
+                    me.rerere.rikkahub.data.video.VideoVoicePolicy.expiredVoiceNote(
+                        message.transientAudio.durationMs,
+                    ),
+                )
+            } else {
+                message.parts
+            },
             transientSystemPrompt = if (hasTransient && !message.hasPermanentImage) {
                 message.transientSystemPromptWithoutImages ?: message.transientSystemPrompt
             } else {
@@ -310,6 +340,18 @@ class MessageQueue internal constructor(
     private fun discardTransientImages(message: QueuedMessage) {
         if (message.transientImageUrls.isEmpty()) return
         onDiscardTransientImages?.invoke(message)
+    }
+
+    /**
+     * 队列项被放弃/暂停时终结这一轮的临时录音。
+     *
+     * 走录音自己的所有权：`release(fromRequest = false)` 在"请求已经认领"时会返回 false
+     * 而**不动文件**，所以不存在"队列把正在序列化的那段删掉"。
+     * 也正因为所有权在 [me.rerere.rikkahub.data.video.TransientAudioClip] 自己身上，
+     * 这里不需要（也不允许）再按目录扫一遍录音文件。
+     */
+    private fun discardTransientAudio(message: QueuedMessage) {
+        message.transientAudio?.release(fromRequest = false)
     }
 
     /** 这一轮不会再有生成了：撤销它的通话授权（礼物/留影）。 */

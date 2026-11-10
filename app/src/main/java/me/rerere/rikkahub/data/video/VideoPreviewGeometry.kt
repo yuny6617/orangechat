@@ -89,11 +89,15 @@ data class Affine(
 /**
  * 预览层最终要交给 `TextureView.setTransform` 的变换。
  *
- * [matrix] 是**视图坐标系**下的完整矩阵（含抵消 TextureView 默认拉伸的部分），
- * UI 层直接 `setValues` 即可；[rotationDegrees]/[mirrorHorizontally] 只用于日志与测试断言。
+ * [matrix] 是**视图坐标系**下的完整矩阵（含抵消 TextureView 默认拉伸的部分 + 用户校准），
+ * UI 层直接 `setValues` 即可；[rotationDegrees]/[calibrationDegrees]/[mirrorHorizontally]
+ * 只用于日志与测试断言（**不参与计算**）。
  */
 data class PreviewTransform(
+    /** 由 sensor/display 推出来的角度（不含用户校准）。 */
     val rotationDegrees: Int = 0,
+    /** 用户手动校准的角度（只影响预览，不影响抓帧 JPEG 的方向）。 */
+    val calibrationDegrees: Int = 0,
     val mirrorHorizontally: Boolean = false,
     val matrix: Affine = Affine.IDENTITY,
 )
@@ -208,15 +212,24 @@ object VideoPreviewGeometry {
         }
 
     /**
-     * 预览矩阵。
+     * 预览矩阵的**几何部分**（不含用户校准）。
      *
-     * 关键点（REVIEW_R4 §5）：`TextureView` 默认就会把 buffer **拉伸**到 view 大小
-     * （相当于先做 `S = diag(viewW/bufferW, viewH/bufferH)`），所以在默认拉伸之上再
-     * "postRotate + 按像素比放一个等比 scale"是**消除不了**这次拉伸的，反而会留下黑边或压扁。
+     * `TextureView` 默认会把 buffer **拉伸**到 view 大小（相当于先做
+     * `S = diag(viewW/bufferW, viewH/bufferH)`）。这里算出"想要的最终画面"
+     * [visibleAffine]（buffer 坐标 → view 坐标），再右乘 `S⁻¹` 把那层默认拉伸抵消掉：
+     * `setTransform` 拿到的矩阵 M 满足
      *
-     * 正确做法：先算出想要的最终画面 [visibleAffine]（buffer 坐标 → view 坐标，
-     * 旋转 + 等比 centerCrop + 镜像），再左乘 `S⁻¹` 把那层默认拉伸抵消掉：
-     * `setTransform` 拿到的矩阵 M 必须满足 `M ∘ S = F`。
+     * ```
+     * M ∘ S = F      （可以断言、也有测试逐点验证）
+     * ```
+     *
+     * 从 `M ∘ S = F` 可得 `M = F ∘ S⁻¹`（函数复合从右向左执行）。
+     * 不能写成 `S⁻¹ ∘ F`；矩阵一般不可交换。这里关于屏幕最终画面 `M ∘ S = F` 的描述，
+     * 仍以 TextureView 实际复合顺序为前提。
+     *
+     * 该前提在本轮**没有**通过 AOSP framework 源码或真机渲染验证。
+     * Android Matrix 桥接测试只能验证给定复合顺序下的布局与几何，不能证明 TextureView
+     * 或 OEM 生产者实际采用了此顺序；仍须在目标设备及原本正确的设备上验收。
      *
      * 前提是调用方用 `setDefaultBufferSize` 把 buffer 尺寸设成相机真实输出尺寸
      * （否则 `S` 就不是这里的 `diag(vw/bw, vh/bh)`，两者必须一致）。
@@ -253,7 +266,7 @@ object VideoPreviewGeometry {
         return matrix
     }
 
-    /** 给 `TextureView.setTransform` 的矩阵 = 想要的画面 ∘ 默认拉伸的逆。 */
+    /** 给 `TextureView.setTransform` 的矩阵 = 想要的画面 ∘ 默认拉伸的逆（即 `M ∘ S = F`）。 */
     fun textureViewAffine(
         rotationDegrees: Int,
         mirror: Boolean,
@@ -287,21 +300,87 @@ object VideoPreviewGeometry {
         bufferHeight: Int,
         viewWidth: Int,
         viewHeight: Int,
+        /**
+         * 用户手动校准角度（只作用于**预览**）。
+         *
+         * 这是"几何算完之后的最后一道人工修正"：真机（OPPO/ColorOS）上画面差 90° 时，
+         * 用户点一下"右转"就能转正，不依赖我们对 framework 复合顺序的推断是否正确。
+         * 抓帧 JPEG 的方向**不包含**这个角度（见 [captureRotationDegrees]）。
+         */
+        calibrationDegrees: Int = 0,
     ): PreviewTransform {
         val rotation = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
+        val base = textureViewAffine(
+            rotationDegrees = rotation,
+            mirror = frontFacing,
+            bufferWidth = bufferWidth,
+            bufferHeight = bufferHeight,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight,
+        )
         return PreviewTransform(
             rotationDegrees = rotation,
+            calibrationDegrees = PreviewCalibration.normalize(calibrationDegrees),
             mirrorHorizontally = frontFacing,
-            matrix = textureViewAffine(
-                rotationDegrees = rotation,
-                mirror = frontFacing,
-                bufferWidth = bufferWidth,
-                bufferHeight = bufferHeight,
-                viewWidth = viewWidth,
-                viewHeight = viewHeight,
-            ),
+            matrix = withPreviewCalibration(base, calibrationDegrees, viewWidth, viewHeight),
         )
     }
+
+    /**
+     * 把"用户校准"叠到已经算好的预览矩阵上。
+     *
+     * 输入必须是 [textureViewAffine] 的完整未裁剪矩阵 M，满足 `M S = F`。
+     * S 将整个 buffer 映射到 `[0, viewWidth] × [0, viewHeight]`；所以将这个矩形的四角
+     * 经 M、再经校准旋转 R 映射，即可得到完整源图的旋转后边界（不是 view 已裁剪的截图）。
+     * 对该边界重新求统一 centerCrop 缩放 K 和居中平移，输出 `M' = K R M`，
+     * 则 `M' S = K R F`：只转预览、铺满视图且不拉伸。90/270 后宽高互换，
+     * 仅绕中心旋转而不重算 cover 会在非方形 view 中露出空白。
+     *
+     * 所有旋转均归一化为直角，因此旋转后的源图仍是轴对齐矩形；此处包围盒就是源图边界。
+     * K 可小于 1：重新利用原先被裁掉的 buffer 区域，避免只放大旧 view 截图导致过度裁剪。
+     */
+    fun withPreviewCalibration(
+        matrix: Affine,
+        calibrationDegrees: Int,
+        viewWidth: Int,
+        viewHeight: Int,
+    ): Affine {
+        val rotation = PreviewCalibration.normalize(calibrationDegrees)
+        if (rotation == 0 || viewWidth <= 0 || viewHeight <= 0) return matrix
+        val rotated = matrix.then(
+            Affine.rotateAround(rotation, viewWidth / 2f, viewHeight / 2f),
+        )
+        val corners = listOf(
+            rotated.map(0f, 0f),
+            rotated.map(viewWidth.toFloat(), 0f),
+            rotated.map(viewWidth.toFloat(), viewHeight.toFloat()),
+            rotated.map(0f, viewHeight.toFloat()),
+        )
+        val minX = corners.minOf { it.x }
+        val maxX = corners.maxOf { it.x }
+        val minY = corners.minOf { it.y }
+        val maxY = corners.maxOf { it.y }
+        val width = maxX - minX
+        val height = maxY - minY
+        if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) return matrix
+        val coverScale = maxOf(viewWidth / width, viewHeight / height)
+        return rotated
+            .then(Affine.translate(-(minX + width / 2f), -(minY + height / 2f)))
+            .then(Affine.scale(coverScale))
+            .then(Affine.translate(viewWidth / 2f, viewHeight / 2f))
+    }
+
+    /**
+     * 抓帧要用的旋转角（**不含**用户预览校准）。
+     *
+     * 预览校准是"我看到的画面偏了"的人工修正；抓帧/落盘 JPEG 的方向由 sensor/display
+     * 几何唯一决定，不能被预览校准带着转（用户明确要求"不改变 JPEG 方向"）。
+     */
+    fun captureRotationDegrees(
+        sensorOrientation: Int,
+        displayRotationDegrees: Int,
+        frontFacing: Boolean,
+    ): Int = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
 
     private fun Affine.inverse(): Affine {
         val determinant = a * d - b * c
@@ -319,4 +398,66 @@ object VideoPreviewGeometry {
             f = -(inverseB * e + inverseD * f),
         )
     }
+}
+
+/**
+ * 预览方向的**人工校准**（只作用于预览画面，绝不改变抓帧 JPEG 的方向）。
+ *
+ * ## 为什么要有人工校准
+ *
+ * camera2 的 buffer 朝向、`TextureView` 的默认拉伸、生产者隐式变换三者叠加之后的真实
+ * 符号约定**只能靠真机确认**（本环境拿不到 OEM 的 framework 源码，也无法联网验证）。
+ * 与其继续猜"自动几何到底哪一步反了"，不如给一个用户一按就能看出来的兜底：
+ * 「右转 90° / 左转 90° / 复位」，结果落在设置里，下次进来还是这个角度。
+ *
+ * 用户实测反馈（OPPO Reno14 Pro / Android 16 / ColorOS 16.0.5）：预览**左转 90°**，
+ * 需要右转 90° 校准。这不是已验证的 HAL 行为，也不能外推到其他机型或系统版本。
+ * [DEFAULT_DEGREES] 不对未知设备附加旋转；[deviceDefault] 仅提供基于这次用户反馈的窄匹配建议，
+ * 由设置/UI 层接入自动策略，且用户显式保存的校准值应始终优先。
+ *
+ * ## 边界
+ *
+ * - 只影响 [VideoPreviewGeometry.textureViewTransform] 的预览矩阵；
+ * - [VideoPreviewGeometry.captureRotationDegrees] 与落盘归一化**不含**它，
+ *   所以"预览被校准过"不会让存下来的抓帧/照片跟着转；
+ * - 换镜头、退后台再回来、页面重建都**不清空**（角度是用户的设置，不是一次性状态）。
+ */
+object PreviewCalibration {
+    /** 未知设备默认不附加旋转；设备建议值须由调用方显式选择。 */
+    const val DEFAULT_DEGREES: Int = 0
+
+    /**
+     * 仅基于用户反馈的设备建议，不表示已证实的 OEM/HAL 规律。
+     * Build.MODEL 若返回硬件编号而非营销名，不猜测编号：退回 0，交给手动校准。
+     * sdkInt=36 只约束 Android 16，不能证明 ColorOS 版本；调用方仍须真机验收。
+     */
+    fun deviceDefault(manufacturer: String, model: String, sdkInt: Int): Int =
+        if (manufacturer.trim().equals("OPPO", ignoreCase = true) &&
+            model.contains("Reno14 Pro", ignoreCase = true) && sdkInt == 36
+        ) {
+            90
+        } else {
+            DEFAULT_DEGREES
+        }
+
+    /** 一次按钮点击转动的角度。 */
+    const val STEP_DEGREES: Int = 90
+
+    /** 面板上的四个档位，与 [normalize] 之后的值一一对应。 */
+    val STEPS: List<Int> = listOf(0, 90, 180, 270)
+
+    /** 任意输入 → 0/90/180/270（非法值既不会写进设置，也不会进矩阵）。 */
+    fun normalize(degrees: Int): Int = VideoPreviewGeometry.normalizeDegrees(degrees)
+
+    /** 画面顺时针再转 90°。 */
+    fun rotateRight(current: Int): Int = normalize(current + STEP_DEGREES)
+
+    /** 画面逆时针再转 90°（发现转多了就用它回退）。 */
+    fun rotateLeft(current: Int): Int = normalize(current - STEP_DEGREES)
+
+    /** 复位成"不做人工校准"。 */
+    fun reset(): Int = 0
+
+    /** 面板上显示的角度文本。 */
+    fun label(degrees: Int): String = "${normalize(degrees)}°"
 }
