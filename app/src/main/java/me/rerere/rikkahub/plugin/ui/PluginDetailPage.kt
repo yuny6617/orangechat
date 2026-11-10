@@ -71,6 +71,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.plugin.model.PluginConfigField
 import me.rerere.rikkahub.plugin.model.PluginFolder
 import me.rerere.rikkahub.plugin.model.PluginInfo
+import me.rerere.rikkahub.plugin.model.effectivePluginConfig
 import me.rerere.rikkahub.plugin.model.PluginToolDefinition
 import me.rerere.rikkahub.ui.components.ai.ModelSelector
 import org.koin.androidx.compose.koinViewModel
@@ -128,6 +129,8 @@ fun PluginDetailPage(
         configValues = plugin.config.toMutableMap()
     }
 
+    // Keep only explicit overrides in the draft; displaying/saving must not freeze defaults.
+    val effectiveConfig = effectivePluginConfig(plugin.manifest.config, configValues)
     val folders by viewModel.folders.collectAsState()
 
     Scaffold(
@@ -214,13 +217,21 @@ fun PluginDetailPage(
                 plugin.manifest.config.forEach { field ->
                     ConfigField(
                         field = field,
-                        value = configValues[field.name],
+                        value = effectiveConfig[field.name],
                         onValueChange = { value ->
                             configValues = configValues.toMutableMap().apply {
                                 if (value != null) put(field.name, value) else remove(field.name)
                             }
                         }
                     )
+                    TextButton(
+                        enabled = configValues.containsKey(field.name),
+                        onClick = {
+                            configValues = configValues.toMutableMap().apply { remove(field.name) }
+                        }
+                    ) {
+                        Text("恢复默认")
+                    }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
@@ -396,17 +407,11 @@ private fun StringConfigField(
     onValueChange: (JsonElement?) -> Unit,
     isPassword: Boolean = false
 ) {
-    var textValue by remember(field.name) {
-        val v = value as? JsonPrimitive
-        val d = field.default as? JsonPrimitive
-        mutableStateOf(v?.contentOrNull ?: d?.contentOrNull ?: "")
-    }
+    // JsonNull displays as empty, but remains JsonNull until the user actually edits it.
+    val textValue = (value as? JsonPrimitive)?.contentOrNull ?: ""
     OutlinedTextField(
         value = textValue,
-        onValueChange = {
-            textValue = it
-            onValueChange(if (it.isEmpty()) null else JsonPrimitive(it))
-        },
+        onValueChange = { onValueChange(JsonPrimitive(it)) },
         label = { Text(field.label) },
         placeholder = { Text(field.placeholder ?: "") },
         supportingText = field.description?.let { { Text(it) } },
@@ -423,11 +428,7 @@ private fun BooleanConfigField(
     value: JsonElement?,
     onValueChange: (JsonElement?) -> Unit
 ) {
-    var checked by remember(field.name) {
-        val v = value as? JsonPrimitive
-        val d = field.default as? JsonPrimitive
-        mutableStateOf(v?.booleanOrNull ?: d?.booleanOrNull ?: false)
-    }
+    val checked = (value as? JsonPrimitive)?.booleanOrNull ?: false
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -438,7 +439,7 @@ private fun BooleanConfigField(
                 Text(text = field.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Switch(checked = checked, onCheckedChange = { checked = it; onValueChange(JsonPrimitive(it)) })
+        Switch(checked = checked, onCheckedChange = { onValueChange(JsonPrimitive(it)) })
     }
 }
 
@@ -448,11 +449,7 @@ private fun SelectConfigField(
     value: JsonElement?,
     onValueChange: (JsonElement?) -> Unit
 ) {
-    var selectedValue by remember(field.name) {
-        val v = value as? JsonPrimitive
-        val d = field.default as? JsonPrimitive
-        mutableStateOf(v?.contentOrNull ?: d?.contentOrNull ?: field.options?.firstOrNull()?.value ?: "")
-    }
+    val selectedValue = (value as? JsonPrimitive)?.contentOrNull ?: ""
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Text(text = field.label, style = MaterialTheme.typography.bodyLarge)
         if (field.description != null) {

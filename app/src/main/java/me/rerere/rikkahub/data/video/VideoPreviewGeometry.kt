@@ -114,7 +114,7 @@ data class PreviewTransform(
  *
  * 角度公式（Android 官方 `setCameraDisplayOrientation` 的等价形式）：
  * - 后摄：`(sensor - display + 360) % 360`；
- * - 前摄：`(sensor + display) % 360`，并且预览/照片水平镜像。
+ * - 前摄：`(sensor + display) % 360`；预览镜像独立可选，通话 JPEG 不镜像以保留文字方向。
  */
 object VideoPreviewGeometry {
     /**
@@ -179,7 +179,7 @@ object VideoPreviewGeometry {
      * 抓帧落盘时的**唯一一次**归一化：sensor 原始像素 → 正立图像。
      *
      * 输出图像的尺寸由 [uprightSize] 给出（90/270 时宽高互换）。
-     * 前摄在这里镜像，保证"预览里看到的自己"和"照片里的自己"是同一侧。
+     * mirror 仅由图像调用方指定；通话 JPEG 传 false，不随用户预览镜像变化。
      */
     fun uprightImageAffine(
         rotationDegrees: Int,
@@ -308,11 +308,12 @@ object VideoPreviewGeometry {
          * 抓帧 JPEG 的方向**不包含**这个角度（见 [captureRotationDegrees]）。
          */
         calibrationDegrees: Int = 0,
+        previewMirrored: Boolean = frontFacing,
     ): PreviewTransform {
         val rotation = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
         val base = textureViewAffine(
             rotationDegrees = rotation,
-            mirror = frontFacing,
+            mirror = false,
             bufferWidth = bufferWidth,
             bufferHeight = bufferHeight,
             viewWidth = viewWidth,
@@ -321,8 +322,11 @@ object VideoPreviewGeometry {
         return PreviewTransform(
             rotationDegrees = rotation,
             calibrationDegrees = PreviewCalibration.normalize(calibrationDegrees),
-            mirrorHorizontally = frontFacing,
-            matrix = withPreviewCalibration(base, calibrationDegrees, viewWidth, viewHeight),
+            mirrorHorizontally = previewMirrored,
+            // Flip last, after calibration rotation: left/right always means screen space.
+            matrix = withPreviewCalibration(base, calibrationDegrees, viewWidth, viewHeight).let {
+                if (previewMirrored) it.then(Affine.mirrorAround(viewWidth / 2f, viewHeight / 2f)) else it
+            },
         )
     }
 

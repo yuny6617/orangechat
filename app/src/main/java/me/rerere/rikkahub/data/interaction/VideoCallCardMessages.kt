@@ -68,27 +68,34 @@ internal fun videoCallLinkedMessageIds(
  * 只有同时满足下面全部条件的卡才生效：
  * - `kind == "call"` 且 `videoCall == true`（红包/转账卡与纯语音通话永远不参与）；
  * - 卡上写着 [ChatInteraction.videoCallMessageIds]（默认空 → 老数据不隐藏）；
- * - 卡上有**可展示的 transcript**：卡内必须能看到同样的完整文字，
- *   否则宁可继续铺逐条消息，也不能把文字藏到用户再也打不开的地方。
+ * - 详情有匹配会话的完整原消息源，精确 ID 恢复后包含同角色全文；旧 snapshot 可为空或过期。
+ *   未提供可达详情源时失败关闭，宁可继续铺逐条消息，也不能把文字藏没。
+ * [messages] 限定可见卡与待隐藏消息；[historyMessages] 必须是详情使用的未过滤当前分支原文。
  *
  * 卡被删除 / 分支被切走时，这条注解就不在 [messages] 里了，集合自然为空 —— 原文自动恢复可见。
  */
-internal fun videoCallCoveredMessageIds(messages: List<UIMessage>): Set<Uuid> {
+internal fun videoCallCoveredMessageIds(
+    messages: List<UIMessage>,
+    historyMessages: List<UIMessage> = emptyList(),
+    historyConversationId: Uuid? = null,
+): Set<Uuid> {
+    if (historyConversationId == null) return emptySet()
     val covered = LinkedHashSet<Uuid>()
     messages.flatMap { it.annotations }.filterIsInstance<ChatInteraction>()
-        .filter { it.kind == "call" && it.videoCall && it.videoCallMessageIds.isNotEmpty() && !it.callTranscript.isNullOrEmpty() }
+        .filter { it.kind == "call" && it.videoCall && it.videoCallMessageIds.isNotEmpty() &&
+            it.canAccessCallHistory(historyConversationId) }
         .forEach { card ->
             // The history route uses these same exact-ID rows, including late streaming revisions.
-            val accessible = card.transcriptFrom(messages, "我", "对方")
-            val persisted = card.callTranscript.orEmpty()
-            card.videoCallMessageIds.forEach messageLoop@{ raw ->
+            val accessible = card.transcriptFrom(historyMessages, "我", "对方")
+            card.resolvedVideoCallMessageIds(historyMessages).forEach messageLoop@{ raw ->
                 val message = messages.firstOrNull { it.id.toString() == raw } ?: return@messageLoop
-                if (!message.absorbedIntoVideoCallCard()) return@messageLoop
+                // Coverage is about the spoken Text, not the entire mixed-part message.
+                if (message.parts.none { it is UIMessagePart.Text }) return@messageLoop
                 val row = message.videoCallTranscriptEntry("我", "对方") ?: return@messageLoop
-                // Fail closed for empty/incomplete snapshots. Matching role + FULL text is required;
-                // a prefix, aggregate partial or another role's identical sentence is not proof.
-                if (persisted.any { it.role == row.role && it.text == row.text } &&
-                    accessible.any { it.role == row.role && it.text == row.text }) covered += message.id
+                // The exact original must be reachable, not just an equal sentence in an old snapshot.
+                val historyRow = historyMessages.firstOrNull { it.id == message.id }
+                    ?.videoCallTranscriptEntry("我", "对方")
+                if (historyRow == row && accessible.any { it == row }) covered += message.id
             }
         }
     return covered
@@ -105,9 +112,16 @@ internal fun UIMessage.absorbedIntoVideoCallCard(): Boolean {
     if (parts.isEmpty()) return false
     if (parts.any { it !is UIMessagePart.Text }) return false
     // 卡自己的消息（以及头像互动等带注解的消息）永远不吸收。
-    if (annotations.any { it is ChatInteraction }) return false
+    if (annotations.any { it !is me.rerere.ai.ui.UIMessageAnnotation.VideoCallReply }) return false
     return true
 }
+
+/** Render-only projection. Never feed this copy into persistence, editing or generation. */
+internal fun UIMessage.withoutVideoCallTranscriptText(): UIMessage = copy(
+    parts = parts.filterNot { it is UIMessagePart.Text },
+    // A translation is another rendering of the hidden body, not an independent attachment.
+    translation = null,
+)
 
 /**
  * 显示层的最后一步：把被通话卡吸收的**纯文字**消息从列表里去掉。
@@ -142,6 +156,31 @@ internal fun ChatInteraction.withVideoCallMessages(ids: Collection<String>): Cha
 internal fun ChatInteraction.withoutVideoCallMessages(ids: Set<String>): ChatInteraction {
     if (ids.isEmpty() || videoCallMessageIds.none { it in ids }) return this
     return copy(videoCallMessageIds = videoCallMessageIds.filterNot { it in ids })
+}
+
+/** Late IDs are admitted only by durable request ownership; never by time or neighboring text. */
+internal fun ChatInteraction.resolvedVideoCallMessageIds(messages: List<UIMessage>): List<String> {
+    val anchors = messages.filter { it.role == MessageRole.USER && it.id.toString() in videoCallMessageIds }
+        .mapTo(hashSetOf()) { it.id.toString() }
+    val replies = messages.filter { message ->
+        message.role == MessageRole.ASSISTANT && message.annotations
+            .filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.VideoCallReply>().any {
+                it.conversationId == conversationId && it.userMessageId in anchors
+            }
+    }.map { it.id.toString() }
+    val ids = (videoCallMessageIds + replies).toSet()
+    // Current branch chronology, followed by missing snapshot IDs. No branch inference.
+    return messages.map { it.id.toString() }.filter { it in ids } + ids.filter { id -> messages.none { it.id.toString() == id } }
+}
+
+/** Single immutable request marks only its new assistant outputs, including tool continuation IDs. */
+internal fun associateVideoCallReplies(
+    messages: List<UIMessage>, requestMessageIds: Set<Uuid>, conversationId: Uuid, userMessageId: Uuid?,
+): List<UIMessage> = if (userMessageId == null) messages else messages.map { message ->
+    if (message.role != MessageRole.ASSISTANT || message.id in requestMessageIds) message
+    else message.copy(annotations = message.annotations.filterNot {
+        it is me.rerere.ai.ui.UIMessageAnnotation.VideoCallReply
+    } + me.rerere.ai.ui.UIMessageAnnotation.VideoCallReply(conversationId.toString(), userMessageId.toString()))
 }
 
 /** 单张卡最多记住多少条消息 id。 */

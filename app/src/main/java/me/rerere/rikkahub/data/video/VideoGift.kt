@@ -37,6 +37,12 @@ enum class VideoGiftEffect {
 /** 全屏特效固定时长（毫秒）。低档不触发全屏特效。 */
 const val VIDEO_GIFT_EFFECT_DURATION_MS: Long = 8_200L
 
+/** 有界流星预算：96 颗分散在整段时间内，并非同时绘制 96 条渐变。 */
+internal const val VIDEO_GIFT_METEOR_COUNT: Int = 96
+internal const val VIDEO_GIFT_GALAXY_METEOR_COUNT: Int = 24
+internal const val VIDEO_GIFT_METEOR_LIFETIME: Float = 0.22f
+internal const val VIDEO_GIFT_METEOR_START_SPAN: Float = 0.78f
+
 /** 全屏特效队列上限：通话里连续送礼不能无限排队。 */
 const val VIDEO_GIFT_EFFECT_QUEUE_LIMIT: Int = 3
 

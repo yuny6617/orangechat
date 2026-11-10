@@ -11,6 +11,10 @@ import me.rerere.rikkahub.data.video.VideoGiftProtocol
 
 internal enum class CallCardDestination { Incoming, Active, History }
 
+/** Only a matching, explicitly supplied conversation can prove detail accessibility. */
+internal fun ChatInteraction.canAccessCallHistory(conversationId: kotlin.uuid.Uuid?): Boolean =
+    conversationId != null && this.conversationId == conversationId.toString()
+
 internal fun ChatInteraction.callDestination(activeConversationId: String?, activeStartedAt: Long): CallCardDestination = when {
     status == "pending" && actor == "assistant" -> CallCardDestination.Incoming
     conversationId == activeConversationId &&
@@ -52,7 +56,7 @@ internal fun ChatInteraction.linkedVideoCallTranscript(
     messages: List<UIMessage>, userName: String, assistantName: String,
 ): List<CallTranscriptEntry> {
     val byId = messages.associateBy { it.id.toString() }
-    return videoCallMessageIds.distinct().mapNotNull { byId[it]?.videoCallTranscriptEntry(userName, assistantName) }
+    return resolvedVideoCallMessageIds(messages).mapNotNull { byId[it]?.videoCallTranscriptEntry(userName, assistantName) }
 }
 
 /** Video calls recover late revisions from exact IDs; ordinary voice keeps its legacy behavior. */

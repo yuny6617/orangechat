@@ -11,7 +11,7 @@ import kotlinx.serialization.Serializable
 /**
  * 视频通话相关设置。
  *
- * 礼物默认关闭：功能与提示词在被人类审定之前不会主动启用（设置页里写明了原因）。
+ * 礼物默认关闭，由用户自行开启；不需要工具授权或人工审定。
  * 抓帧默认"每轮一帧"，只影响下一轮请求，不会在后台自动发消息。
  *
  * [voiceInputMode] 是"我说一句"的路由偏好（默认 [VideoVoiceInputMode.AUTO]）：
@@ -38,6 +38,8 @@ data class VideoCallSetting(
      * 没有真实金额）。超长会被截断到 [VideoGiftCustomization.MAX_GIFT_MESSAGE_LENGTH]。
      */
     val giftMessage: String = "",
+    /** 完整送礼提示词；空白使用内置全文。执行 id/schema、通话作用域与次数限制始终由程序校验。 */
+    val giftPrompt: String = "",
     /**
      * 预览方向的人工校准角度（0/90/180/270），**只影响预览画面**。
      *

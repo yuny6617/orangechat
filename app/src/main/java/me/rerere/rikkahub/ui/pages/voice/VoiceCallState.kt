@@ -38,6 +38,9 @@ data class VoiceCallUiState(
     val amplitudes: List<Float> = emptyList(),
     val isMuted: Boolean = false,
     val isSpeakerOn: Boolean = false,
+    val isCameraEnabled: Boolean = true,
+    /** Session-only screen-space preview flip; JPEG is never mirrored. */
+    val isPreviewMirrored: Boolean = false,
     val autoSendEnabled: Boolean = true,
     /**
      * 视频通话里"手动录一段"这一段的状态。

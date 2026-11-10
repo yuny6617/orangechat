@@ -872,6 +872,14 @@ sealed class UIMessageAnnotation {
         val createdAtMillis: Long = 0,
     ) : UIMessageAnnotation()
 
+    /** Exact request ownership, not model content; survives hang-up before a late tool round. */
+    @Serializable
+    @SerialName("video_call_reply")
+    data class VideoCallReply(
+        val conversationId: String,
+        val userMessageId: String,
+    ) : UIMessageAnnotation()
+
     /** Preserve sibling-fork backup metadata without turning it into a citation or model input. */
     @Serializable
     @SerialName("avatar_interaction")

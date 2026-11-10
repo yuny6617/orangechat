@@ -83,9 +83,10 @@ class VideoCallSerializationTest {
     fun `video call card keeps its message links across reload`() {
         val userId = kotlin.uuid.Uuid.random()
         val replyId = kotlin.uuid.Uuid.random()
+        val conversationId = kotlin.uuid.Uuid.random()
         val card = me.rerere.ai.ui.UIMessageAnnotation.ChatInteraction(
             id = "i2",
-            conversationId = "c1",
+            conversationId = conversationId.toString(),
             assistantId = "a1",
             actor = "user",
             kind = "call",
@@ -111,6 +112,7 @@ class VideoCallSerializationTest {
             setOf(userId, replyId),
             me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(
                 listOf(me.rerere.ai.ui.UIMessage.user("卡").copy(annotations = listOf(decoded))) + originals,
+                originals, conversationId,
             ),
         )
     }

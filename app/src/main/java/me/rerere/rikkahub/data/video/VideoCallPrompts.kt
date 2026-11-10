@@ -32,6 +32,7 @@ data class VideoCallContext(
     val giftNames: Map<String, String> = emptyMap(),
     /** 用户偏好的赠礼文案（只是措辞，不改变任何协议规则）。 */
     val giftMessage: String = "",
+    val giftPrompt: String = "",
 ) {
     /** 只有本轮真的附了图、并且模型确实能识图，才算"看得见"。 */
     val canSeeUser: Boolean
@@ -96,7 +97,18 @@ object VideoCallPrompts {
         }
     }.trimEnd()
 
-    /** 默认版本（内置名字、没有文案偏好）；设置页"查看原始提示词"和契约测试都用它。 */
+    /** 用户编辑的是完整正文，不再只是一句措辞偏好。空白恢复默认全文。 */
+    fun effectiveGiftPrompt(setting: VideoCallSetting): String =
+        setting.giftPrompt.takeIf { it.isNotBlank() }
+            ?: giftInstruction(VideoGiftCustomization.sanitizedNames(setting), setting.giftMessage)
+
+    /** 固定协议说明始终追加；真正的边界由解析器、请求台账和运行时校验。 */
+    fun giftProtocolBoundary(names: Map<String, String>): String =
+        "客户端执行协议：在普通回复正文输出 <ws_gift id=\"heart\"/>（不要放入代码块）。" +
+            "这不是工具调用，不需要 tool schema。可用 id：${VideoGiftCustomization.labelList(names)}。" +
+            "只接受完整标签与合法 id，每轮最多一件，仅当前视频通话有效；礼物无真实金额。"
+
+    /** 默认版本（内置名字、没有文案偏好）；编辑器直接呈现全文。 */
     val GIFT_INSTRUCTION: String
         get() = giftInstruction()
 
@@ -154,7 +166,9 @@ object VideoCallPrompts {
             sections += SNAPSHOT_INSTRUCTION
         }
         sections += if (context.giftsEnabled) {
-            giftInstruction(context.giftNames, context.giftMessage)
+            (context.giftPrompt.takeIf { it.isNotBlank() }
+                ?: giftInstruction(context.giftNames, context.giftMessage)) +
+                "\n\n" + giftProtocolBoundary(context.giftNames)
         } else {
             GIFT_DISABLED_NOTE
         }
@@ -206,4 +220,5 @@ fun videoCallContextFromSetting(
     audioAttached = audioAttached,
     giftNames = VideoGiftCustomization.sanitizedNames(setting),
     giftMessage = VideoGiftCustomization.sanitizedMessage(setting),
+    giftPrompt = setting.giftPrompt,
 )

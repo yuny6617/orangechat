@@ -84,6 +84,7 @@ import me.rerere.rikkahub.plugin.loader.PluginLoader
 import me.rerere.rikkahub.plugin.manager.PluginManager
 import me.rerere.rikkahub.plugin.model.PluginHookConfig
 import me.rerere.rikkahub.plugin.model.PluginInfo
+import me.rerere.rikkahub.plugin.model.effectivePluginConfig
 import me.rerere.rikkahub.plugin.repository.PluginRepository
 import org.json.JSONArray
 import org.json.JSONObject
@@ -918,25 +919,10 @@ private class PluginWebViewClient(
                 scope.launch(Dispatchers.IO) {
                     try {
                         val savedConfig = pluginRepository.getPluginConfig(pluginInfo.manifest.id)
-                        val mergedConfig = mutableMapOf<String, kotlinx.serialization.json.JsonElement>()
-
-                        pluginInfo.manifest.config.forEach { field ->
-                            if (savedConfig.containsKey(field.name)) {
-                                mergedConfig[field.name] = savedConfig[field.name]!!
-                            } else if (field.default != null) {
-                                mergedConfig[field.name] = field.default
-                            }
-                        }
-
-                        savedConfig.forEach { (key, value) ->
-                            if (!mergedConfig.containsKey(key)) {
-                                mergedConfig[key] = value
-                            }
-                        }
+                        val mergedConfig = effectivePluginConfig(pluginInfo.manifest.config, savedConfig)
 
                         val jsonObj = JsonObject(mergedConfig)
                         val result = json.encodeToString(JsonObject.serializer(), jsonObj)
-                        Log.d(TAG, "getPluginConfig for ${pluginInfo.manifest.id}: $result")
                         webView.post {
                             webView.evaluateJavascript(
                                 pluginBridgeJsonJavascript(params["callbackId"], result.toString()), null

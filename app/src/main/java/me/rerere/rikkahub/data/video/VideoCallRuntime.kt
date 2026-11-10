@@ -21,6 +21,8 @@ interface VideoCallCameraGateway {
     val available: Boolean
     val unavailableReason: String
     suspend fun capture(): VideoFrame?
+    /** Synchronously release hardware when the user closes the camera. Never opens it. */
+    fun closeCamera() {}
 }
 
 /** UI 上的一枚礼物气泡 / 一次全屏特效请求。id 用来去重（重放不会重复播）。 */
@@ -65,6 +67,26 @@ data class VideoSnapshotRequest(
 object VideoCallRuntime {
     /** UI 上最多保留多少枚历史礼物气泡（只影响展示，不影响总数）。 */
     private const val MAX_GIFT_EVENTS = 100
+
+    @Volatile private var cameraEnabled = true
+
+    /** User intent survives surface/permission changes and same-call re-entry. */
+    fun setCameraEnabled(conversationId: String, enabled: Boolean): Boolean {
+        val gateway = synchronized(this) {
+            if (!isActive(conversationId)) return false
+            if (cameraEnabled == enabled) return true
+            cameraEnabled = enabled
+            turns.rotateCameraEpoch()
+            frames.clear()
+            _pendingFrameAtMillis.value = null
+            _camera.value
+        }
+        // Never call a gateway under the runtime monitor (gate -> runtime lock order).
+        if (!enabled) gateway?.closeCamera()
+        return true
+    }
+
+    fun isCameraEnabled(): Boolean = cameraEnabled
 
     private val captureMutex = Mutex()
     private val ledger = VideoGiftLedger()
@@ -197,7 +219,7 @@ object VideoCallRuntime {
      * 于是下一句会把一张已经过期的画面发出去。
      */
     fun isCameraEpochCurrent(conversationId: String?, cameraEpoch: Long): Boolean =
-        isActive(conversationId) && turns.currentCameraEpoch() == cameraEpoch
+        cameraEnabled && isActive(conversationId) && turns.currentCameraEpoch() == cameraEpoch
 
     /**
      * 注册相机入口。
@@ -261,11 +283,12 @@ object VideoCallRuntime {
     }
 
     /** 读相机状态：**绝不**在持 runtime 监视器时调用（它会去要相机门闩）。 */
-    fun cameraAvailable(): Boolean = _camera.value?.available == true
+    fun cameraAvailable(): Boolean = cameraEnabled && _camera.value?.available == true
 
     /** 读相机不可用原因：同样不许在持 runtime 监视器时调用。 */
     fun cameraUnavailableReason(): String =
-        _camera.value?.unavailableReason?.takeIf { it.isNotBlank() } ?: "相机未就绪（视频画面不在前台）"
+        if (!cameraEnabled) "摄像头已关闭" else
+            _camera.value?.unavailableReason?.takeIf { it.isNotBlank() } ?: "相机未就绪（视频画面不在前台）"
 
     /**
      * 需要一帧：优先用手动/定时夹住的待发送帧，没有就现场抓。
@@ -279,6 +302,7 @@ object VideoCallRuntime {
      * （面板退后台/切镜头之后仍然能抓到一帧旧画面）。
      */
     suspend fun captureFrame(): VideoFrame? {
+        if (!cameraEnabled) return null
         val conversation = _conversationId.value ?: return null
         val gateway = _camera.value ?: return null
         val epoch = turns.currentCameraEpoch()
@@ -321,6 +345,7 @@ object VideoCallRuntime {
         conversationId: String? = null,
         cameraEpoch: Long? = null,
     ): Boolean {
+        if (!cameraEnabled) return false
         val scopeConversation = conversationId?.trim()?.takeIf { it.isNotEmpty() }
         if (scopeConversation != null) {
             if (!isActive(scopeConversation)) return false
@@ -431,9 +456,9 @@ object VideoCallRuntime {
                 id = "snap:$key",
                 conversationId = active,
                 turnMessageId = key,
-                cameraAvailable = cameraReady,
+                cameraAvailable = cameraReady && cameraEnabled,
                 atMillis = atMillis,
-                permit = turns.issueSnapshotPermit(conversationId, requestToken, key),
+                permit = if (cameraEnabled) turns.issueSnapshotPermit(conversationId, requestToken, key) else null,
             )
             _snapshotRequests.tryEmit(request)
             request
@@ -475,6 +500,7 @@ object VideoCallRuntime {
     }
 
     private fun clearCallStateLocked() {
+        cameraEnabled = true
         frames.clear()
         _pendingFrameAtMillis.value = null
         ledger.clear()

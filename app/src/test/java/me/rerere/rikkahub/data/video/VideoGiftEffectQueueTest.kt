@@ -111,6 +111,58 @@ class VideoGiftEffectQueueTest {
     }
 
     @Test
+    fun `skip dismisses only current request and preserves pending FIFO including same tier`() {
+        val queue = VideoGiftEffectQueue()
+        queue.offer("first", VideoGift.METEOR_SHOWER)
+        val current = queue.poll()
+        val second = queue.offer("second", VideoGift.METEOR_SHOWER)
+        val third = queue.offer("third", VideoGift.GALAXY_TRAIN)
+
+        assertNull(current.skipIfMatching(requireNotNull(current).key))
+        assertEquals(2, queue.size)
+        assertSame(second, queue.poll())
+        assertSame(third, queue.poll())
+        assertTrue(queue.isEmpty)
+    }
+
+    @Test
+    fun `stale or repeated skip cannot dismiss the successor`() {
+        val queue = VideoGiftEffectQueue()
+        val first = requireNotNull(queue.offer("first", VideoGift.FIREWORKS))
+        val current = queue.poll()
+        assertNull(current.skipIfMatching(first.key))
+        queue.offer("next", VideoGift.FIREWORKS)
+        val next = queue.poll()
+        assertSame(next, next.skipIfMatching(first.key))
+        assertSame(next, next.skipIfMatching("unknown"))
+        val empty: VideoGiftEffectRequest? = null
+        assertNull(empty.skipIfMatching(first.key))
+    }
+
+    @Test
+    fun `skip last effect does not prevent future gifts`() {
+        val queue = VideoGiftEffectQueue()
+        queue.offer("last", VideoGift.GALAXY_TRAIN)
+        val current = requireNotNull(queue.poll())
+        assertNull(current.skipIfMatching(current.key))
+        assertNull(queue.poll())
+        val future = queue.offer("future", VideoGift.METEOR_SHOWER)
+        assertSame(future, queue.poll())
+    }
+
+    @Test
+    fun `meteor budget spreads more stars without unbounded concurrent drawing`() {
+        assertEquals(96, VIDEO_GIFT_METEOR_COUNT)
+        assertEquals(24, VIDEO_GIFT_GALAXY_METEOR_COUNT)
+        assertEquals(1f, VIDEO_GIFT_METEOR_START_SPAN + VIDEO_GIFT_METEOR_LIFETIME, 0.0001f)
+        // Starts are stratified in index order with jitter < one slot.
+        val maximumAlive = kotlin.math.ceil(
+            VIDEO_GIFT_METEOR_COUNT * VIDEO_GIFT_METEOR_LIFETIME / VIDEO_GIFT_METEOR_START_SPAN,
+        ).toInt() + 1
+        assertTrue(maximumAlive <= 29)
+    }
+
+    @Test
     fun `effect duration and queue limit stay at the documented values`() {
         assertEquals(8_200L, VIDEO_GIFT_EFFECT_DURATION_MS)
         assertEquals(3, VIDEO_GIFT_EFFECT_QUEUE_LIMIT)

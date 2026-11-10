@@ -46,6 +46,21 @@ internal fun appendTurnSystemContext(base: String, appendedSystemContext: String
     }
 }
 
+/** Runs after input transformers and only for a token-scoped video request. Never rewrites history. */
+internal fun List<me.rerere.ai.ui.UIMessage>.withVideoTurnSystemContext(
+    context: String?,
+): List<me.rerere.ai.ui.UIMessage> {
+    if (context.isNullOrBlank()) return this
+    val systemIndex = indexOfFirst { it.role == me.rerere.ai.core.MessageRole.SYSTEM }
+    val part = me.rerere.ai.ui.UIMessagePart.Text(context)
+    if (systemIndex < 0) return listOf(
+        me.rerere.ai.ui.UIMessage(role = me.rerere.ai.core.MessageRole.SYSTEM, parts = listOf(part)),
+    ) + this
+    return mapIndexed { index, message ->
+        if (index == systemIndex) message.copy(parts = message.parts + part) else message
+    }
+}
+
 internal fun buildMemoryPrompt(memories: List<AssistantMemory>) =
     buildString {
         appendLine()

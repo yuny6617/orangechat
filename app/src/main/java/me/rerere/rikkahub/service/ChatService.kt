@@ -861,6 +861,7 @@ class ChatService(
                         transientImageUrls = transientImageUrls,
                         transientImageAnchorMessageId = transientImageAnchorMessageId,
                         requestToken = requestToken,
+                        videoCallUserMessageId = queued.id.takeIf { requestToken != null },
                         // 音频锚点与图片锚点是同一条用户消息（队列项 ID）；工具多步不会把它顶掉。
                         transientAudioUrl = transientAudio?.fileUrl,
                         transientAudioAnchorMessageId = transientImageAnchorMessageId,
@@ -1482,6 +1483,7 @@ class ChatService(
         transientImageUrls: List<String> = emptyList(),
         transientImageAnchorMessageId: String? = null,
         requestToken: String? = null,
+        videoCallUserMessageId: Uuid? = null,
         /** 这一轮仅本次请求可用的录音（视频通话直传）；历史里永远不存 audio part。 */
         transientAudioUrl: String? = null,
         transientAudioAnchorMessageId: String? = null,
@@ -1716,7 +1718,9 @@ class ChatService(
                         if (regenerationNodeId != null && regenerationMessageId == null) {
                             regenerationMessageId = checkpointMessages.firstOrNull { it.id !in requestMessageIds }?.id
                         }
-                        val mutation = session.state.value.generationMessageMutation(checkpointMessages, buildMap {
+                        val mutation = session.state.value.generationMessageMutation(
+                            me.rerere.rikkahub.data.interaction.associateVideoCallReplies(
+                                checkpointMessages, requestMessageIds, conversationId, videoCallUserMessageId), buildMap {
                             if (regenerationNodeId != null) regenerationMessageId?.let { put(it, regenerationNodeId) }
                         })
                         applyMessageMutationLocked(conversationId, mutation)
@@ -1756,7 +1760,9 @@ class ChatService(
                             regenerationMessageId = chunk.messages.firstOrNull { it.id !in requestMessageIds }?.id
                         }
                         session.withStateLock {
-                            val mutation = session.state.value.generationMessageMutation(chunk.messages, buildMap {
+                            val mutation = session.state.value.generationMessageMutation(
+                                me.rerere.rikkahub.data.interaction.associateVideoCallReplies(
+                                    chunk.messages, requestMessageIds, conversationId, videoCallUserMessageId), buildMap {
                                 if (regenerationNodeId != null) regenerationMessageId?.let { put(it, regenerationNodeId) }
                             })
                             applyMessageMutationLocked(conversationId, mutation)

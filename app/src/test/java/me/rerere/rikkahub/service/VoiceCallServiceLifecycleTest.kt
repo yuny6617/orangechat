@@ -437,6 +437,7 @@ class VoiceCallServiceLifecycleTest {
         directSupported: Boolean = true,
         asrConfigured: Boolean = true,
         withMic: Boolean = true,
+        unmuteManually: Boolean = true,
     ) {
         shadowOf(app).grantPermissions(Manifest.permission.CAMERA)
         if (withMic) shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
@@ -467,6 +468,51 @@ class VoiceCallServiceLifecycleTest {
         service.onBind(null)
         startForegroundCall(video = true)
         pumpMain { VoiceCallService.startedAtMillis.value > 0L && service.isVideoMode() }
+        assertTrue("新视频通话服务真实闭麦", service.uiState.value.isMuted)
+        if (unmuteManually) service.toggleMute()
+    }
+
+    @Test
+    fun `video privacy controls persist on reentry without hanging up or automatic audio`() {
+        startVideoCall(unmuteManually = false)
+        assertFalse(service.toggleVideoVoiceInput())
+        assertEquals(0, recorderInstances.size)
+        assertEquals(0, asrInstances.single().startCount)
+        // Coordinator creation is stubbed in this fixture: explicitly enter its real runtime.
+        VideoCallRuntime.enterVideoCall(conversationId)
+        var closed = 0
+        val gateway = object : me.rerere.rikkahub.data.video.VideoCallCameraGateway {
+            override val available get() = closed == 0
+            override val unavailableReason = "closed"
+            override suspend fun capture(): me.rerere.rikkahub.data.video.VideoFrame? = null
+            override fun closeCamera() { closed++ }
+        }
+        VideoCallRuntime.registerCamera(conversationId, gateway)
+        val startedAt = VoiceCallService.startedAtMillis.value
+        service.toggleVideoCamera()
+        service.togglePreviewMirror()
+        assertEquals(1, closed)
+        assertFalse(VideoCallRuntime.cameraAvailable())
+        assertFalse(service.uiState.value.isCameraEnabled)
+        startForegroundCall(video = true)
+        service.refreshSessionPermissions(conversationId)
+        service.onHostBackground()
+        service.startCall()
+        assertTrue(service.uiState.value.isMuted)
+        assertFalse(service.uiState.value.isCameraEnabled)
+        assertTrue(service.uiState.value.isPreviewMirrored)
+        assertEquals(startedAt, VoiceCallService.startedAtMillis.value)
+        assertEquals(conversationId, service.boundConversationId())
+        service.toggleMute()
+        assertFalse(service.uiState.value.isMuted)
+        assertEquals(0, recorderInstances.size)
+        assertEquals(0, asrInstances.single().startCount)
+        assertTrue(service.submitTypedText("相机关着也能说话"))
+        pumpMain { submissions.size == 1 }
+        assertNull(submissions.single().audio)
+        assertFalse(service.uiState.value.isCameraEnabled)
+        service.toggleVideoCamera()
+        assertTrue(service.uiState.value.isCameraEnabled)
     }
 
     private fun videoVoice() = service.uiState.value.voiceInput

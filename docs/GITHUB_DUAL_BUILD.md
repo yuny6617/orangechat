@@ -6,9 +6,9 @@
   原有 `debug` / `release` / `performance` / `baseline` 的包名、默认版本和签名决策都没有改动，
   现有 workflow、`app/debug.keystore`、`local.properties` 也没有被覆盖。
 - 初次云构建 `42722493142`（`68a1769`）包含224个 feature 测试，是历史证据，不含后续实机反馈修复。
-- 当前 R5 包含视频手动录音、临时音频、礼物注入/自定义、通话卡全文、相机校准及主动唤醒记录详情；
-  主模型独立验收33类、360测试全通过，本地 ARM64 debug 构建成功。尚需新云构建和 OPPO 真机确认。
-- 详见 [DEVICE_ACCEPTANCE_R5.md](DEVICE_ACCEPTANCE_R5.md) 的功能与验收边界。
+- R5 已交付云构建 `42788729046`（`d497a884`），33类360测试，是已交付历史证据。
+- 当前 R7 加入镜像/默认闭麦/摄像头开关、赠礼全文编辑与模板修复、双方正文收录、特效跳过和插件有效配置统一；主模型独立验收39类389测试全通过。新云产物需核对具体run，不能混用R5文件。
+- 详见 [DEVICE_ACCEPTANCE_R7.md](DEVICE_ACCEPTANCE_R7.md) 的功能与验收边界；OPPO实机仍需确认。
 - **事实界限**：本分支由主模型在用户授权下统一提交并推送到用户的 `yuny6617/orangechat` fork；
   不安装任何 APK，不发布 Release，不覆盖签名配置。历史云端构建（run `42722493142`，head `68a1769`）：
   这次推送**没有覆盖既有 `master`**，没有发布 Release，也没有安装任何 APK。
@@ -119,8 +119,8 @@ Node 24 + pnpm（`web-ui` 依赖），并初始化 `material3/material-color-uti
 
 1. 校验 `update_version_code` 输入（fail-closed）；
 2. 跑 `tools/` 下的 Python 单元测试；
-3. 跑视频/通话历史/主动唤醒记录过滤集（33 个类、**360** 个测试）并用 `tools/verify_feature_tests.py` 校验：
-   类缺失、测试数少于 360、有失败/错误/跳过，都会让构建立即失败；
+3. 跑视频/通话历史/主动唤醒记录/插件配置过滤集（39 个类、**389** 个测试）并用 `tools/verify_feature_tests.py` 校验：
+   类缺失、测试数少于 389、有失败/错误/跳过，都会让构建立即失败；
 4. 构建 `assembleVideoCoexist` + `assembleVideoUpdate`；
 5. 用 `tools/apk_identity.py` 校验产物：
    - 共存包：包名必须是 `me.rerere.orangechat.videogifts`（且不能等于正式包 / `.liquidglass`），

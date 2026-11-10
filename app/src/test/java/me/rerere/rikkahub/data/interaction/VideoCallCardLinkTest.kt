@@ -34,6 +34,9 @@ import kotlin.uuid.Uuid
 class VideoCallCardLinkTest {
     private val conversationId = Uuid.random()
 
+    private fun videoCallCoveredMessageIds(messages: List<UIMessage>) =
+        me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(messages, messages, conversationId)
+
     private fun callCard(
         ids: List<String>,
         transcript: List<CallTranscriptEntry>? = listOf(
@@ -79,40 +82,46 @@ class VideoCallCardLinkTest {
     }
 
     @Test
-    fun `卡里没有 transcript 时宁可继续铺消息也不许把文字藏没`() {
+    fun `空snapshot仅在精确原文详情可达时隐藏`() {
         val userMessage = UIMessage.user("你好")
         val replyMessage = UIMessage.assistant("我很好")
         val noTranscript = cardNode(
             callCard(listOf(userMessage.id.toString(), replyMessage.id.toString()), transcript = null),
         )
-        assertTrue(
-            "卡内看不到文字时不许隐藏原文（否则用户再也打不开这段对话）",
-            videoCallCoveredMessageIds(
-                messages(listOf(noTranscript, userMessage.toMessageNode(), replyMessage.toMessageNode())),
-            ).isEmpty(),
-        )
+        val originals = messages(listOf(noTranscript, userMessage.toMessageNode(), replyMessage.toMessageNode()))
+        assertEquals(setOf(userMessage.id, replyMessage.id), videoCallCoveredMessageIds(originals))
+        assertEquals(listOf("你好", "我很好"), noTranscript.currentMessage.annotations
+            .filterIsInstance<ChatInteraction>().single().transcriptFrom(originals, "我", "对方").map { it.text })
+        assertTrue("无可达详情时不隐藏", me.rerere.rikkahub.data.interaction
+            .videoCallCoveredMessageIds(originals).isEmpty())
     }
 
     @Test
-    fun `empty and incomplete snapshots never hide unrepresented original text`() {
+    fun `dynamic exact originals replace empty partial and wrong role snapshots without losing text`() {
         val user = UIMessage.user("用户原文")
         val reply = UIMessage.assistant("完整回复不能少任何一个字")
         val ids = listOf(user.id.toString(), reply.id.toString())
         val empty = cardNode(callCard(ids, transcript = emptyList()))
-        assertTrue(videoCallCoveredMessageIds(listOf(empty.currentMessage, user, reply)).isEmpty())
+        assertEquals(setOf(user.id, reply.id), videoCallCoveredMessageIds(listOf(empty.currentMessage, user, reply)))
         val partial = cardNode(callCard(ids, transcript = listOf(
             CallTranscriptEntry("user", "我", "用户原文", 1),
             CallTranscriptEntry("assistant", "对方", "完整回复", 2),
         )))
-        assertEquals(setOf(user.id), videoCallCoveredMessageIds(listOf(partial.currentMessage, user, reply)))
+        assertEquals(setOf(user.id, reply.id), videoCallCoveredMessageIds(listOf(partial.currentMessage, user, reply)))
         val wrongRole = cardNode(callCard(ids, transcript = listOf(
             CallTranscriptEntry("user", "我", reply.toText(), 2),
         )))
-        assertTrue(videoCallCoveredMessageIds(listOf(wrongRole.currentMessage, user, reply)).isEmpty())
+        val all = listOf(wrongRole.currentMessage, user, reply)
+        assertEquals(setOf(user.id, reply.id), videoCallCoveredMessageIds(all))
+        assertEquals(listOf("user" to user.toText(), "assistant" to reply.toText()),
+            wrongRole.currentMessage.annotations.filterIsInstance<ChatInteraction>().single()
+                .transcriptFrom(all, "我", "对方").map { it.role to it.text })
+        assertTrue(me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(all, all, Uuid.random()).isEmpty())
+        assertTrue(me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(all, emptyList(), conversationId).isEmpty())
     }
 
     @Test
-    fun `late assistant revision is accessible in history but remains visible until snapshot is complete`() {
+    fun `late assistant revision is fully accessible only in card and deleting card restores bubbles`() {
         val user = UIMessage.user("你好")
         val original = UIMessage.assistant("前半")
         val linked = callCard(listOf(user.id.toString(), original.id.toString()), transcript = listOf(
@@ -122,7 +131,7 @@ class VideoCallCardLinkTest {
         val late = original.copy(parts = listOf(UIMessagePart.Text("前半，后半是取消最终保存的文字")))
         val messages = listOf(cardNode(linked).currentMessage, user, late)
         assertEquals(listOf("你好", "前半，后半是取消最终保存的文字"), linked.transcriptFrom(messages, "我", "对方").map { it.text })
-        assertEquals(setOf(user.id), videoCallCoveredMessageIds(messages))
+        assertEquals(setOf(user.id, late.id), videoCallCoveredMessageIds(messages))
         assertTrue("删除卡后所有原文重新显示", videoCallCoveredMessageIds(listOf(user, late)).isEmpty())
     }
 
@@ -137,6 +146,22 @@ class VideoCallCardLinkTest {
         val all = listOf(firstUser, firstReply, secondUser, secondReply)
         assertEquals(listOf("第一通", "回答一"), first.transcriptFrom(all, "我", "对方").map { it.text })
         assertEquals(listOf("第二通", "回答二"), second.transcriptFrom(all, "我", "对方").map { it.text })
+    }
+
+    @Test
+    fun `branch switch and unlinked late IDs fail closed even with identical text`() {
+        val original = UIMessage.assistant("同一句完整文字")
+        val alternate = UIMessage.assistant("同一句完整文字")
+        val card = cardNode(callCard(listOf(original.id.toString()), transcript = emptyList())).currentMessage
+        val full = listOf(card, original)
+        assertEquals(setOf(original.id), videoCallCoveredMessageIds(full))
+        assertTrue(videoCallCoveredMessageIds(listOf(card, alternate)).isEmpty())
+        assertTrue(me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(
+            full, listOf(card, alternate), conversationId).isEmpty())
+        assertTrue(me.rerere.rikkahub.data.interaction.videoCallCoveredMessageIds(
+            listOf(original), full, conversationId).isEmpty())
+        val late = UIMessage.assistant("新ID迟到文字必须保留")
+        assertEquals(setOf(original.id), videoCallCoveredMessageIds(full + late))
     }
 
     @Test
@@ -257,6 +282,58 @@ class VideoCallCardLinkTest {
         assertEquals(listOf("m3"), older.withoutVideoCallMessages(setOf("m1", "m2")).videoCallMessageIds)
         // 不含这些 id 时返回同一个对象（避免无意义的落库）。
         assertTrue(older.withoutVideoCallMessages(setOf("zzz")) === older)
+    }
+
+    @Test
+    fun `mixed assistant hides only covered text and never exports reasoning into transcript`() {
+        val reasoning = UIMessagePart.Reasoning("private reasoning")
+        val tool = UIMessagePart.Tool("call", "lookup", "{}", emptyList())
+        val image = UIMessagePart.Image("file:///photo.jpg")
+        val gift = me.rerere.ai.ui.UIMessageAnnotation.VideoCallGift("gift", "heart")
+        val reply = UIMessage.assistant("spoken body").copy(
+            parts = listOf(reasoning, UIMessagePart.Text("spoken body"), tool, image), annotations = listOf(gift))
+        val card = callCard(listOf(reply.id.toString()), transcript = emptyList())
+        val all = listOf(cardNode(card).currentMessage, reply)
+        assertEquals(setOf(reply.id), videoCallCoveredMessageIds(all))
+        assertEquals(listOf("spoken body"), card.transcriptFrom(all, "我", "对方").map { it.text })
+        val display = reply.withoutVideoCallTranscriptText()
+        assertEquals(listOf(reasoning, tool, image), display.parts)
+        assertEquals(listOf(gift), display.annotations)
+        assertEquals("spoken body", reply.parts.filterIsInstance<UIMessagePart.Text>().single().text)
+        assertFalse(reply.absorbedIntoVideoCallCard())
+        assertTrue(videoCallCoveredMessageIds(listOf(reply)).isEmpty())
+        val generation = Conversation(assistantId = Uuid.random(), messageNodes = all.map { it.toMessageNode() })
+            .messagesForGeneration()
+        assertEquals(1, generation.flatMap { it.parts }.filterIsInstance<UIMessagePart.Text>().count { it.text == "spoken body" })
+        assertEquals(1, generation.flatMap { it.parts }.filterIsInstance<UIMessagePart.Reasoning>().size)
+    }
+
+    @Test
+    fun `late tool rounds use explicit request ownership after card snapshot and survive serialization`() {
+        val user = UIMessage.user("question")
+        val history = UIMessage.assistant("old assistant")
+        val requestIds = setOf(history.id, user.id)
+        val card = callCard(listOf(user.id.toString()), transcript = emptyList())
+        val tool = UIMessage.assistant("tool preface").copy(parts = listOf(
+            UIMessagePart.Text("tool preface"), UIMessagePart.Tool("t", "lookup", "{}", emptyList())))
+        val late = UIMessage.assistant("late final body")
+        val outputs = associateVideoCallReplies(listOf(history, user, tool, late), requestIds, conversationId, user.id)
+        assertEquals(history, outputs[0])
+        val json = kotlinx.serialization.json.Json
+        val restored = json.decodeFromString<List<UIMessage>>(json.encodeToString(
+            kotlinx.serialization.builtins.ListSerializer(UIMessage.serializer()), outputs))
+        val all = listOf(cardNode(card).currentMessage) + restored
+        assertEquals(setOf(user.id, tool.id, late.id), videoCallCoveredMessageIds(all))
+        assertEquals(listOf("question", "tool preface", "late final body"), card.transcriptFrom(all, "我", "对方").map { it.text })
+        assertTrue(restored.last().absorbedIntoVideoCallCard())
+        val unrelated = UIMessage.assistant("late final body")
+        assertFalse(unrelated.id in videoCallCoveredMessageIds(all + unrelated))
+        val alternate = user.copy(id = Uuid.random())
+        val switched = listOf(cardNode(card).currentMessage, alternate) + restored.filter { it.role != me.rerere.ai.core.MessageRole.USER }
+        assertTrue(videoCallCoveredMessageIds(switched).isEmpty())
+        assertEquals(listOf(late), associateVideoCallReplies(listOf(late), requestIds, conversationId, null))
+        val otherConversation = associateVideoCallReplies(listOf(late), requestIds, Uuid.random(), user.id)
+        assertEquals(setOf(user.id), videoCallCoveredMessageIds(listOf(cardNode(card).currentMessage, user) + otherConversation))
     }
 
     @Test

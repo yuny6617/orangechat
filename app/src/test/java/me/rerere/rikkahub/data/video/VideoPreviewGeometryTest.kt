@@ -477,16 +477,16 @@ class VideoPreviewGeometryTest {
         val views = listOf(1080 to 1920, 1080 to 2400, 2400 to 1080, 800 to 800)
         for ((bw, bh) in buffers) for ((vw, vh) in views) {
             for (rotation in listOf(0, 90, 180, 270)) for (front in listOf(false, true)) {
-                for (calibration in listOf(0, 90, 180, 270)) {
+                for (calibration in listOf(0, 90, 180, 270)) for (mirror in listOf(false, true)) {
                     val displayRotation = 0
                     val transform = VideoPreviewGeometry.textureViewTransform(
-                        rotation, displayRotation, front, bw, bh, vw, vh, calibration,
+                        rotation, displayRotation, front, bw, bh, vw, vh, calibration, previewMirrored = mirror,
                     )
                     val stretch = Matrix().apply { setScale(vw.toFloat() / bw, vh.toFloat() / bh) }
                     val shown = Matrix().apply {
                         setConcat(transform.matrix.toAndroidMatrix(), stretch)
                     }
-                    val tag = "buffer=${bw}x$bh view=${vw}x$vh r=$rotation front=$front c=$calibration"
+                    val tag = "buffer=${bw}x$bh view=${vw}x$vh r=$rotation front=$front c=$calibration mirror=$mirror"
                     val finalRotation = (rotation + calibration) % 360
                     val widthAfterRotation = if (finalRotation % 180 == 0) bw else bh
                     val heightAfterRotation = if (finalRotation % 180 == 0) bh else bw
@@ -497,7 +497,7 @@ class VideoPreviewGeometryTest {
                     assertEquals(tag, scale, kotlin.math.hypot(vectors[2], vectors[3]), delta)
                     assertEquals(tag, 0f, vectors[0] * vectors[2] + vectors[1] * vectors[3], delta)
                     val determinant = vectors[0] * vectors[3] - vectors[1] * vectors[2]
-                    assertEquals(tag, front, determinant < 0f)
+                    assertEquals(tag, mirror, determinant < 0f)
 
                     // 覆盖不是只比角点包围盒：逆映射 view 四角和边中点必须全部位于源buffer内。
                     val inverse = Matrix()
@@ -516,21 +516,17 @@ class VideoPreviewGeometryTest {
                     assertEquals(tag, vw / 2f, centre[0], delta)
                     assertEquals(tag, vh / 2f, centre[1], delta)
 
-                    // 方向使用独立的直角整数公式；镜像发生在基础旋转后、校准前。
-                    val baseRight = when (rotation) {
+                    // 独立整数公式：先合并旋转，再镜像屏幕 x；绝不在校准之前翻转。
+                    val rotatedRight = when (finalRotation) {
                         0 -> Point2(1f, 0f)
                         90 -> Point2(0f, 1f)
                         180 -> Point2(-1f, 0f)
                         else -> Point2(0f, -1f)
                     }
-                    val x = if (front) -baseRight.x else baseRight.x
-                    val y = baseRight.y
-                    val expectedRight = when (calibration) {
-                        0 -> Point2(x, y)
-                        90 -> Point2(-y, x)
-                        180 -> Point2(-x, -y)
-                        else -> Point2(y, -x)
-                    }
+                    val expectedRight = Point2(
+                        if (mirror) -rotatedRight.x else rotatedRight.x,
+                        rotatedRight.y,
+                    )
                     assertEquals(tag, expectedRight.x * scale, vectors[0], delta)
                     assertEquals(tag, expectedRight.y * scale, vectors[1], delta)
                 }

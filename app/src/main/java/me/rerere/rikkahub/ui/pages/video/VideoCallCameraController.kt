@@ -148,6 +148,16 @@ class VideoCallCameraController(
      * 这里它是控制器级状态，只有设置被改才变（来源是 `VideoCallSetting.previewCalibrationDegrees`）。
      */
     private var previewCalibrationDegrees: Int = PreviewCalibration.DEFAULT_DEGREES
+    private var previewMirrored = false
+
+    fun setPreviewMirrored(mirrored: Boolean) {
+        gate.exclusive {
+            previewMirrored = mirrored
+            gate.currentOrNull()?.let { publishTransformLocked(it) }
+        }
+    }
+
+    override fun closeCamera() = unbind()
 
     /**
      * 写入预览校准角度（面板按钮 / 设置页调用）。
@@ -367,8 +377,8 @@ class VideoCallCameraController(
         var startWidth = 0
         var startHeight = 0
         gate.exclusive {
-            previewAllowed = allowed
-            if (!allowed) {
+            previewAllowed = allowed && VideoCallRuntime.isCameraEnabled()
+            if (!previewAllowed) {
                 unregisterDisplayListenerLocked()
                 ended = stopInternalLocked()
                 return@exclusive
@@ -470,6 +480,7 @@ class VideoCallCameraController(
             viewHeight = generation.viewHeight,
             // 用户校准只进预览矩阵：抓帧方向走 captureRotationDegrees，与这里无关。
             calibrationDegrees = previewCalibrationDegrees,
+            previewMirrored = previewMirrored,
         )
         _previewTransform.value = transform
         logPreviewGeometry(generation, transform)
@@ -597,7 +608,9 @@ class VideoCallCameraController(
         gate.exclusive {
             // 排队期间 UI 可能已经拆掉 Surface / 关掉预览门禁（REVIEW_R6 §3）：
             // 这时绝不能再拿旧 surface 开一次相机，否则新相机会挂在已销毁的 texture 上。
-            if (!cameraStartAllowed(previewAllowed, ownedSurface, surface, ownedTexture, texture)) {
+            if (!VideoCallRuntime.isCameraEnabled() ||
+                !cameraStartAllowed(previewAllowed, ownedSurface, surface, ownedTexture, texture)
+            ) {
                 return@exclusive
             }
 
@@ -950,7 +963,8 @@ class VideoCallCameraController(
             height = options.outHeight.coerceAtLeast(1),
             capturedAtMillis = System.currentTimeMillis(),
             rotationDegrees = rotationDegrees,
-            mirror = generation.frontFacing,
+            // Preview flip is independent: preserve readable text in all model JPEGs.
+            mirror = false,
         )
     }
 

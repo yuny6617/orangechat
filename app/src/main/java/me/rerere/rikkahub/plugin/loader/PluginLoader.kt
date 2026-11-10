@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -21,6 +21,7 @@ import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.service.MemoryBankService
 import me.rerere.rikkahub.plugin.data.PluginDataStore
 import me.rerere.rikkahub.plugin.model.PluginInfo
+import me.rerere.rikkahub.plugin.model.resolvePluginConfig
 import okhttp3.OkHttpClient
 import kotlin.uuid.Uuid
  
@@ -159,9 +160,10 @@ class PluginLoader(
         }
     }
  
-    private fun resolveModelConfig(pluginInfo: PluginInfo): Map<String, JsonElement> {
-        val config = pluginInfo.config.toMutableMap()
-        val store = settingsStore ?: return config
+    private fun resolveModelConfig(pluginInfo: PluginInfo): Map<String, JsonElement> = resolvePluginConfig(
+        pluginInfo.manifest.config, pluginInfo.config
+    ) { config ->
+        val store = settingsStore ?: return@resolvePluginConfig
         val settings = store.settingsFlow.value
  
         pluginInfo.manifest.config.forEach { field ->
@@ -197,7 +199,6 @@ class PluginLoader(
                 }
             }
         }
-        return config
     }
  
     fun unloadAll() = runtimes.clear()

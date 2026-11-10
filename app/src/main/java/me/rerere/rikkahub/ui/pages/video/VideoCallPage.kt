@@ -85,6 +85,10 @@ import me.rerere.rikkahub.data.video.VideoCameraState
 import me.rerere.rikkahub.data.video.VideoCameraStatus
 import me.rerere.rikkahub.data.video.VideoFrame
 import me.rerere.rikkahub.data.video.VideoFrameScheduler
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import me.rerere.rikkahub.data.video.skipIfMatching
 import me.rerere.rikkahub.data.video.VideoGiftEffectQueue
 import me.rerere.rikkahub.data.video.VideoGiftEffectRequest
 import me.rerere.rikkahub.data.video.toAndroidMatrix
@@ -98,6 +102,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.graphics.vector.ImageVector
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Cancel01
+import me.rerere.hugeicons.stroke.Camera01
 import me.rerere.hugeicons.stroke.Mic01
 import me.rerere.hugeicons.stroke.MicOff01
 import me.rerere.hugeicons.stroke.Record
@@ -290,6 +295,9 @@ fun VideoCallPage(
     val panelState by panelFlow.collectAsStateWithLifecycle()
 
     val cameraController = remember(conversationId) { VideoCallCameraController(context) }
+    LaunchedEffect(cameraController, callState.isPreviewMirrored) {
+        cameraController.setPreviewMirrored(callState.isPreviewMirrored)
+    }
     val cameraStatusState by cameraController.status.collectAsStateWithLifecycle()
     val previewTransform by cameraController.previewTransform.collectAsStateWithLifecycle()
 
@@ -383,6 +391,7 @@ fun VideoCallPage(
         permissionGranted = cameraGranted,
         lifecycleStarted = lifecycleStarted,
         callActive = callActive,
+        cameraEnabled = callState.isCameraEnabled,
     )
     LaunchedEffect(shouldBindCamera) {
         cameraController.setPreviewAllowed(shouldBindCamera)
@@ -458,7 +467,10 @@ fun VideoCallPage(
                     continue
                 }
                 activeEffect = request
-                delay(VIDEO_GIFT_EFFECT_DURATION_MS)
+                // Skip wakes this player immediately; pending gifts retain their FIFO order.
+                withTimeoutOrNull(VIDEO_GIFT_EFFECT_DURATION_MS) {
+                    snapshotFlow { activeEffect?.key }.first { it != request.key }
+                }
                 // 只清掉自己这一条：被取消/换人时不要把后来者顶掉。
                 if (activeEffect?.key == request.key) activeEffect = null
             }
@@ -634,12 +646,17 @@ fun VideoCallPage(
                     .background(Color(0xFF1E2A33), RoundedCornerShape(26.dp))
                     .border(1.5.dp, Color.White.copy(alpha = .85f), RoundedCornerShape(26.dp)),
             ) {
-                CameraPreviewSurface(
-                    controller = cameraController,
-                    transform = previewTransform,
-                    modifier = Modifier.matchParentSize(),
-                )
-                if (!previewing) {
+                // Remove the TextureView while disabled: no stale camera buffer can masquerade as live.
+                if (callState.isCameraEnabled) {
+                    CameraPreviewSurface(
+                        controller = cameraController,
+                        transform = previewTransform,
+                        modifier = Modifier.matchParentSize(),
+                    )
+                }
+                if (!callState.isCameraEnabled) {
+                    Text("摄像头已关闭 · 通话继续", Modifier.align(Alignment.Center), color = Color.White)
+                } else if (!previewing) {
                     CameraOffCard(
                         status = cameraStatusState,
                         permissionGranted = cameraGranted,
@@ -647,8 +664,28 @@ fun VideoCallPage(
                         modifier = Modifier.matchParentSize(),
                     )
                 }
+                Row(
+                    Modifier.align(Alignment.TopStart).padding(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    GlassTextChip(
+                        label = if (callState.isCameraEnabled) "关闭摄像头" else "开启摄像头",
+                        ink = colors.ink,
+                        onClick = if (canSend) ({ boundService?.toggleVideoCamera() }) else null,
+                    )
+                    GlassTextChip(
+                        label = if (callState.isPreviewMirrored) "预览镜像：开" else "预览镜像：关",
+                        ink = colors.ink,
+                        onClick = if (canSend) ({ boundService?.togglePreviewMirror() }) else null,
+                    )
+                }
+                Text(
+                    "仅翻转预览 · 发送照片不镜像",
+                    Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 46.dp),
+                    color = Color.White, fontSize = 10.sp,
+                )
                 // 方向校准：只转预览画面，不动抓帧/照片的方向。
-                // 真机（OPPO/ColorOS 竖屏后摄）画面左转 90°，默认 +90° 已经补正；
+                // 设备建议仅窄匹配用户报告的机型；实际效果仍需真机确认，可手动校准。
                 // 这里把角度直接写在按钮中间，点一次就能看出转没转对，也能往回转/复位。
                 PreviewCalibrationControls(
                     degrees = previewCalibrationDegrees,
@@ -753,8 +790,8 @@ fun VideoCallPage(
                     onClick = { cameraController.switchCamera() },
                 )
                 GlassCallAction(
-                    icon = null,
-                    emoji = "📸",
+                    icon = HugeIcons.Camera01,
+                    emoji = null,
                     label = "抓帧",
                     tint = colors.accent,
                     enabled = cameraStatusState.isPreviewing && shouldBindCamera,
@@ -838,7 +875,11 @@ fun VideoCallPage(
             Spacer(Modifier.size(2.dp))
         }
 
-        VideoGiftEffectOverlay(activeEffect, Modifier.fillMaxSize())
+        VideoGiftEffectOverlay(
+            effect = activeEffect,
+            modifier = Modifier.fillMaxSize(),
+            onSkip = { renderedKey -> activeEffect = activeEffect.skipIfMatching(renderedKey) },
+        )
     }
 }
 

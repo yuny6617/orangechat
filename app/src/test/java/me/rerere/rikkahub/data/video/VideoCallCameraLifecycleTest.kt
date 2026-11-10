@@ -363,31 +363,52 @@ class VideoCallCameraLifecycleTest {
             val gate = CameraGenerationGate<Any>()
             gate.adopt(Any())
             val events = Collections.synchronizedList(mutableListOf<String>())
-            var otherEnteredWhileInvalidating = false
+            // Inspect the actual production lock instead of inferring ownership from a sleep.
+            // No production API is added just for the test.
+            val lock = CameraGenerationGate::class.java.getDeclaredField("lock").let {
+                it.isAccessible = true
+                it.get(gate) as java.util.concurrent.locks.ReentrantLock
+            }
+            val releaseStarted = CountDownLatch(1)
+            val otherEntered = CountDownLatch(1)
             var permitUsableAtRelease: Boolean? = null
-            lateinit var other: Thread
+            val other = Thread {
+                if (releaseStarted.await(5, TimeUnit.SECONDS)) {
+                    gate.exclusive {
+                        events += "other-entered"
+                        otherEntered.countDown()
+                    }
+                }
+            }
             val lifecycle = CameraGenerationLifecycle(
                 gate = gate,
                 invalidateRuntime = {
-                    // 另一个线程此时应该被门闩挡住：说明我们还处在 gate.end 的临界区里。
-                    other = Thread { gate.exclusive { events += "other-entered" } }
-                    other.start()
-                    Thread.sleep(100L)
-                    otherEnteredWhileInvalidating = events.contains("other-entered")
+                    assertTrue("运行时失效必须仍持有真实 gate 锁", lock.isHeldByCurrentThread)
+                    assertNull("先摘除当前代再失效", gate.currentOrNull())
                     events += "invalidate"
                     VideoCallRuntime.notifyCameraGenerationChanged(gateway)
                 },
                 release = {
+                    assertFalse("硬件释放不得持有 gate 锁", lock.isHeldByCurrentThread)
                     events += "release"
                     permitUsableAtRelease = VideoCallRuntime.isSnapshotPermitUsable(permit)
+                    releaseStarted.countDown()
+                    // Release is deliberately still running: another thread must enter now,
+                    // not merely after lifecycle.end returns.
+                    assertTrue("资源释放期间其它线程必须能取得 gate", otherEntered.await(5, TimeUnit.SECONDS))
                 },
             )
 
-            lifecycle.end()
-            other.join(5_000L)
+            other.start()
+            try {
+                lifecycle.end()
+            } finally {
+                releaseStarted.countDown()
+                other.join(5_000L)
+            }
 
+            assertFalse("辅助线程必须结束", other.isAlive)
             assertEquals(listOf("invalidate", "release", "other-entered"), events.toList())
-            assertFalse("运行时失效必须与 gate.end 在同一个临界区", otherEnteredWhileInvalidating)
             assertFalse("失效必须发生在资源释放之前（释放时许可已经不可用）", permitUsableAtRelease ?: true)
             assertFalse("结束后旧许可一律作废", VideoCallRuntime.isSnapshotPermitUsable(permit))
             assertNull("结束后不再有当前代", gate.currentOrNull())

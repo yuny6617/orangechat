@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -50,7 +50,7 @@ data class PluginInfo(
      * 获取配置值，如果不存在则返回默认值
      */
     fun getConfigValue(key: String): JsonElement? {
-        return config[key] ?: manifest.config.find { it.name == key }?.default
+        return effectivePluginConfig(manifest.config, config)[key]
     }
     
     /**

@@ -23,6 +23,7 @@ import me.rerere.ai.ui.CallTranscriptEntry
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.interaction.ChatInteraction
 import me.rerere.rikkahub.data.interaction.transcriptFrom
+import me.rerere.rikkahub.data.interaction.canAccessCallHistory
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.ui.components.message.*
 import me.rerere.rikkahub.ui.context.LocalSettings
@@ -31,12 +32,20 @@ import java.util.Date
 import java.util.Locale
 import kotlin.uuid.Uuid
 
+internal data class CallHistorySource(val conversationId: Uuid, val messages: List<me.rerere.ai.ui.UIMessage>)
+internal val LocalCallHistorySource = compositionLocalOf<CallHistorySource?> { null }
+
 @Composable
 internal fun CallHistoryRoute(card: ChatInteraction, conversationId: Uuid?, loadHistory: Boolean, onClose: () -> Unit) {
     val settings = LocalSettings.current
     val assistant = settings.assistants.firstOrNull { it.id.toString() == card.assistantId }
     var rows = card.callTranscript.orEmpty()
-    if (loadHistory && conversationId != null) {
+    val source = LocalCallHistorySource.current
+    if (loadHistory && source != null && card.canAccessCallHistory(source.conversationId) &&
+        source.conversationId == conversationId) {
+        rows = card.transcriptFrom(source.messages,
+            settings.displaySetting.userNickname.ifBlank { "我" }, assistant?.name?.ifBlank { "对方" } ?: "对方")
+    } else if (loadHistory && conversationId != null && card.canAccessCallHistory(conversationId)) {
         val service: ChatService = org.koin.compose.koinInject()
         val conversation by remember(conversationId) { service.getConversationFlow(conversationId) }.collectAsStateWithLifecycle()
         rows = card.transcriptFrom(conversation.currentMessages,

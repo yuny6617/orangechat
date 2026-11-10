@@ -1,10 +1,12 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
  */
 
 package me.rerere.rikkahub.ui.components.message
+
+import me.rerere.rikkahub.data.interaction.withoutVideoCallTranscriptText
 
 import me.rerere.rikkahub.data.interaction.withoutJumpControl
 
@@ -293,8 +295,10 @@ fun ChatMessage(
     onQuote: ((String) -> Unit)? = null,
     hasAssistantResponse: Boolean? = null,
     hasUserRead: Boolean? = null,
+    hideVideoCallTranscriptText: Boolean = false,
 ) {
-    val message = me.rerere.rikkahub.data.ai.transformers.interactionTranscript(node.messages[node.selectIndex], streaming = loading).withoutJumpControl().let { original ->
+    val sourceMessage = node.messages[node.selectIndex]
+    val renderedMessage = me.rerere.rikkahub.data.ai.transformers.interactionTranscript(sourceMessage, streaming = loading).withoutJumpControl().let { original ->
         if (original.role == MessageRole.USER && original.parts.any {
                 it is UIMessagePart.Text && it.text.startsWith("\u2063[orange-watch-auto]")
             }
@@ -308,6 +312,9 @@ fun ChatMessage(
             original
         }
     }
+    val message = if (hideVideoCallTranscriptText) {
+        renderedMessage.withoutVideoCallTranscriptText()
+    } else renderedMessage
     if (message.parts.isEmptyUIMessage() && !loading &&
         message.annotations.none { it is me.rerere.ai.ui.UIMessageAnnotation.VideoCallGift }
     ) return
@@ -383,7 +390,7 @@ fun ChatMessage(
             }
             if (message.role == MessageRole.USER && !everyday) {
                 Column(Modifier.align(Alignment.End).padding(top = 4.dp)) {
-                    InteractionMessageActions(message, node, readOnly, model, onUpdate, onRegenerate,
+                    InteractionMessageActions(sourceMessage, node, readOnly, model, onUpdate, onRegenerate,
                         onEdit, onDelete, onShare, onFork, isFavorite, onToggleFavorite)
                 }
             }
@@ -450,7 +457,8 @@ fun ChatMessage(
             }
         }
         ProvideTextStyle(textStyle) {
-            if (everyday && message.role == MessageRole.ASSISTANT && message.parts.none {
+            if (everyday && message.role == MessageRole.ASSISTANT &&
+                (!hideVideoCallTranscriptText || message.parts.any { it is UIMessagePart.Reasoning || it is UIMessagePart.Tool }) && message.parts.none {
                 (it is UIMessagePart.Text && it.text.isNotBlank())
                     || it is UIMessagePart.Image || it is UIMessagePart.Audio
                     || it is UIMessagePart.VoiceMessage || it is UIMessagePart.Video || it is UIMessagePart.Document
@@ -533,7 +541,7 @@ fun ChatMessage(
             ) {
                 ChatMessageActionButtons(
                     readOnly = readOnly,
-                    message = message,
+                    message = sourceMessage,
                     onRegenerate = onRegenerate,
                     node = node,
                     onUpdate = onUpdate,
@@ -573,7 +581,7 @@ fun ChatMessage(
                     Column {
                         ChatMessageActionButtons(
                             readOnly = readOnly,
-                            message = message,
+                            message = sourceMessage,
                             node = node,
                             onUpdate = onUpdate,
                             onRegenerate = { showActionsSheet = false; onRegenerate() },

@@ -711,6 +711,8 @@ class VoiceCallService : Service(), KoinComponent {
         callTranscript.clear()
         clearVideoCallMessages()
         videoMode = video
+        isMuted = videoMode
+        _uiState.value = VoiceCallUiState(isMuted = isMuted)
         boundOnly = !foreground
         _boundOnlyCall.value = boundOnly
         audioUnavailable = false
@@ -1208,14 +1210,14 @@ class VoiceCallService : Service(), KoinComponent {
         lastSpokenText = ""
         hasSentCurrentMessage = false
         ttsSentLength = 0
-        isMuted = false
+        isMuted = videoMode
 
         _uiState.update {
             it.copy(
                 status = VoiceCallStatus.Listening,
                 userTranscript = "",
                 errorMessage = null,
-                isMuted = false
+                isMuted = isMuted
             )
         }
 
@@ -1972,8 +1974,13 @@ class VoiceCallService : Service(), KoinComponent {
         try {
             // 视频模式：本轮要附带的画面。手动夹帧永久保存，自动帧只作本次请求的临时输入。
             video?.let { coordinator ->
+                val cameraEpoch = VideoCallRuntime.currentCameraEpoch()
                 val attachment = coordinator.frameAttachmentForTurn()
-                if (attachment != null) {
+                if (attachment != null && !VideoCallRuntime.isCameraEpochCurrent(conversationId.toString(), cameraEpoch)) {
+                    // Closing the camera during compression must not leak a serialized old frame.
+                    if (attachment.permanent) VideoFrameStore.deleteOwned(applicationContext, attachment.url)
+                    else VideoFrameStore.deleteTransient(applicationContext, listOf(attachment.url))
+                } else if (attachment != null) {
                     if (attachment.permanent) {
                         parts += UIMessagePart.Image(url = attachment.url)
                         permanentImages += attachment.url
@@ -2396,6 +2403,18 @@ class VoiceCallService : Service(), KoinComponent {
         }
 
         syncMicrophone()
+    }
+
+    fun toggleVideoCamera() {
+        if (!videoMode || callEnded || !::conversationId.isInitialized) return
+        val enabled = !_uiState.value.isCameraEnabled
+        if (!VideoCallRuntime.setCameraEnabled(conversationId.toString(), enabled)) return
+        _uiState.update { it.copy(isCameraEnabled = enabled) }
+    }
+
+    fun togglePreviewMirror() {
+        if (!videoMode || callEnded) return
+        _uiState.update { it.copy(isPreviewMirrored = !it.isPreviewMirrored) }
     }
 
     fun toggleSpeaker() {

@@ -96,7 +96,8 @@ object VideoCallPolicy {
         permissionGranted: Boolean,
         lifecycleStarted: Boolean,
         callActive: Boolean,
-    ): Boolean = surfaceReady && permissionGranted && lifecycleStarted && callActive
+        cameraEnabled: Boolean = true,
+    ): Boolean = cameraEnabled && surfaceReady && permissionGranted && lifecycleStarted && callActive
 
     /**
      * 服务在收到"启动/权限变化"之后应该做什么。

@@ -184,10 +184,10 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_apk_identity.py'
           python3 -m unittest discover -s tools -p 'test_verify_feature_tests.py'
 
-      - name: Feature unit tests (reviewed 360-test set)
+      - name: Feature unit tests (reviewed 389-test set)
         run: |
           set -euo pipefail
-          # R5 主模型独立验收：33 个类、360 个测试方法（含通话历史与唤醒记录）。
+          # R7 主模型独立验收：39 个类、389 个测试方法（含视频隐私、礼物、通话历史和插件配置）。
           # 只要有一个类不跑、少一个测试、出现失败或跳过，整条流水线都会失败。
           ./gradlew :app:testDebugUnitTest --no-daemon --console=plain \
             --tests '*VideoCall*' \
@@ -203,7 +203,8 @@ jobs:
             --tests '*FrameFile*' \
             --tests '*DirectAudio*' \
             --tests '*ProactiveWakeup*' \
-            --tests '*CallHistoryTest'
+            --tests '*CallHistoryTest' \
+            --tests '*PluginConfigTest'
           python3 tools/verify_feature_tests.py --results app/build/test-results/testDebugUnitTest
 
       - name: Build coexist APK and unsigned update candidate

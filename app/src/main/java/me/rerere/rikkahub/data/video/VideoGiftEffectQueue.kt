@@ -20,6 +20,10 @@ data class VideoGiftEffectRequest(
     val gift: VideoGift,
 )
 
+/** Skip only the rendered request. A delayed click must not dismiss its successor. */
+fun VideoGiftEffectRequest?.skipIfMatching(renderedKey: String): VideoGiftEffectRequest? =
+    if (this?.key == renderedKey) null else this
+
 /**
  * 视频面板的全屏礼物特效队列（纯逻辑，无 Compose/Android 依赖，可直接 JVM 单测）。
  *

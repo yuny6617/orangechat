@@ -65,7 +65,10 @@ internal fun InteractionGlass(theme: String, modifier: Modifier = Modifier, cont
 @Composable
 fun RichChatCard(card: ChatInteraction, conversationId: Uuid?, readOnly: Boolean, modifier: Modifier = Modifier,
     senderName: String = if (card.actor == "user") "你" else "对方") {
-    val interactive = !readOnly && conversationId?.toString() == card.conversationId
+    val interactive = !readOnly && card.canAccessCallHistory(conversationId)
+    val historySource = me.rerere.rikkahub.ui.pages.voice.LocalCallHistorySource.current
+    val loadHistory = interactive || (historySource != null &&
+        historySource.conversationId == conversationId && card.canAccessCallHistory(historySource.conversationId))
     val service: ChatService? = if (interactive) koinInject() else null
     val scope = rememberCoroutineScope()
     val nav = if (interactive) LocalNavController.current else null
@@ -166,7 +169,7 @@ fun RichChatCard(card: ChatInteraction, conversationId: Uuid?, readOnly: Boolean
 
     if (expanded && card.kind == "call") {
         Dialog(onDismissRequest = { expanded = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-            me.rerere.rikkahub.ui.pages.voice.CallHistoryRoute(card, conversationId, interactive) { expanded = false }
+            me.rerere.rikkahub.ui.pages.voice.CallHistoryRoute(card, conversationId, loadHistory) { expanded = false }
         }
     } else if (expanded) InteractionDetailDialog(onDismiss = { if (!busy) expanded = false }, enabled = !busy) { close ->
         Column(Modifier.verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {

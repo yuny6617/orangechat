@@ -129,6 +129,9 @@ internal fun VideoCallSettingsScreen(
     var draftMessage by remember(setting.giftMessage) {
         mutableStateOf(VideoGiftCustomization.sanitizedMessage(setting))
     }
+    var draftPrompt by remember(setting.giftPrompt) {
+        mutableStateOf(VideoCallPrompts.effectiveGiftPrompt(setting))
+    }
     var savedNotice by remember { mutableStateOf<String?>(null) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     LaunchedEffect(previewEffect) {
@@ -174,6 +177,38 @@ internal fun VideoCallSettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
+                SettingGroup(title = "基本视频设置 · 我说一句") {
+                    VideoVoiceInputMode.entries.forEach { mode ->
+                        SettingChoiceRow(mode.displayName(), mode.subtitle(), setting.voiceInputMode == mode) {
+                            onUpdate(setting.copy(voiceInputMode = mode))
+                        }
+                    }
+                }
+                SettingGroup(title = "自动抓帧") {
+                    VideoFrameCaptureMode.entries.forEach { mode ->
+                        SettingChoiceRow(
+                            mode.displayName,
+                            if (mode == VideoFrameCaptureMode.OFF) "不自动附带画面" else "仅随下一轮请求发送画面",
+                            setting.frameCaptureMode == mode,
+                        ) { onUpdate(setting.copy(frameCaptureMode = mode)) }
+                    }
+                }
+                SettingGroup(title = "抓帧画质") {
+                    VideoFrameQuality.entries.forEach { quality ->
+                        SettingChoiceRow(quality.displayName, "JPEG 按最长边等比缩放", setting.frameQuality == quality) {
+                            onUpdate(setting.copy(frameQuality = quality))
+                        }
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("显示我打的字", Modifier.weight(1f))
+                    Switch(setting.showUserDanmaku, { onUpdate(setting.copy(showUserDanmaku = it)) })
+                }
+                HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                Text("虚拟礼物", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.titleLarge)
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -220,7 +255,7 @@ internal fun VideoCallSettingsScreen(
 
                 SettingGroup(title = "礼物名字与赠礼文案") {
                     Text(
-                        "只能改这 5 件礼物的**显示名**和一句赠礼文案偏好；礼物 id、特效和「每条最多一件」" +
+                        "这里可改 5 件礼物的显示名和可选文案偏好；下方另可编辑完整送礼提示词。礼物 id、特效和「每条最多一件」" +
                             "这些规则由程序固定，改不了。名字最长 ${VideoGiftCustomization.MAX_DISPLAY_NAME_LENGTH} 字，" +
                             "文案最长 ${VideoGiftCustomization.MAX_GIFT_MESSAGE_LENGTH} 字。",
                         Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
@@ -285,6 +320,45 @@ internal fun VideoCallSettingsScreen(
                     }
                 }
 
+                SettingGroup(title = "完整送礼提示词") {
+                    Text(
+                        "下面直接显示完整默认文本，可任意编辑并保存；留空使用默认全文。" +
+                            "固定 id、标签格式与每轮上限仍由程序验证，保存后下一轮请求生效。",
+                        Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = draftPrompt,
+                        onValueChange = { draftPrompt = it },
+                        minLines = 8,
+                        maxLines = 16,
+                        label = { Text("完整提示词（不是单句措辞偏好）") },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Button(onClick = {
+                            onUpdate(setting.copy(giftPrompt = draftPrompt.takeIf { it.isNotBlank() }.orEmpty()))
+                            savedNotice = "完整提示词已保存，下一轮请求生效。"
+                        }) { Text("保存提示词") }
+                        OutlinedButton(onClick = {
+                            draftPrompt = VideoCallPrompts.effectiveGiftPrompt(setting)
+                        }) { Text("取消") }
+                        OutlinedButton(onClick = {
+                            onUpdate(setting.copy(giftPrompt = ""))
+                            draftPrompt = VideoCallPrompts.effectiveGiftPrompt(setting.copy(giftPrompt = ""))
+                            savedNotice = "已恢复默认完整提示词。"
+                        }) { Text("恢复默认") }
+                    }
+                    Text(
+                        VideoCallPrompts.giftProtocolBoundary(VideoGiftCustomization.sanitizedNames(setting)),
+                        Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+
                 Text(
                     text = if (showGiftPrompt) "收起送礼提示词" else "查看送礼提示词（模型实际收到的原文）",
                     modifier = Modifier.padding(horizontal = 16.dp).clickable { showGiftPrompt = !showGiftPrompt }
@@ -296,10 +370,8 @@ internal fun VideoCallSettingsScreen(
                     Text(
                         // 这里显示的是**已保存**配置生成的真实提示词（草稿要点保存才会生效）。
                         text = if (setting.giftsEnabled) {
-                            VideoCallPrompts.giftInstruction(
-                                VideoGiftCustomization.sanitizedNames(setting),
-                                setting.giftMessage,
-                            )
+                            VideoCallPrompts.effectiveGiftPrompt(setting) + "\n\n" +
+                                VideoCallPrompts.giftProtocolBoundary(VideoGiftCustomization.sanitizedNames(setting))
                         } else {
                             VideoCallPrompts.GIFT_DISABLED_NOTE
                         },
@@ -313,76 +385,14 @@ internal fun VideoCallSettingsScreen(
                     )
                 }
 
-                SettingGroup(title = "我说一句（手动录音）") {
-                    Text(
-                        "视频通话**不会**自动采音，也不用 VAD 自动发送：点一次开始，再点一次结束并发送。" +
-                            "这里只决定那一段录音是直接发给模型，还是先转成文字。",
-                        Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    VideoVoiceInputMode.entries.forEach { mode ->
-                        SettingChoiceRow(
-                            title = mode.displayName(),
-                            subtitle = mode.subtitle(),
-                            selected = setting.voiceInputMode == mode,
-                            onSelect = { onUpdate(setting.copy(voiceInputMode = mode)) },
-                        )
-                    }
-                }
-
-                SettingGroup(title = "自动抓帧") {
-                    VideoFrameCaptureMode.entries.forEach { mode ->
-                        SettingChoiceRow(
-                            title = mode.displayName,
-                            subtitle = when (mode) {
-                                VideoFrameCaptureMode.OFF -> "不自动附带任何画面"
-                                VideoFrameCaptureMode.EVERY_REPLY -> "每次发送前现抓一帧，随这条消息发出去"
-                                else -> "每 ${mode.intervalMillis?.div(1000) ?: 30} 秒刷新一次待发送帧，发送时带最新一帧"
-                            },
-                            selected = setting.frameCaptureMode == mode,
-                            onSelect = { onUpdate(setting.copy(frameCaptureMode = mode)) },
-                        )
-                    }
-                }
-
-                SettingGroup(title = "抓帧画质") {
-                    VideoFrameQuality.entries.forEach { quality ->
-                        SettingChoiceRow(
-                            title = quality.displayName,
-                            subtitle = "JPEG 压缩质量固定，按最长边等比缩放",
-                            selected = setting.frameQuality == quality,
-                            onSelect = { onUpdate(setting.copy(frameQuality = quality)) },
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("显示我打的字", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "关闭后只在面板里显示模型逐条上浮的气泡，不显示你自己的弹幕内容。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = setting.showUserDanmaku,
-                        onCheckedChange = { onUpdate(setting.copy(showUserDanmaku = it)) },
-                    )
-                }
                 // 底部留白：最后一项不会被系统手势条/键盘吃掉。
                 Spacer(Modifier.height(32.dp))
             }
         }
-        // 预览动画盖在最上层，不拦截触摸（Canvas 只画不点）。
-        // 全屏特效与气泡预览都**只画不接收输入**：预览期间返回/关闭/底部按钮照常可用，
-        // 8.2 秒的完整时长也不会把用户困在这一页。
-        VideoGiftEffectOverlay(previewEffect, Modifier.fillMaxSize())
+        // 预览只提供显式跳过按钮，其余区域不拦截设置页操作；旧 key 不能跳过新的预览。
+        VideoGiftEffectOverlay(previewEffect, Modifier.fillMaxSize(), onSkip = { key ->
+            if (previewEffect?.key == key) previewEffect = null
+        })
         VideoGiftBubblePreview(bubblePreview, Modifier.fillMaxSize())
     }
 }

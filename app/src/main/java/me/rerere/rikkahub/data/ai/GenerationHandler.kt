@@ -248,6 +248,7 @@ class GenerationHandler(
                     conversationSystemPrompt = conversationSystemPrompt,
                     conversationContextSummary = conversationContextSummary,
                     appendedSystemContext = appendedSystemContext,
+                    videoRequestToken = requestToken,
                     workspaceCwd = workspaceCwd,
                     conversationId = conversationId,
                     reactionTurn = reactionTurn,
@@ -358,6 +359,7 @@ class GenerationHandler(
         transientAudioAnchorMessageId: String? = null,
         /** 只在本轮生效、**追加**在系统提示词主文后面的上下文（视频通话）。 */
         appendedSystemContext: String? = null,
+        videoRequestToken: String? = null,
     ) {
         val baseMessages = buildList {
             val system = buildString {
@@ -370,7 +372,7 @@ class GenerationHandler(
                         conversationSystemPrompt = conversationSystemPrompt,
                         allowConversationSystemPrompt = assistant.allowConversationSystemPrompt,
                     ),
-                    appendedSystemContext,
+                    appendedSystemContext.takeIf { videoRequestToken == null },
                 )
                 if (effective.isNotBlank()) {
                     append(effective)
@@ -456,6 +458,8 @@ class GenerationHandler(
             processingStatus = processingStatus,
             workspaceCwd = workspaceCwd,
         ).let { filesManager.validAttachments(it, forSending = true) }.filterNot { it.parts.isEmpty() }
+            // Request-scoped video capability must not be removed/HTML-escaped by user templates.
+            .withVideoTurnSystemContext(appendedSystemContext.takeIf { videoRequestToken != null })
             .withTransientRequestImages(transientImageUrls, transientImageAnchorMessageId)
             .withTransientRequestAudio(transientAudioUrl, transientAudioAnchorMessageId)
             .let {

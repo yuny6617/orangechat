@@ -23,6 +23,13 @@ from pathlib import Path
 from typing import Sequence
 
 EXPECTED_TEST_CLASSES = (
+    "me.rerere.rikkahub.plugin.model.PluginConfigTest",
+    # R6/R7: actual history route, camera privacy, editable prompt and gift delivery/UI.
+    "me.rerere.rikkahub.data.ai.VideoGiftProviderChainTest",
+    "me.rerere.rikkahub.data.video.VideoCallPrivacyTest",
+    "me.rerere.rikkahub.data.video.VideoGiftFullPromptTest",
+    "me.rerere.rikkahub.ui.components.message.VideoCallHistoryRouteUiTest",
+    "me.rerere.rikkahub.ui.pages.video.VideoGiftEffectUiTest",
     "me.rerere.rikkahub.data.ai.transformers.VideoCallDirectiveStageTest",
     "me.rerere.rikkahub.data.ai.transformers.VideoCallDirectivesTest",
     # R3: 视频通话卡与逐条消息的持久关联（显示收敛，不改上下文）
@@ -61,9 +68,9 @@ EXPECTED_TEST_CLASSES = (
     "me.rerere.rikkahub.service.VoiceCallTranscriptTest",
 )
 
-# R5 independently verified XML: video/media + exact call history + wakeup record UI.
-# All 33 classes must run; deleting a class or skipping a test must fail closed.
-MIN_TOTAL_TESTS = 360
+# R7 reviewed regression set: video/media, exact history, privacy, gifts and wakeup UI.
+# All 39 classes must run; deleting a class or skipping a test must fail closed.
+MIN_TOTAL_TESTS = 389
 
 
 @dataclass
