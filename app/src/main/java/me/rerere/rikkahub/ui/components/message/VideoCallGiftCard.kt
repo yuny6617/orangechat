@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -45,21 +46,29 @@ internal fun VideoCallGiftCard(
         modifier
             .widthIn(max = 280.dp)
             .clip(shape)
-            .background(Brush.linearGradient(listOf(Color(0xFF1B1B24), Color(0xFF2B2440))), shape)
-            .border(1.dp, Color.White.copy(alpha = 0.16f), shape)
+            .background(Brush.linearGradient(listOf(Color(0xFFF8FBFF), Color(0xFFEDE8FA))), shape)
+            .border(1.dp, Color.White.copy(alpha = 0.88f), shape)
             .testTag("video-gift-card")
+            .semantics(mergeDescendants = true) {}
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text("视频通话礼物 · 纯虚拟", color = Color.White.copy(alpha = 0.55f), fontSize = 10.sp)
+        Text("视频通话礼物 · 纯虚拟", color = Color(0xFF6B6480), fontSize = 10.sp)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(gift.caption(), color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Text("×1", color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+            Text(
+                gift.caption(),
+                modifier = Modifier.weight(1f),
+                color = Color(0xFF302A43),
+                fontSize = 16.sp,
+                lineHeight = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text("×1", color = Color(0xFF75668F), fontSize = 12.sp)
         }
         Text(
             "只存在于这次通话的画面里，没有真实价值",
             modifier = Modifier.fillMaxWidth(),
-            color = Color.White.copy(alpha = 0.45f),
+            color = Color(0xFF6B6480),
             fontSize = 10.sp,
             lineHeight = 14.sp,
         )

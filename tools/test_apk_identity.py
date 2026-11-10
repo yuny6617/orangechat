@@ -308,6 +308,23 @@ class CoexistValidationTest(unittest.TestCase):
         meta, sig = self.coexist()
         self.assertEqual(validate_coexist(meta, sig), [])
 
+    def test_debuggable_flag_is_independent_of_shared_debug_signer(self):
+        # R8 coexist is optimized/non-debuggable; R7 had application-debuggable.
+        # Neither form may bypass the exact package and certificate checks.
+        for debug_line in ("", "application-debuggable\n"):
+            with self.subTest(debuggable=bool(debug_line)):
+                badging = BADGING_COEXIST + debug_line
+                meta, sig = self.coexist(badging=badging)
+                self.assertEqual(validate_coexist(meta, sig), [])
+                wrong_meta, _ = self.coexist(
+                    badging=badging.replace(COEXIST_PACKAGE, PRODUCTION_PACKAGE)
+                )
+                self.assertTrue(validate_coexist(wrong_meta, sig))
+                for signer in (APKSIGNER_SINGLE, APKSIGNER_UNSIGNED,
+                               APKSIGNER_DEBUG.replace(SHARED_DEBUG_CERT_SHA256, "c" * 64)):
+                    _, wrong_sig = self.coexist(badging=badging, apksigner=signer)
+                    self.assertTrue(validate_coexist(meta, wrong_sig))
+
     def test_production_package_is_rejected(self):
         meta, sig = self.coexist(badging=BADGING_PRODUCTION)
         errors = validate_coexist(meta, sig)

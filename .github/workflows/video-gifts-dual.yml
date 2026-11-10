@@ -184,10 +184,10 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_apk_identity.py'
           python3 -m unittest discover -s tools -p 'test_verify_feature_tests.py'
 
-      - name: Feature unit tests (reviewed 389-test set)
+      - name: Feature unit tests (reviewed 394-test set)
         run: |
           set -euo pipefail
-          # R7 主模型独立验收：39 个类、389 个测试方法（含视频隐私、礼物、通话历史和插件配置）。
+          # R8 回归集：40 个类、394 个测试方法（含真实礼物卡样式及头像、视频隐私和插件配置）。
           # 只要有一个类不跑、少一个测试、出现失败或跳过，整条流水线都会失败。
           ./gradlew :app:testDebugUnitTest --no-daemon --console=plain \
             --tests '*VideoCall*' \
@@ -349,6 +349,15 @@ jobs:
             app/build/outputs/mapping/videoUpdate/seeds.txt
             app/build/outputs/mapping/videoUpdate/usage.txt
             app/build/outputs/mapping/videoUpdate/resources.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload optimized coexist R8 mapping
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OrangeChat-video-coexist-mapping-${{ github.run_id }}-${{ steps.vars.outputs.short_sha }}
+          path: app/build/outputs/mapping/videoCoexist/
           if-no-files-found: ignore
           retention-days: 14
 

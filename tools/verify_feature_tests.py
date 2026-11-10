@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Sequence
 
 EXPECTED_TEST_CLASSES = (
+    "me.rerere.rikkahub.ui.components.message.VideoGiftCardUiTest",
     "me.rerere.rikkahub.plugin.model.PluginConfigTest",
     # R6/R7: actual history route, camera privacy, editable prompt and gift delivery/UI.
     "me.rerere.rikkahub.data.ai.VideoGiftProviderChainTest",
@@ -68,9 +69,9 @@ EXPECTED_TEST_CLASSES = (
     "me.rerere.rikkahub.service.VoiceCallTranscriptTest",
 )
 
-# R7 reviewed regression set: video/media, exact history, privacy, gifts and wakeup UI.
-# All 39 classes must run; deleting a class or skipping a test must fail closed.
-MIN_TOTAL_TESTS = 389
+# R8 regression set includes the real gift-card UI and sender-row tests.
+# All 40 classes must run; deleting a class or skipping a test must fail closed.
+MIN_TOTAL_TESTS = 394
 
 
 @dataclass

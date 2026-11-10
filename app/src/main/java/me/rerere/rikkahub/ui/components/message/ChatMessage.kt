@@ -458,6 +458,9 @@ fun ChatMessage(
         }
         ProvideTextStyle(textStyle) {
             if (everyday && message.role == MessageRole.ASSISTANT &&
+                // A gift-only record has no hidden process to open; keep loading/process entries intact.
+                (loading || message.annotations.none { it is UIMessageAnnotation.VideoCallGift } ||
+                    message.parts.any { it is UIMessagePart.Reasoning || it is UIMessagePart.Tool }) &&
                 (!hideVideoCallTranscriptText || message.parts.any { it is UIMessagePart.Reasoning || it is UIMessagePart.Tool }) && message.parts.none {
                 (it is UIMessagePart.Text && it.text.isNotBlank())
                     || it is UIMessagePart.Image || it is UIMessagePart.Audio
@@ -504,14 +507,8 @@ fun ChatMessage(
  
             message.annotations.filterIsInstance<me.rerere.ai.ui.UIMessageAnnotation.VideoCallGift>()
                 .lastOrNull()?.let { gift ->
-                    ChatBubbleRow(
-                        enabled = true,
-                        isUser = false,
-                        avatar = { ChatBubbleAvatar(false, model, assistant, avatarGesture) },
-                        timestamp = timestamp,
-                    ) {
-                        VideoCallGiftCard(gift)
-                    }
+                    // The gift belongs to this same reply; do not add a second sender row.
+                    VideoCallGiftCard(gift)
                 }
             message.translation?.let { translation ->
                 CollapsibleTranslationText(

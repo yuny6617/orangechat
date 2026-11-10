@@ -171,16 +171,18 @@ android {
             buildConfigField("String", "BUILD_TIME", "\"$buildTime\"")
         }
         // 视频礼物共存版：与已安装的正式版/调试版并存。
-        // 使用仓库内共享 debug 密钥签名（与 debug 变体一致；密码是公开的 android），
+        // 使用仓库内共享 debug 密钥签名（密码是公开的 android），
         // 明确不是发布安全签名，绝不使用 local.properties 里的 release 密钥，
         // 因此没有 secrets 的 fork 也能构建。包名、provider authorities、taskAffinity
         // 都由 applicationId 占位符推导，和 me.rerere.orangechat 及其 .liquidglass 变体互不冲突。
         create("videoCoexist") {
-            initWith(getByName("debug"))
-            matchingFallbacks.add("debug")
-            // debug 默认带 .liquidglass 后缀，这里必须显式替换成共存包名。
+            // 与 videoUpdate 使用相同的 R8/资源压缩和库 variant，缩小共存 APK。
+            initWith(getByName("release"))
+            matchingFallbacks.add("release")
+            // 优化不改变已交付共存版的包名/证书，仍可覆盖安装并保留数据。
             applicationIdSuffix = ".videogifts"
             signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = false
         }
         // 视频礼物更新候选：包名保持正式包 me.rerere.orangechat，复制 release 的
         // 优化/ProGuard 设置，但明确 unsigned：没有原证书签名之前不能安装，也不能
