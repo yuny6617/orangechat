@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import com.dokar.sonner.ToastType
 import kotlinx.coroutines.CancellationException
@@ -79,6 +80,7 @@ fun ChatExportSheet(
     val pluginManager = koinInject<PluginManager>()
     val chatService = koinInject<ChatService>()
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
     var imageExportOptions by remember { mutableStateOf(ImageExportOptions()) }
     var activeExport by remember { mutableStateOf<ChatExportKind?>(null) }
     var exportProgress by remember { mutableStateOf("") }
@@ -256,9 +258,26 @@ fun ChatExportSheet(
                                             val options = imageExportOptions
                                             exportJob = scope.launch {
                                                 try {
-                                                    val count = exportToImage(context, title, snapshot, options) { page ->
-                                                        exportProgress = "已编码 $page 页（最多 $EXPORT_MAX_PAGES 页）"
+                                                    val pages = exportVisualChatImages(
+                                                        context = context,
+                                                        scope = scope,
+                                                        density = density,
+                                                        conversation = conversation,
+                                                        messages = snapshot,
+                                                        settings = settings,
+                                                        options = options,
+                                                        onProgress = { page ->
+                                                            exportProgress = "已生成 $page 页（最多 $EXPORT_MAX_PAGES 页）"
+                                                        },
+                                                    )
+                                                    try {
+                                                        currentCoroutineContext().ensureActive()
+                                                        shareChatImages(context, pages)
+                                                    } catch (shareError: Throwable) {
+                                                        withContext(NonCancellable + Dispatchers.IO) { pages.forEach(File::delete) }
+                                                        throw shareError
                                                     }
+                                                    val count = pages.size
                                                     val detail = if (count > 1) {
                                                         "共 $count 张（第 1–$count 页），按页序分享"
                                                     } else {
