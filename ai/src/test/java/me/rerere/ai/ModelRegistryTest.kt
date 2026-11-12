@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -15,6 +15,17 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ModelRegistryTest {
+    @Test
+    fun audioFamiliesDoNotInheritOrdinaryGpt4oVision() {
+        listOf("gpt-4o-audio-preview", "gpt-4o-mini-audio-preview-2024-12-17",
+            "gpt-4o-audio-preview-2024-12-17", "openai/gpt-4o-audio-preview", "gpt-audio", "gpt-audio-mini").forEach { id ->
+            assertEquals(id, listOf(Modality.TEXT), ModelRegistry.MODEL_INPUT_MODALITIES.getData(id))
+        }
+        listOf("gpt-4o", "gpt-4o-mini", "openai/gpt-4o").forEach { id ->
+            assertTrue(id, Modality.IMAGE in ModelRegistry.MODEL_INPUT_MODALITIES.getData(id))
+        }
+    }
+
     @Test
     fun testGPT5() {
         assertTrue(ModelRegistry.GPT_5.match("gpt-5"))

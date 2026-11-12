@@ -157,8 +157,9 @@ object VideoVoicePolicy {
                 VideoVoiceAvailability(
                     route = null,
                     enabled = false,
-                    reason = "当前模型或通道不支持直接上传录音（不是 Gemini / OpenAI ChatCompletions，" +
-                        "或模型本身不接受音频）。可以改成「语音转文字」，也可以直接打字。",
+                    reason = "当前模型或通道暂不支持直接上传录音：只有 Google Gemini、OpenAI " +
+                        "ChatCompletions 通道，并且模型本身接受音频（Gemini 或 GPT 音频模型）才行。" +
+                        "可以改成「语音转文字」，也可以直接打字。",
                 )
             }
 
@@ -171,7 +172,8 @@ object VideoVoicePolicy {
                 else -> VideoVoiceAvailability(
                     route = null,
                     enabled = false,
-                    reason = "当前模型不支持音频直传，也没有配置语音识别；可以直接打字，不会假装在听。",
+                    reason = "当前模型不支持音频直传（Gemini 或 GPT 音频模型才可直传），" +
+                        "也没有配置语音识别；可以直接打字，不会假装在听。",
                 )
             }
         }

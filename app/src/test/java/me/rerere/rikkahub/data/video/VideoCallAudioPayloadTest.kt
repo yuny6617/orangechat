@@ -8,17 +8,24 @@ package me.rerere.rikkahub.data.video
 
 import android.app.Application
 import android.util.Base64
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
+import me.rerere.ai.provider.Modality
+import me.rerere.ai.provider.ProviderSetting
 import me.rerere.ai.provider.providers.GoogleProvider
 import me.rerere.ai.provider.providers.openai.ChatCompletionsAPI
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.util.KeyRoulette
+import me.rerere.rikkahub.data.ai.transformers.TransformerContext
+import me.rerere.rikkahub.data.ai.transformers.VoiceMessageTransformer
+import me.rerere.rikkahub.data.datastore.Settings
+import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.testing.HostFileUriShadow
 import me.rerere.rikkahub.ui.hooks.DirectAudioRecorder
 import okhttp3.OkHttpClient
@@ -199,6 +206,134 @@ class VideoCallAudioPayloadTest {
                     } == true
                 },
             )
+        } finally {
+            audio.delete()
+            image.delete()
+        }
+    }
+
+    @Test
+    fun `gpt audio model carries wav and the current frame in the same anchor`() {
+        val bytes = wavBytes()
+        val audio = writeAudio(bytes)
+        val image = writeImage()
+        val (messages, _) = request(hostFileUrl(audio), hostFileUrl(image))
+        try {
+            // 官方带日期快照，以及带命名空间前缀的 GPT 音频模型：都走真实 ChatCompletions 编码。
+            // 图片是否随行由模型的 inputModalities 决定；这里显式开启视觉，覆盖"视频帧 + 本轮 WAV"
+            // 同一锚点的 payload（模型是否真的接受图，属于能力元数据/服务端的事，不在本测试断言范围）。
+            listOf(
+                "gpt-4o-audio-preview-2024-12-17",
+                "openai/gpt-audio-mini-2025-10-06",
+            ).forEach { modelId ->
+                val payload = openAiMessages(
+                    messages,
+                    Model(
+                        modelId = modelId,
+                        inputModalities = listOf(Modality.TEXT, Modality.IMAGE),
+                    ),
+                )
+
+                val anchor = payload.last().jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+                val audioEntries = anchor.filter { it["type"]?.jsonPrimitive?.content == "input_audio" }
+                assertEquals("$modelId 的锚点必须恰好一段音频", 1, audioEntries.size)
+                val inputAudio = audioEntries.single()["input_audio"]!!.jsonObject
+                assertEquals("wav", inputAudio["format"]!!.jsonPrimitive.content)
+                assertArrayEquals(
+                    "$modelId 的 WAV 字节必须原样发出去",
+                    bytes,
+                    Base64.decode(inputAudio["data"]!!.jsonPrimitive.content, Base64.DEFAULT),
+                )
+                assertTrue(
+                    "$modelId 同一轮还要带上当前画面",
+                    anchor.any { it["type"]?.jsonPrimitive?.content == "image_url" },
+                )
+                assertEquals(
+                    "$modelId 整份请求只有锚点带音频",
+                    1,
+                    payload.count { message ->
+                        message.jsonObject["content"]?.let { content ->
+                            runCatching {
+                                content.jsonArray.any {
+                                    it.jsonObject["type"]?.jsonPrimitive?.content == "input_audio"
+                                }
+                            }.getOrDefault(false)
+                        } == true
+                    },
+                )
+            }
+        } finally {
+            audio.delete()
+            image.delete()
+        }
+    }
+
+    @Test
+    fun `gpt audio without vision capability keeps wav and never attaches a frame`() {
+        val bytes = wavBytes()
+        val audio = writeAudio(bytes)
+        val image = writeImage()
+        val (messages, _) = request(hostFileUrl(audio), hostFileUrl(image))
+        try {
+            // 官方 GPT 音频模型（gpt-audio / gpt-audio-mini）只声明 text+audio：
+            // 此时 WAV 照常发，画面必须被能力过滤掉，而不是赌服务端会忽略 image_url。
+            val payload = openAiMessages(messages, Model(modelId = "openai/gpt-audio-mini-2025-10-06"))
+            val anchor = payload.last().jsonObject["content"]!!.jsonArray.map { it.jsonObject }
+            val inputAudio = anchor.single { it["type"]?.jsonPrimitive?.content == "input_audio" }
+                .getValue("input_audio").jsonObject
+            assertEquals("wav", inputAudio["format"]!!.jsonPrimitive.content)
+            assertArrayEquals(
+                bytes,
+                Base64.decode(inputAudio["data"]!!.jsonPrimitive.content, Base64.DEFAULT),
+            )
+            assertFalse(
+                "文本+音频模型不能收到 image_url",
+                anchor.any { it["type"]?.jsonPrimitive?.content == "image_url" },
+            )
+        } finally {
+            audio.delete()
+            image.delete()
+        }
+    }
+
+    @Test
+    fun `ordinary gpt never carries input_audio after the request transformer runs`() = runBlocking {
+        val audio = writeAudio(wavBytes())
+        val image = writeImage()
+        try {
+            val model = Model(
+                modelId = "gpt-4o",
+                inputModalities = listOf(Modality.TEXT, Modality.IMAGE),
+            )
+            val settings = Settings.dummy().copy(
+                providers = listOf(ProviderSetting.OpenAI(models = listOf(model))),
+            )
+            val source = UIMessage(
+                role = MessageRole.USER,
+                parts = listOf(
+                    UIMessagePart.Text("听听这段"),
+                    UIMessagePart.Audio(hostFileUrl(audio)),
+                    UIMessagePart.Image(hostFileUrl(image)),
+                ),
+            )
+            val transformed = VoiceMessageTransformer.transform(
+                TransformerContext(RuntimeEnvironment.getApplication(), model, Assistant(), settings),
+                listOf(source),
+            )
+            val payload = openAiMessages(transformed, model)
+            assertFalse(
+                "普通 GPT 的 payload 里不允许出现 input_audio",
+                payload.toString().contains("input_audio"),
+            )
+            val text = transformed.flatMap { it.parts }
+                .filterIsInstance<UIMessagePart.Text>()
+                .joinToString("\n") { it.text }
+            assertTrue(
+                "音频没有提供时必须明确告诉模型，而不是让它假装听过",
+                text.contains("未提供给当前模型"),
+            )
+            // 只改发出去的副本：UI/历史里那条音频不能被就地改写。
+            assertTrue(source.parts[1] is UIMessagePart.Audio)
         } finally {
             audio.delete()
             image.delete()

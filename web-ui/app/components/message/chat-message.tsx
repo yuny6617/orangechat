@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 
 import {
   ArrowDown,
@@ -12,6 +13,7 @@ import {
   Ellipsis,
   FileDown,
   GitFork,
+  ListChecks,
   Pencil,
   RefreshCw,
   Trash2,
@@ -55,6 +57,7 @@ interface ChatMessageProps {
   onDelete?: (messageId: string) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
   onToolApproval?: (toolCallId: string, approved: boolean, reason: string, answer?: string) => void | Promise<void>;
+  onSelectForExport?: (messageId: string) => void;
 }
 
 function hasRenderablePart(part: UIMessagePart): boolean {
@@ -237,6 +240,7 @@ const ChatMessageActionsRow = React.memo(({
   onSelectBranch,
   onDelete,
   onFork,
+  onSelectForExport,
 }: {
   node: MessageNodeDto;
   message: MessageDto;
@@ -247,6 +251,7 @@ const ChatMessageActionsRow = React.memo(({
   onSelectBranch?: (nodeId: string, selectIndex: number) => void | Promise<void>;
   onDelete?: (messageId: string) => void | Promise<void>;
   onFork?: (messageId: string) => void | Promise<void>;
+  onSelectForExport?: () => void;
 }) => {
   const { t } = useTranslation("message");
   const [regenerating, setRegenerating] = React.useState(false);
@@ -264,6 +269,22 @@ const ChatMessageActionsRow = React.memo(({
       // Ignore copy failures to keep action row interaction uninterrupted.
     }
   }, [message.parts, t]);
+
+  const handleExportMessage = React.useCallback(
+    (includeReasoning: boolean) => {
+      try {
+        const content = convertMessageToMarkdown(message, includeReasoning);
+        downloadMarkdown(content, `message-${message.id}.md`);
+      } catch (error) {
+        toast.error(
+          t("chat_message.export_failed", {
+            message: error instanceof Error ? error.message : "",
+          }),
+        );
+      }
+    },
+    [message, t],
+  );
 
   const handleRegenerate = React.useCallback(async () => {
     if (!onRegenerate) return;
@@ -430,10 +451,15 @@ const ChatMessageActionsRow = React.memo(({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align={alignRight ? "end" : "start"}>
+          {onSelectForExport && (
+            <DropdownMenuItem onSelect={onSelectForExport}>
+              <ListChecks className="size-3.5" />
+              {t("chat_message.select_for_export")}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem
             onSelect={() => {
-              const content = convertMessageToMarkdown(message, false);
-              downloadMarkdown(content, `message-${message.id}.md`);
+              handleExportMessage(false);
             }}
           >
             <FileDown className="size-3.5" />
@@ -441,8 +467,7 @@ const ChatMessageActionsRow = React.memo(({
           </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => {
-              const content = convertMessageToMarkdown(message, true);
-              downloadMarkdown(content, `message-${message.id}.md`);
+              handleExportMessage(true);
             }}
           >
             <FileDown className="size-3.5" />
@@ -524,6 +549,7 @@ export const ChatMessage = React.memo(({
   onDelete,
   onFork,
   onToolApproval,
+  onSelectForExport,
 }: ChatMessageProps) => {
   const isUser = message.role === "USER";
   const hasMessageContent = message.parts.some(hasRenderablePart);
@@ -583,6 +609,9 @@ export const ChatMessage = React.memo(({
             onSelectBranch={onSelectBranch}
             onDelete={onDelete}
             onFork={onFork}
+            onSelectForExport={
+              onSelectForExport ? () => onSelectForExport(message.id) : undefined
+            }
           />
         </div>
       )}

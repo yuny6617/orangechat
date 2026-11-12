@@ -1,8 +1,15 @@
 package me.rerere.rikkahub.service
 
 import kotlinx.coroutines.runBlocking
+import me.rerere.ai.core.MessageRole
+import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.video.VIDEO_PICTURE_ATTACHED_SENTENCE
+import me.rerere.rikkahub.data.video.VideoCallContext
+import me.rerere.rikkahub.data.video.VideoCallPrompts
+import me.rerere.rikkahub.data.video.VideoRequestImageAuthorization
+import me.rerere.rikkahub.data.video.withoutHistoricalCameraImages
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -338,13 +345,84 @@ class MessageQueueTest {
             assertEquals("本轮没有附图", paused[0].transientSystemPrompt)
             assertTrue(paused[0].transientImageUrls.isEmpty())
             assertNull(paused[0].requestToken)
-            // 永久手动夹帧仍在 parts 里 → "附图"说明仍然成立，永久帧本身不受影响。
-            assertEquals("本轮附图：一张手动夹帧", paused[1].transientSystemPrompt)
+            // REVIEW_ROUND1_CODE #2：永久手动夹帧仍在 parts 里（历史里看得见），但 token 已作废、
+            // 没有 token 就没有相机授权，provider 边界不会重放它 —— 所以"附图"说明同样不再成立。
+            assertEquals("本轮没有附图", paused[1].transientSystemPrompt)
             assertEquals(listOf("file:///files/clip.jpg"), paused[1].ownedImageUrls)
+            assertEquals(
+                listOf("file:///files/clip.jpg"),
+                paused[1].parts.filterIsInstance<UIMessagePart.Image>().map { it.url },
+            )
             assertNull(paused[1].requestToken)
             assertEquals(setOf("vc-token-1", "vc-token-2"), revoked.toSet())
             queue.resume()
             assertNull(queue.takeNext()!!.requestToken)
+        } finally { queue.clear() }
+    }
+
+    /**
+     * REVIEW_ROUND1_CODE #2 的端到端回归：
+     * 暂停 → token 清空 → 恢复；永久夹帧仍在历史里（可见），但**不会**被重放，
+     * 而且发请求前的 system prompt 不能再声称"本轮附带了当前相机画面"。
+     */
+    @Test fun pausedPermanentFrameStaysVisibleButTheResumedRequestClaimsNoPicture() {
+        val queue = MessageQueue()
+        val permanent = "file:///data/user/0/orange/files/video_call_clips/clip.jpg"
+        // 提交时的真实版本：有图 + 有录音；暂停时 VoiceCallService 的降级变体按"永久帧还在"
+        // 仍然写 pictureAttached=true（音频部分已经改成 false）——这正是需要 provider 边界兜底的情形。
+        val submitted = VideoCallPrompts.turnContext(
+            VideoCallContext(cameraAvailable = true, pictureAttached = true, audioAttached = true),
+        )
+        val degraded = VideoCallPrompts.turnContext(
+            VideoCallContext(cameraAvailable = true, pictureAttached = true, audioAttached = false),
+        )
+        try {
+            queue.enqueue(
+                listOf(UIMessagePart.Text("看图"), UIMessagePart.Image(permanent)),
+                transientSystemPrompt = submitted,
+                transientSystemPromptWithoutImages = degraded,
+                ownedImageUrls = listOf(permanent),
+                requestToken = "vc-token-permanent",
+            )
+            queue.pause()
+            val paused = queue.state.value.messages.single()
+            // 1. 历史可见：永久夹帧还在这条消息里。
+            assertEquals(
+                listOf(permanent),
+                paused.parts.filterIsInstance<UIMessagePart.Image>().map { it.url },
+            )
+            // 2. 恢复的是一次没有 token 的新请求：录音说明已经换成无附件版本。
+            assertNull(paused.requestToken)
+            assertEquals(degraded, paused.transientSystemPrompt)
+            assertFalse(paused.transientSystemPrompt!!.contains(VideoCallPrompts.AUDIO_ATTACHED_NOTE))
+            queue.resume()
+            val dispatched = queue.takeNext()!!
+            assertNull(dispatched.requestToken)
+
+            // 3. 走一遍 GenerationHandler 的发请求前处理：历史过滤 + 最终活授权判断。
+            val request = listOf(
+                UIMessage.system(dispatched.transientSystemPrompt!!),
+                UIMessage(
+                    id = dispatched.id,
+                    role = MessageRole.USER,
+                    parts = dispatched.parts,
+                ),
+            ).withoutHistoricalCameraImages()
+            val authorization = VideoRequestImageAuthorization(
+                // token 为 null ⇒ GenerationHandler 收集不到相机 URL；这里如实传空。
+                emptyList(), dispatched.id.toString(),
+            ) { false }
+            val sent = authorization.applyTo(request)
+            assertTrue(
+                "隐私过滤之后请求里不能再有这张永久夹帧",
+                sent.none { message -> message.parts.any { it is UIMessagePart.Image } },
+            )
+            val system = sent.first().toText()
+            assertFalse(
+                "system prompt 不能再声称本轮带了画面",
+                system.contains(VIDEO_PICTURE_ATTACHED_SENTENCE),
+            )
+            assertTrue(system.contains(VideoCallPrompts.NO_PICTURE_THIS_TURN_NOTE))
         } finally { queue.clear() }
     }
 

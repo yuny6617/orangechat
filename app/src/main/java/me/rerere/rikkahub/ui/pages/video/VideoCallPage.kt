@@ -10,6 +10,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.res.Configuration
 import android.graphics.SurfaceTexture
 import android.os.IBinder
 import android.util.Log
@@ -20,9 +21,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -56,6 +61,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -302,7 +308,7 @@ fun VideoCallPage(
     val previewTransform by cameraController.previewTransform.collectAsStateWithLifecycle()
 
     /**
-     * 预览方向的人工校准（**只作用于预览画面**，不改抓帧 JPEG，见 [PreviewCalibration]）。
+     * 人工校准角度同步用于预览和本轮发送的抓帧 JPEG（见 [PreviewCalibration]）。
      *
      * 角度是**设置**（持久化），不是本页的临时状态：换镜头、退后台再回来、页面重建
      * 都不会把它清掉。真机上画面偏了就点「右转/左转」，角度会立刻生效并写回设置。
@@ -565,9 +571,17 @@ fun VideoCallPage(
             .statusBarsPadding(),
     ) {
         Column(
-            Modifier.fillMaxSize().imePadding().navigationBarsPadding().padding(horizontal = 14.dp),
+            // imePadding 必须留着：RouteActivity 是 edge-to-edge（enableEdgeToEdge），
+            // 键盘不会替我们缩小 window，只有消费 IME inset 输入框才不会被键盘盖住。
+            // 上半区（相机/字幕/提示）可滚动，控制行与输入框固定在下，永远可见。
+            Modifier.fillMaxSize().navigationBarsPadding().imePadding().padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Bound the scrolling content; keep call actions and the composer outside it.
+            Column(
+                Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
             // 顶部：折叠 + 「视频通话」+ 礼物计数
             Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 GlassTextChip(label = "↙", ink = colors.ink, onClick = onBack)
@@ -639,72 +653,83 @@ fun VideoCallPage(
                 )
             }
 
-            // 镜头：始终可见，但只占一张圆角卡，不再铺满整屏。
+            // 镜头：始终可见，但只占一张固定 4:3 的圆角卡。
+            //
+            // 预览矩阵使用 fit（整张源图等比贴合、留边），所以任何传感器比例都不会被
+            // 拉伸或裁剪。外层仍按宽度量出 4:3 高度，键盘不会把相机画面压扁。
             Box(
-                Modifier.fillMaxWidth().weight(1.15f)
+                Modifier.fillMaxWidth().aspectRatio(4f / 3f)
                     .clip(RoundedCornerShape(26.dp))
-                    .background(Color(0xFF1E2A33), RoundedCornerShape(26.dp))
-                    .border(1.5.dp, Color.White.copy(alpha = .85f), RoundedCornerShape(26.dp)),
+                    .background(Color(0xFF1E2A33)),
+                contentAlignment = Alignment.Center,
             ) {
-                // Remove the TextureView while disabled: no stale camera buffer can masquerade as live.
-                if (callState.isCameraEnabled) {
-                    CameraPreviewSurface(
-                        controller = cameraController,
-                        transform = previewTransform,
-                        modifier = Modifier.matchParentSize(),
-                    )
-                }
-                if (!callState.isCameraEnabled) {
-                    Text("摄像头已关闭 · 通话继续", Modifier.align(Alignment.Center), color = Color.White)
-                } else if (!previewing) {
-                    CameraOffCard(
-                        status = cameraStatusState,
-                        permissionGranted = cameraGranted,
-                        onRequestPermission = { cameraPermission.requestPermissions() },
-                        modifier = Modifier.matchParentSize(),
-                    )
-                }
-                Row(
-                    Modifier.align(Alignment.TopStart).padding(6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                Box(
+                    Modifier.fillMaxSize()
+                        .clip(RoundedCornerShape(26.dp))
+                        .background(Color(0xFF1E2A33), RoundedCornerShape(26.dp))
+                        .border(1.5.dp, Color.White.copy(alpha = .85f), RoundedCornerShape(26.dp)),
                 ) {
-                    GlassTextChip(
-                        label = if (callState.isCameraEnabled) "关闭摄像头" else "开启摄像头",
-                        ink = colors.ink,
-                        onClick = if (canSend) ({ boundService?.toggleVideoCamera() }) else null,
+                    // Remove the TextureView while disabled: no stale camera buffer can masquerade as live.
+                    if (callState.isCameraEnabled) {
+                        CameraPreviewSurface(
+                            controller = cameraController,
+                            transform = previewTransform,
+                            modifier = Modifier.matchParentSize(),
+                        )
+                    }
+                    if (!callState.isCameraEnabled) {
+                        Text("摄像头已关闭 · 通话继续", Modifier.align(Alignment.Center), color = Color.White)
+                    } else if (!previewing) {
+                        CameraOffCard(
+                            status = cameraStatusState,
+                            permissionGranted = cameraGranted,
+                            onRequestPermission = { cameraPermission.requestPermissions() },
+                            modifier = Modifier.matchParentSize(),
+                        )
+                    }
+                    Row(
+                        Modifier.align(Alignment.TopStart).padding(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        GlassTextChip(
+                            label = if (callState.isCameraEnabled) "关闭摄像头" else "开启摄像头",
+                            ink = colors.ink,
+                            onClick = if (canSend) ({ boundService?.toggleVideoCamera() }) else null,
+                        )
+                        GlassTextChip(
+                            label = if (callState.isPreviewMirrored) "预览镜像：开" else "预览镜像：关",
+                            ink = colors.ink,
+                            onClick = if (canSend) ({ boundService?.togglePreviewMirror() }) else null,
+                        )
+                    }
+                    Text(
+                        "所见方向和镜像会同步发送给模型",
+                        Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 46.dp),
+                        color = Color.White, fontSize = 10.sp,
                     )
-                    GlassTextChip(
-                        label = if (callState.isPreviewMirrored) "预览镜像：开" else "预览镜像：关",
-                        ink = colors.ink,
-                        onClick = if (canSend) ({ boundService?.togglePreviewMirror() }) else null,
+                    // 方向校准同步用于预览和本轮发给模型的照片。
+                    // 设备建议仅窄匹配用户报告的机型；实际效果仍需真机确认，可手动校准。
+                    // 这里把角度直接写在按钮中间，点一次就能看出转没转对，也能往回转/复位。
+                    PreviewCalibrationControls(
+                        degrees = previewCalibrationDegrees,
+                        onRotateLeft = {
+                            applyPreviewCalibration(PreviewCalibration.rotateLeft(previewCalibrationDegrees))
+                        },
+                        onRotateRight = {
+                            applyPreviewCalibration(PreviewCalibration.rotateRight(previewCalibrationDegrees))
+                        },
+                        onReset = { applyPreviewCalibration(PreviewCalibration.reset()) },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
                     )
                 }
-                Text(
-                    "仅翻转预览 · 发送照片不镜像",
-                    Modifier.align(Alignment.TopStart).padding(start = 12.dp, top = 46.dp),
-                    color = Color.White, fontSize = 10.sp,
-                )
-                // 方向校准：只转预览画面，不动抓帧/照片的方向。
-                // 设备建议仅窄匹配用户报告的机型；实际效果仍需真机确认，可手动校准。
-                // 这里把角度直接写在按钮中间，点一次就能看出转没转对，也能往回转/复位。
-                PreviewCalibrationControls(
-                    degrees = previewCalibrationDegrees,
-                    onRotateLeft = {
-                        applyPreviewCalibration(PreviewCalibration.rotateLeft(previewCalibrationDegrees))
-                    },
-                    onRotateRight = {
-                        applyPreviewCalibration(PreviewCalibration.rotateRight(previewCalibrationDegrees))
-                    },
-                    onReset = { applyPreviewCalibration(PreviewCalibration.reset()) },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
-                )
             }
 
-            // 常驻文字：LazyColumn + 稳定 id + 有界历史，可上下回看，不会 6 秒就消失。
+            // Bound the nested LazyColumn explicitly inside the scrolling content.
+            // 常驻文字：稳定 id + 有界历史，可上下回看，不会 6 秒就消失。
             CallTranscriptList(
                 lines = panelState.history,
                 colors = colors,
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                modifier = Modifier.fillMaxWidth().height(180.dp),
             )
 
             if (otherCallActive) {
@@ -772,7 +797,10 @@ fun VideoCallPage(
                 )
             }
 
-            // 控制行放在输入框**上面**：键盘弹起时先被压缩的是上面的列表，控制不会被挤掉。
+            }
+
+            // Fixed below the bounded scrolling area, above the IME.
+            // 控制行与输入框始终独立于可滚动的相机、字幕和提示区域。
             Row(
                 Modifier.fillMaxWidth()
                     .background(Color.White.copy(alpha = .45f), RoundedCornerShape(26.dp))
@@ -840,7 +868,8 @@ fun VideoCallPage(
                 BasicTextField(
                     value = input,
                     onValueChange = { input = it.take(200) },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).heightIn(max = 64.dp),
+                    maxLines = 3,
                     enabled = !otherCallActive,
                     textStyle = TextStyle(color = colors.ink, fontSize = 14.sp),
                     cursorBrush = SolidColor(colors.accent),
@@ -1103,14 +1132,15 @@ private fun PreviewCalibrationButton(
  * 预览：TextureView + 显式变换矩阵。
  *
  * camera2 的 buffer 永远是 sensor 方向，SurfaceView 不会替应用旋转；TextureView 的
- * `setTransform` 可以按 sensor/display 角度真正转正，并等比"填满"（多出来的部分裁掉），
- * 前摄再镜像。
+ * `setTransform` 可以按 sensor/display 角度真正转正，前摄再镜像。
  *
  * 注意：TextureView **默认就会把 buffer 拉伸到视图大小**，所以矩阵不能是"在默认拉伸之上
  * 再 postRotate + 按像素比放一个等比 scale"——那样消不掉拉伸，还会留下黑边。
  * 真正要交给它的是 [PreviewTransform.matrix]：它先抵消默认拉伸，再做旋转 +
- * 等比 centerCrop + 镜像（几何在 [me.rerere.rikkahub.data.video.VideoPreviewGeometry]
- * 里算成纯数据，配套 JVM 单测逐点验证）。旋转角度与抓帧 JPEG 的方向来自同一个纯函数。
+ * 等比贴合 + 镜像（几何在 [me.rerere.rikkahub.data.video.VideoPreviewGeometry]
+ * 里算成纯数据，配套 JVM 单测逐点验证）。调用方把视图宽高比设成
+ * [PreviewTransform.contentSize] 的比例，所以"贴合"就是整张源图可见；
+ * 旋转角度、镜像与抓帧 JPEG 来自同一套纯函数。
  */
 @Composable
 private fun CameraPreviewSurface(
@@ -1135,7 +1165,9 @@ private fun CameraPreviewSurface(
 
                     override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
                         controller.updateViewSize(width, height)
-                        applyPreviewTransform(this@apply, latestTransform.value, width, height)
+                        // 尺寸变化后控制器会**同步**发布按新尺寸算好的矩阵；这里直接用控制器
+                        // 的当前值，避免用组合里还没刷新的旧矩阵在过渡帧上再算错一次。
+                        applyPreviewTransform(this@apply, controller.previewTransform.value, width, height)
                     }
 
                     override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {

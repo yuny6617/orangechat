@@ -1804,6 +1804,11 @@ class VoiceCallService : Service(), KoinComponent {
             clip?.release(fromRequest = false)
             return
         }
+        if (clip != null && !runCatching { directAudioSupported() }.getOrDefault(false)) {
+            clip.release(fromRequest = false)
+            failVideoVoiceSegment(segment, "模型或通道已变化，不再支持音频直传：这段录音没有发送，请重新录音或打字")
+            return
+        }
         videoVoice = videoVoice.copy(status = VideoVoiceStatus.Sending)
         videoAsrActive = false
         disposeVoiceRecorder()
@@ -1984,6 +1989,7 @@ class VoiceCallService : Service(), KoinComponent {
                     if (attachment.permanent) {
                         parts += UIMessagePart.Image(url = attachment.url)
                         permanentImages += attachment.url
+                        // Keep the camera image in history, but authorize it only for this request.
                     } else {
                         transientImages += attachment.url
                     }
@@ -2136,7 +2142,10 @@ class VoiceCallService : Service(), KoinComponent {
     private fun startConversationMonitor() {
         conversationMonitorJob?.cancel()
         conversationMonitorJob = serviceScope.launch {
-            conversation.collect { conv ->
+            combine(conversation, settingsStore.settingsFlow) { conv, _ -> conv }.collect { conv ->
+                // Route follows this conversation's model/provider and current settings while idle.
+                // Active recordings retain their frozen route until they finish or are cancelled.
+                refreshVideoVoiceInput()
                 if (_uiState.value.status != VoiceCallStatus.Processing &&
                     _uiState.value.status != VoiceCallStatus.Speaking
                 ) return@collect
@@ -2409,6 +2418,7 @@ class VoiceCallService : Service(), KoinComponent {
         if (!videoMode || callEnded || !::conversationId.isInitialized) return
         val enabled = !_uiState.value.isCameraEnabled
         if (!VideoCallRuntime.setCameraEnabled(conversationId.toString(), enabled)) return
+        video?.clearRollingFrames()
         _uiState.update { it.copy(isCameraEnabled = enabled) }
     }
 

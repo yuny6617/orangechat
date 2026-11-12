@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "com.orangechat.theme.schema-v1",
+  "name": "OrangeChat Theme Token Schema",
+  "version": "1.0.0",
+  "author": "OrangeChat",
+  "themes": ["token-template"]
+}

@@ -88,6 +88,34 @@ internal data class ProactiveSessionState(
     val stopUntilUserReturns: Boolean = false,
 )
 
+internal fun recordProactiveSentOnce(
+    state: ProactiveSessionState,
+    messageIds: Collection<String>,
+    text: String,
+): Pair<ProactiveSessionState, Boolean> = recordProactiveCommitOnce(
+    state, state.anchorUserMessageId, messageIds, text,
+)
+
+internal fun recordProactiveCommitOnce(
+    state: ProactiveSessionState,
+    taskAnchorUserMessageId: String,
+    messageIds: Collection<String>,
+    text: String,
+): Pair<ProactiveSessionState, Boolean> {
+    val ids = messageIds.filter(String::isNotBlank).toSet()
+    if (ids.isEmpty()) return state to false
+    val newIds = ids - state.recentProactiveMessageIds
+    if (newIds.isEmpty()) return state to false
+    val sameAnchor = state.anchorUserMessageId == taskAnchorUserMessageId
+    return state.copy(
+        followUpCount = state.followUpCount + if (sameAnchor) 1 else 0,
+        recentProactiveMessageIds = (state.recentProactiveMessageIds + newIds)
+            .toList().takeLast(64).toSet(),
+        lastProactiveText = if (sameAnchor) text.take(500) else state.lastProactiveText,
+        stopUntilUserReturns = if (sameAnchor) false else state.stopUntilUserReturns,
+    ) to true
+}
+
 /**
  * Small persistent state machine anchored to the latest real USER message.
  * Assistant proactive messages never reset this anchor.
@@ -116,23 +144,22 @@ internal class ProactiveMessageStateStore(context: Context, scope: String) {
         messageIds: Collection<String>,
         text: String,
     ): ProactiveSessionState {
-        val updated = state.copy(
-            followUpCount = state.followUpCount + 1,
-            // One proactive run can contain several assistant nodes when tools are used.
-            // Keep every persisted node id so the next run can sanitize the whole chain.
-            recentProactiveMessageIds = (state.recentProactiveMessageIds + messageIds)
-                .toList()
-                .takeLast(MAX_RECENT_PROACTIVE_MESSAGE_IDS)
-                .toSet(),
-            lastProactiveText = text.take(500),
-            stopUntilUserReturns = false,
-        )
-        write(updated)
+        val (updated, changed) = recordProactiveSentOnce(state, messageIds, text)
+        if (changed) write(updated)
         return updated
     }
 
     fun stopUntilUserReturns(state: ProactiveSessionState) {
         write(state.copy(stopUntilUserReturns = true))
+    }
+
+    internal fun recordCommittedIds(messageIds: Collection<String>) {
+        val ids = messageIds.filter(String::isNotBlank).toSet()
+        if (ids.isEmpty()) return
+        val current = read()
+        if (ids.all { it in current.recentProactiveMessageIds }) return
+        write(current.copy(recentProactiveMessageIds = (current.recentProactiveMessageIds + ids)
+            .toList().takeLast(MAX_RECENT_PROACTIVE_MESSAGE_IDS).toSet()))
     }
 
     private fun read(prefs: android.content.SharedPreferences = this.prefs): ProactiveSessionState = ProactiveSessionState(

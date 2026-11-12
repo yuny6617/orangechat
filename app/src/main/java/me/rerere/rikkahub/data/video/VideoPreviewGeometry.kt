@@ -91,14 +91,22 @@ data class Affine(
  *
  * [matrix] 是**视图坐标系**下的完整矩阵（含抵消 TextureView 默认拉伸的部分 + 用户校准），
  * UI 层直接 `setValues` 即可；[rotationDegrees]/[calibrationDegrees]/[mirrorHorizontally]
- * 只用于日志与测试断言（**不参与计算**）。
+ * 用于日志与测试断言。[contentSize] 是**生产 UI 也要用**的字段：预览卡的宽高比必须按它设置，
+ * 否则预览会为了铺满卡片而裁掉一部分，而抓帧 JPEG 仍是整张源图。
  */
 data class PreviewTransform(
     /** 由 sensor/display 推出来的角度（不含用户校准）。 */
     val rotationDegrees: Int = 0,
-    /** 用户手动校准的角度（只影响预览，不影响抓帧 JPEG 的方向）。 */
+    /** 用户手动校准的角度（同时作用于预览与抓帧 JPEG）。 */
     val calibrationDegrees: Int = 0,
     val mirrorHorizontally: Boolean = false,
+    /**
+     * 旋转 + 校准之后**正立源图**的尺寸（90/270 时宽高互换）。
+     *
+     * 预览卡的宽高比必须等于 `width / height`：此时等比 cover 刚好贴合，整张源图可见；
+     * 抓帧 JPEG 的正立尺寸也是这个比例。[width]/[height] 为 0 表示尺寸还没就绪。
+     */
+    val contentSize: PixelSize = PixelSize(0, 0),
     val matrix: Affine = Affine.IDENTITY,
 )
 
@@ -114,7 +122,19 @@ data class PreviewTransform(
  *
  * 角度公式（Android 官方 `setCameraDisplayOrientation` 的等价形式）：
  * - 后摄：`(sensor - display + 360) % 360`；
- * - 前摄：`(sensor + display) % 360`；预览镜像独立可选，通话 JPEG 不镜像以保留文字方向。
+ * - 前摄：`(sensor + display) % 360`。
+ *
+ * 预览镜像与用户校准**同时**作用于预览和抓帧 JPEG（用户明确要求"所见方向/镜像就是发给
+ * 模型的方向"）。预览和 JPEG 共用 [captureRotationDegrees]：抓帧角度 = 预览基准角 + 校准角，
+ * 镜像 = 预览镜像开关。因此两者只差"预览会按视图做等比裁切"这一层。
+ *
+ * ## 预览 / JPEG 的取景范围一致
+ *
+ * [PreviewTransform.contentSize] 给出"旋转 + 校准之后正立源图"的尺寸。UI 必须把预览卡
+ * 做成这个宽高比（见 `VideoCallPage`），此时 [visibleAffine] 的 cover 缩放正好等于
+ * 等比贴合：**整张 sensor 画面都可见，没有裁切**。抓帧 JPEG 也是整张源图旋转/镜像，
+ * 所以"预览看到的取景范围"和"发给模型的照片取景范围"按构造相同，而不是靠
+ * `TextureView` 对源 buffer 的默认拉伸去猜。
  */
 object VideoPreviewGeometry {
     /**
@@ -179,7 +199,8 @@ object VideoPreviewGeometry {
      * 抓帧落盘时的**唯一一次**归一化：sensor 原始像素 → 正立图像。
      *
      * 输出图像的尺寸由 [uprightSize] 给出（90/270 时宽高互换）。
-     * mirror 仅由图像调用方指定；通话 JPEG 传 false，不随用户预览镜像变化。
+     * mirror 由图像调用方指定；视频通话把**预览的镜像开关**原样传进来，保证模型收到的
+     * 方向/镜像与用户看到的一致。
      */
     fun uprightImageAffine(
         rotationDegrees: Int,
@@ -233,6 +254,10 @@ object VideoPreviewGeometry {
      *
      * 前提是调用方用 `setDefaultBufferSize` 把 buffer 尺寸设成相机真实输出尺寸
      * （否则 `S` 就不是这里的 `diag(vw/bw, vh/bh)`，两者必须一致）。
+     *
+     * 调用方还应该把 view 的宽高比设成 [contentSize] 的比例：此时 `F` 的 cover 缩放
+     * 与等比贴合相同，**整张 buffer 都在视图内**，预览不再依赖"裁掉多少"的额外假设，
+     * 也不会出现"预览裁了、JPEG 没裁"的取景范围差异。
      */
     fun visibleAffine(
         rotationDegrees: Int,
@@ -241,17 +266,21 @@ object VideoPreviewGeometry {
         bufferHeight: Int,
         viewWidth: Int,
         viewHeight: Int,
+        /**
+         * true = letterbox the whole upright frame inside the view (never crop or stretch).
+         * false keeps the historical center-crop behavior used by non-video callers.
+         */
+        fit: Boolean = false,
     ): Affine {
         if (bufferWidth <= 0 || bufferHeight <= 0 || viewWidth <= 0 || viewHeight <= 0) {
             return Affine.IDENTITY
         }
         val rotation = normalizeDegrees(rotationDegrees)
         val visible = uprightSize(bufferWidth, bufferHeight, rotation)
-        // 等比填满：取两个方向缩放比的较大者，多出来的部分被裁掉（不拉伸、不留黑边）。
-        val scale = maxOf(
-            viewWidth.toFloat() / visible.width.toFloat(),
-            viewHeight.toFloat() / visible.height.toFloat(),
-        )
+        // 等比：fit 取较小者（整图可见、留边），否则取较大者（填满、裁边）。两种都不拉伸。
+        val scaleX = viewWidth.toFloat() / visible.width.toFloat()
+        val scaleY = viewHeight.toFloat() / visible.height.toFloat()
+        val scale = if (fit) minOf(scaleX, scaleY) else maxOf(scaleX, scaleY)
         val bufferCenterX = bufferWidth / 2f
         val bufferCenterY = bufferHeight / 2f
         val viewCenterX = viewWidth / 2f
@@ -274,6 +303,7 @@ object VideoPreviewGeometry {
         bufferHeight: Int,
         viewWidth: Int,
         viewHeight: Int,
+        fit: Boolean = false,
     ): Affine {
         val visible = visibleAffine(
             rotationDegrees = rotationDegrees,
@@ -282,6 +312,7 @@ object VideoPreviewGeometry {
             bufferHeight = bufferHeight,
             viewWidth = viewWidth,
             viewHeight = viewHeight,
+            fit = fit,
         )
         if (bufferWidth <= 0 || bufferHeight <= 0 || viewWidth <= 0 || viewHeight <= 0) return visible
         val textureViewDefaultStretch = Affine.scale(
@@ -301,16 +332,22 @@ object VideoPreviewGeometry {
         viewWidth: Int,
         viewHeight: Int,
         /**
-         * 用户手动校准角度（只作用于**预览**）。
+         * 用户手动校准角度；预览矩阵和抓帧控制器使用**同一个**角度。
          *
          * 这是"几何算完之后的最后一道人工修正"：真机（OPPO/ColorOS）上画面差 90° 时，
          * 用户点一下"右转"就能转正，不依赖我们对 framework 复合顺序的推断是否正确。
-         * 抓帧 JPEG 的方向**不包含**这个角度（见 [captureRotationDegrees]）。
+         * 抓帧控制器读取这一校准角度并和同一个 uprightRotation 组合。
          */
         calibrationDegrees: Int = 0,
         previewMirrored: Boolean = frontFacing,
+        /**
+         * true = the whole camera frame is letterboxed into the view. Video calls use this so the
+         * 4:3 card never crops/stretches the picture; other callers keep center-crop by default.
+         */
+        fit: Boolean = false,
     ): PreviewTransform {
         val rotation = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
+        val calibration = PreviewCalibration.normalize(calibrationDegrees)
         val base = textureViewAffine(
             rotationDegrees = rotation,
             mirror = false,
@@ -318,16 +355,57 @@ object VideoPreviewGeometry {
             bufferHeight = bufferHeight,
             viewWidth = viewWidth,
             viewHeight = viewHeight,
+            fit = fit,
         )
+        // Fit mode folds the calibration directly into the rotation and does not rescale to
+        // cover the view: `withPreviewCalibration` deliberately re-crops, which would defeat
+        // letterboxing and can look squeezed on a 4:3 card.
+        val calibrated = if (fit) {
+            textureViewAffine(
+                rotationDegrees = normalizeDegrees(rotation + calibration),
+                mirror = false,
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                fit = true,
+            )
+        } else {
+            withPreviewCalibration(base, calibration, viewWidth, viewHeight)
+        }
         return PreviewTransform(
             rotationDegrees = rotation,
-            calibrationDegrees = PreviewCalibration.normalize(calibrationDegrees),
+            calibrationDegrees = calibration,
             mirrorHorizontally = previewMirrored,
+            // 预览卡要用的宽高比 = 旋转 + 校准之后整张源图的正立比例。
+            contentSize = orientedContentSize(
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                rotationDegrees = rotation,
+                calibrationDegrees = calibration,
+            ),
             // Flip last, after calibration rotation: left/right always means screen space.
-            matrix = withPreviewCalibration(base, calibrationDegrees, viewWidth, viewHeight).let {
+            matrix = calibrated.let {
                 if (previewMirrored) it.then(Affine.mirrorAround(viewWidth / 2f, viewHeight / 2f)) else it
             },
         )
+    }
+
+    /**
+     * 旋转 + 用户校准之后**正立源图**的尺寸；预览卡宽高比与抓帧 JPEG 的正立尺寸都用它。
+     *
+     * 只做直角旋转，所以结果仍是轴对齐矩形。尺寸未知（<= 0）时返回 0x0，
+     * 调用方不得把它当成"1x1 有效比例"。
+     */
+    fun orientedContentSize(
+        bufferWidth: Int,
+        bufferHeight: Int,
+        rotationDegrees: Int,
+        calibrationDegrees: Int = 0,
+    ): PixelSize {
+        if (bufferWidth <= 0 || bufferHeight <= 0) return PixelSize(0, 0)
+        val effective = normalizeDegrees(rotationDegrees + PreviewCalibration.normalize(calibrationDegrees))
+        return uprightSize(bufferWidth, bufferHeight, effective)
     }
 
     /**
@@ -375,16 +453,230 @@ object VideoPreviewGeometry {
     }
 
     /**
-     * 抓帧要用的旋转角（**不含**用户预览校准）。
+     * 抓帧 / 落盘 JPEG 要用的旋转角：sensor/display 基准角 **+ 用户校准角**。
      *
-     * 预览校准是"我看到的画面偏了"的人工修正；抓帧/落盘 JPEG 的方向由 sensor/display
-     * 几何唯一决定，不能被预览校准带着转（用户明确要求"不改变 JPEG 方向"）。
+     * 用户明确要求"看到的画面就是发给模型的画面"：预览矩阵把校准当作最后一步旋转，
+     * 这里把同一个校准角加进 JPEG 的归一化旋转，两者只差预览按视图做的那层等比裁切
+     * （预览卡宽高比 = [PreviewTransform.contentSize] 时，那层裁切等于整图贴合）。
+     *
+     * 角度只归一化到直角，且**只加一次**：抓帧请求仍固定 `JPEG_ORIENTATION=0`，
+     * HAL 不转像素，落盘时由 [uprightImageAffine] 施加唯一一次旋转 + 镜像。
      */
     fun captureRotationDegrees(
         sensorOrientation: Int,
         displayRotationDegrees: Int,
         frontFacing: Boolean,
-    ): Int = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
+        calibrationDegrees: Int = 0,
+    ): Int = normalizeDegrees(
+        uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing) +
+            PreviewCalibration.normalize(calibrationDegrees),
+    )
+
+    /** 预览输出的最长边上限（与 `VideoFramePolicy.MAX_CAPTURE_EDGE` 一致）。 */
+    const val PREVIEW_MAX_EDGE: Int = 1280
+
+    /**
+     * 任何被选中 JPEG 的**像素**上限（含"只有更大输出"时的兜底候选）。
+     *
+     * 为什么是 1920×1080（2,073,600）：下游 `VideoFrameStore` 目前是**整张 JPEG 解码**
+     * 之后再缩放，ARGB_8888 一张 1080p 约 8.3MB；方向归一化还会再要一张同尺寸位图。
+     * 两张大图 + 缩放目标仍在低端机可承受的瞬时预算内；超过这个上限的 JPEG 宁可停用
+     * 抓帧，也不赌一次 12MP 全解码（OOM 会直接杀进程，比没有照片严重得多）。
+     */
+    const val CAPTURE_MAX_PIXELS: Int = 1920 * 1080
+
+    /** 更大输出的最长边上限；与 [CAPTURE_MAX_PIXELS] 一起构成严格的解码预算。 */
+    const val CAPTURE_FALLBACK_MAX_EDGE: Int = 1920
+
+    /** 预览可以开，但设备没有任何与预览同宽高比的 JPEG 输出。 */
+    const val CAPTURE_DISABLED_NO_MATCHING_ASPECT: String =
+        "相机没有与预览同宽高比的照片输出，已保留预览并停用抓帧"
+
+    /** 同比例 JPEG 存在，但最小的一张也超出安全解码预算。 */
+    const val CAPTURE_DISABLED_OVERSIZED_CAPTURE: String =
+        "相机同比例的照片输出都超出安全解码上限，已保留预览并停用抓帧"
+
+    /**
+     * 预览 / 抓帧选中的一组输出尺寸（**两边都不超过上限**的严格配对）。
+     *
+     * 两者**宽高比相同**是"预览取景范围 == 照片取景范围"的前提：否则预览按 4:3 取景、
+     * 抓帧却是 16:9（或反过来），模型收到的画面必然比用户看到的多/少一块。
+     */
+    data class CameraStreamSizes(
+        val preview: PixelSize,
+        val capture: PixelSize,
+    )
+
+    /**
+     * 一次相机会话实际可用的输出计划。
+     *
+     * [capture] 为 null 表示"预览能开，但抓帧停用"：设备没有和预览同宽高比、
+     * 又不超过解码预算的 JPEG 输出。此时**绝不允许**用近似比例或拉伸凑一张图——
+     * 那会让模型收到与用户所见不同的取景范围，违背"所见即所发"。
+     * 调用方应保留预览（session 只挂 preview surface、不建 ImageReader），
+     * 并让抓帧返回 null + [captureDisabledReason] 作为提示。
+     */
+    data class CameraStreamPlan(
+        val preview: PixelSize,
+        val capture: PixelSize?,
+        val captureDisabledReason: String = "",
+    ) {
+        val captureEnabled: Boolean
+            get() = capture != null
+    }
+
+    /** 宽高比（大边 / 小边，恒 >= 1），用于与"4:3"这类不区分横竖的目标比较。 */
+    fun aspectRatio(width: Int, height: Int): Float {
+        if (width <= 0 || height <= 0) return 0f
+        return maxOf(width, height).toFloat() / minOf(width, height).toFloat()
+    }
+
+    /** 单个预览候选与它选中的 JPEG（null = 这个比例没有可用 JPEG）。 */
+    private class StreamCandidate(
+        val preview: PixelSize,
+        val capture: PixelSize?,
+        val aspect: Float,
+    )
+
+    /**
+     * 选一套"预览 + 抓帧"输出计划（相机兼容性修复的主入口）。
+     *
+     * 规则：
+     * 1. **预览**只考虑正数、最长边不超过 [previewMaxEdge] 的尺寸；
+     * 2. 预览与抓帧的有向 width/height 必须**精确**相等（交叉乘法），不接受横竖互换或近似比例；
+     * 3. 对每个预览比例，优先选同比例、最长边不超过 [previewMaxEdge] 的 JPEG，取面积最大的那张
+     *    （预算内画质最好）；所有 JPEG 都必须满足 [captureMaxPixels] 的严格解码预算；
+     * 4. 如果该比例只有更大的 JPEG，选**最小的**那张同比例输出（离上限最近、解码最省），
+     *    但必须同时满足 [captureFallbackMaxEdge] 与 [captureMaxPixels] 的严格预算；
+     * 5. 优先 4:3（[preferredAspect]，允许横竖），其次预览面积最大的候选；
+     * 6. 只要存在任何可抓帧的比例，就优先选可抓帧的候选；完全找不到同比例 JPEG 时，
+     *    仍然返回**只预览**的计划（[CameraStreamPlan.capture] == null），由调用方停用抓帧，
+     *    而不是让整台相机打不开，也绝不近似比例误发。
+     *
+     * 只有在连一个可用预览都没有时返回 null（这时相机确实开不了）。
+     * 纯函数，不碰 Android，可在 JVM 上逐条钉住。
+     */
+    fun chooseCameraStreamPlan(
+        previewSizes: List<PixelSize>,
+        captureSizes: List<PixelSize>,
+        previewMaxEdge: Int = PREVIEW_MAX_EDGE,
+        captureMaxPixels: Int = CAPTURE_MAX_PIXELS,
+        captureFallbackMaxEdge: Int = CAPTURE_FALLBACK_MAX_EDGE,
+        preferredAspect: Float = 4f / 3f,
+        aspectTolerance: Float = 0.02f,
+    ): CameraStreamPlan? {
+        if (previewMaxEdge <= 0) return null
+        val previews = previewSizes.filter {
+            it.width > 0 && it.height > 0 && it.maxEdge <= previewMaxEdge
+        }
+        if (previews.isEmpty()) return null
+        val captures = captureSizes.filter { it.width > 0 && it.height > 0 }
+
+        val candidates = previews.map { preview ->
+            val aspect = aspectRatio(preview.width, preview.height)
+            // Compare directed ratios exactly: 640x480 and 480x640 are different sensor axes.
+            val sameAspect = captures.filter {
+                it.width.toLong() * preview.height == preview.width.toLong() * it.height
+            }
+            val withinPreviewLimit = sameAspect
+                .filter {
+                    it.maxEdge <= previewMaxEdge &&
+                        it.width.toLong() * it.height <= captureMaxPixels.toLong()
+                }
+                .maxByOrNull { it.width.toLong() * it.height }
+            val boundedLarger = if (withinPreviewLimit != null) {
+                null
+            } else {
+                sameAspect
+                    .filter {
+                        it.maxEdge > previewMaxEdge &&
+                            it.maxEdge <= captureFallbackMaxEdge &&
+                            it.width.toLong() * it.height <= captureMaxPixels.toLong()
+                    }
+                    // "最小同比例更大输出"：优先面积最小，其次最长边最小；绝不挑最大的那张。
+                    .minWithOrNull(
+                        compareBy<PixelSize> { it.width.toLong() * it.height }
+                            .thenBy { it.maxEdge },
+                    )
+            }
+            StreamCandidate(
+                preview = preview,
+                capture = withinPreviewLimit ?: boundedLarger,
+                aspect = aspect,
+            )
+        }
+
+        fun isPreferred(candidate: StreamCandidate): Boolean =
+            kotlin.math.abs(candidate.aspect - preferredAspect) <= aspectTolerance
+
+        fun rankPairs(list: List<StreamCandidate>): StreamCandidate? =
+            list.maxWithOrNull(
+                compareBy<StreamCandidate> { it.preview.width.toLong() * it.preview.height }
+                    .thenBy { (it.capture?.let { capture -> capture.width.toLong() * capture.height }) ?: 0L },
+            )
+
+        val capturable = candidates.filter { it.capture != null }
+        val chosen = (if (capturable.isNotEmpty()) {
+            rankPairs(capturable.filter { isPreferred(it) }) ?: rankPairs(capturable)
+        } else {
+            // 只预览：没有可对齐的 JPEG，就不必为比例牺牲分辨率，取面积最大的预览。
+            candidates.maxWithOrNull(
+                compareBy<StreamCandidate> { it.preview.width.toLong() * it.preview.height }
+                    .thenBy { if (isPreferred(it)) 1 else 0 },
+            )
+        }) ?: return null
+
+        val capture = chosen.capture
+        val reason = if (capture != null) {
+            ""
+        } else {
+            // 全局判断：只要存在任何一个"预览比例 == 某个 JPEG 输出"的组合，
+            // 说明停用抓帧不是因为没有同比例，而是那些同比例输出都超预算。
+            val hasCommonAspect = previews.any { preview ->
+                captures.any {
+                    it.width.toLong() * preview.height == preview.width.toLong() * it.height
+                }
+            }
+            if (hasCommonAspect) {
+                CAPTURE_DISABLED_OVERSIZED_CAPTURE
+            } else {
+                CAPTURE_DISABLED_NO_MATCHING_ASPECT
+            }
+        }
+        return CameraStreamPlan(
+            preview = chosen.preview,
+            capture = capture,
+            captureDisabledReason = reason,
+        )
+    }
+
+    /**
+     * 严格版配对：预览与抓帧**两边**都不超过 [maxEdge]，找不到就返回 null。
+     *
+     * 大 JPEG 的兜底逻辑只在 [chooseCameraStreamPlan] 里启用；这个入口保持旧契约，
+     * 供"必须把两边都压在上限内"的调用方/回归测试使用。
+     */
+    fun chooseCameraStreamSizes(
+        previewSizes: List<PixelSize>,
+        captureSizes: List<PixelSize>,
+        maxEdge: Int = PREVIEW_MAX_EDGE,
+        preferredAspect: Float = 4f / 3f,
+        aspectTolerance: Float = 0.02f,
+    ): CameraStreamSizes? {
+        val plan = chooseCameraStreamPlan(
+            previewSizes = previewSizes,
+            captureSizes = captureSizes,
+            previewMaxEdge = maxEdge,
+            // 这个入口不允许任何一边超过 maxEdge，因此关掉大图兜底；像素预算也放开，
+            // 保持"两边都 <= maxEdge"的旧契约。
+            captureMaxPixels = Int.MAX_VALUE,
+            captureFallbackMaxEdge = maxEdge,
+            preferredAspect = preferredAspect,
+            aspectTolerance = aspectTolerance,
+        ) ?: return null
+        val capture = plan.capture ?: return null
+        return CameraStreamSizes(preview = plan.preview, capture = capture)
+    }
 
     private fun Affine.inverse(): Affine {
         val determinant = a * d - b * c
@@ -405,7 +697,7 @@ object VideoPreviewGeometry {
 }
 
 /**
- * 预览方向的**人工校准**（只作用于预览画面，绝不改变抓帧 JPEG 的方向）。
+ * 预览方向的**人工校准**（用户要求：预览怎么转，发给模型的抓帧 JPEG 就怎么转）。
  *
  * ## 为什么要有人工校准
  *
@@ -421,10 +713,11 @@ object VideoPreviewGeometry {
  *
  * ## 边界
  *
- * - 只影响 [VideoPreviewGeometry.textureViewTransform] 的预览矩阵；
- * - [VideoPreviewGeometry.captureRotationDegrees] 与落盘归一化**不含**它，
- *   所以"预览被校准过"不会让存下来的抓帧/照片跟着转；
- * - 换镜头、退后台再回来、页面重建都**不清空**（角度是用户的设置，不是一次性状态）。
+ * - 影响 [VideoPreviewGeometry.textureViewTransform] 的预览矩阵；
+ * - 也通过 [VideoPreviewGeometry.captureRotationDegrees] 进入抓帧 JPEG 的归一化旋转：
+ *   预览与照片使用同一个角度，且抓帧请求仍固定 `JPEG_ORIENTATION=0`，只转一次；
+ * - 换镜头、退后台再回来、页面重建都**不清空**（角度是用户的设置，不是一次性状态）；
+ * - 运行时改变角度会让**正在飞的抓帧**作废（旧的几何不能套在新画面上）。
  */
 object PreviewCalibration {
     /** 未知设备默认不附加旋转；设备建议值须由调用方显式选择。 */

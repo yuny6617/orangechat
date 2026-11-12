@@ -117,6 +117,10 @@ internal suspend fun renderPagedChatPngs(
     var canvas: Canvas? = null
     var y = MARGIN
     val prefix = "chat-export-${UUID.randomUUID()}"
+    val footerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(116, 120, 128)
+        textSize = 24f
+    }
     try {
         withContext(Dispatchers.IO) {
             check(outputDir.isDirectory || outputDir.mkdirs()) { "无法创建临时导出目录" }
@@ -135,6 +139,12 @@ internal suspend fun renderPagedChatPngs(
                 // Track before opening, so an encoder/write/cancellation failure removes this partial file too.
                 files += file
                 try {
+                    checkNotNull(canvas).drawText(
+                        "第 ${files.size} 页",
+                        MARGIN.toFloat(),
+                        (EXPORT_PAGE_HEIGHT - 20).toFloat(),
+                        footerPaint,
+                    )
                     file.outputStream().use { check(page.compress(Bitmap.CompressFormat.PNG, 100, it)) { "图片编码失败" } }
                     currentCoroutineContext().ensureActive()
                     onPage(files.size)

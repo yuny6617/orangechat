@@ -15,7 +15,8 @@ import org.junit.Test
 
 class VideoFramePolicyTest {
     @Test
-    fun `only every reply captures on send`() {
+    fun `continuous sequence and legacy every reply capture on send`() {
+        assertTrue(VideoFramePolicy.captureOnTurn(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE))
         assertTrue(VideoFramePolicy.captureOnTurn(VideoFrameCaptureMode.EVERY_REPLY))
         assertFalse(VideoFramePolicy.captureOnTurn(VideoFrameCaptureMode.OFF))
         assertFalse(VideoFramePolicy.captureOnTurn(VideoFrameCaptureMode.EVERY_30S))
@@ -25,12 +26,20 @@ class VideoFramePolicyTest {
     @Test
     fun `timer modes expose their interval`() {
         assertNull(VideoFrameCaptureMode.OFF.intervalMillis)
+        assertNull(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE.intervalMillis)
         assertNull(VideoFrameCaptureMode.EVERY_REPLY.intervalMillis)
         assertEquals(30_000L, VideoFrameCaptureMode.EVERY_30S.intervalMillis)
         assertEquals(60_000L, VideoFrameCaptureMode.EVERY_60S.intervalMillis)
         assertTrue(VideoFrameCaptureMode.EVERY_30S.timerDriven)
         assertTrue(VideoFrameCaptureMode.EVERY_60S.timerDriven)
+        assertFalse(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE.timerDriven)
         assertFalse(VideoFrameCaptureMode.EVERY_REPLY.timerDriven)
+        // 连续采样只属于新默认与旧"每轮一帧"；30/60 秒与关闭都不会启动 1 Hz 采样。
+        assertTrue(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE.sequenceDriven)
+        assertTrue(VideoFrameCaptureMode.EVERY_REPLY.sequenceDriven)
+        assertFalse(VideoFrameCaptureMode.OFF.sequenceDriven)
+        assertFalse(VideoFrameCaptureMode.EVERY_30S.sequenceDriven)
+        assertFalse(VideoFrameCaptureMode.EVERY_60S.sequenceDriven)
     }
 
     @Test
@@ -56,6 +65,7 @@ class VideoFramePolicyTest {
     fun `scheduler only refreshes after the interval`() {
         var now = 0L
         val scheduler = VideoFrameScheduler { now }
+        assertFalse(scheduler.shouldCapture(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE))
         assertFalse(scheduler.shouldCapture(VideoFrameCaptureMode.EVERY_REPLY))
         assertFalse(scheduler.shouldCapture(VideoFrameCaptureMode.OFF))
         assertTrue(scheduler.shouldCapture(VideoFrameCaptureMode.EVERY_30S))

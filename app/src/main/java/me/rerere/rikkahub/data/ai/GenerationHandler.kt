@@ -6,6 +6,13 @@
 
 package me.rerere.rikkahub.data.ai
 
+import me.rerere.rikkahub.data.video.withoutHistoricalCameraImages
+import me.rerere.rikkahub.data.video.VideoRequestImageAuthorization
+import me.rerere.rikkahub.data.video.VideoCallRuntime
+import me.rerere.rikkahub.data.video.isVideoCameraResource
+import me.rerere.rikkahub.data.video.markVideoTurnSystemContext
+import me.rerere.rikkahub.data.video.withVideoRequestAuthorization
+
 import me.rerere.rikkahub.data.interaction.withInteractionRequestScope
  
 import android.content.Context
@@ -35,6 +42,8 @@ import me.rerere.ai.provider.Model
 import me.rerere.ai.provider.Provider
 import me.rerere.ai.provider.ProviderManager
 import me.rerere.ai.provider.ProviderSetting
+import me.rerere.ai.provider.supportsDirectAudio
+import me.rerere.rikkahub.data.video.VideoCallPrompts
 import me.rerere.ai.provider.TextGenerationParams
 import me.rerere.ai.registry.ModelRegistry
 import me.rerere.ai.ui.UIMessage
@@ -361,18 +370,39 @@ class GenerationHandler(
         appendedSystemContext: String? = null,
         videoRequestToken: String? = null,
     ) {
+        // A recording may finish after the user switches to a model/channel without audio input.
+        val audioRejected = !transientAudioUrl.isNullOrBlank() &&
+            !model.supportsDirectAudio(model.findProvider(settings.providers))
+        val requestAudioUrl = transientAudioUrl.takeUnless { audioRejected }
+        val audioUnavailableNote = "[本轮录音未发送：当前模型或通道不支持音频直传。" +
+            "没有提供录音或自动转写，请勿声称听到内容、语气或背景声音；可请用户改发文字。]"
+        val requestSystemContext = if (audioRejected) {
+            appendTurnSystemContext(
+                appendedSystemContext?.replace(
+                    VideoCallPrompts.AUDIO_ATTACHED_NOTE, VideoCallPrompts.NO_AUDIO_THIS_TURN_NOTE,
+                ).orEmpty(),
+                audioUnavailableNote,
+            )
+        } else appendedSystemContext
+        // The only request-scoped video context: token-scoped video turns inject it **after**
+        // transformers so user templates cannot strip/HTML-escape the gift or picture protocol.
+        // A token-less request (paused queue item resumed later) has no request-scoped context;
+        // its prompt arrives through `conversationSystemPrompt` and is synchronised at the
+        // provider boundary like any other claim.
+        val requestScopedVideoContext = requestSystemContext?.takeIf { videoRequestToken != null }
         val baseMessages = buildList {
             val system = buildString {
-                // 主文：助手自带 prompt，或（开关打开时）对话级重写；随后**追加**本轮通话上下文。
-                // 后者带着"本轮有没有画面/音频"和礼物能力清单，绝不能被 allowConversationSystemPrompt
-                // 开关整段丢掉（否则模型会回答"我没有 ws_gift 这个工具"，见 P9）。
+                // 主文：助手自带 prompt，或（开关打开时）对话级重写。视频通话的本轮上下文**不走**
+                // 这条主文（下面 `requestScopedVideoContext` 在 transform 之后单独注入），
+                // 否则会被 allowConversationSystemPrompt 开关整段丢掉（P9："我没有 ws_gift 这个工具"）。
+                // 这里只保留"没有请求作用域"的兼容路径：调用方显式传了上下文、但没有 token。
                 val effective = appendTurnSystemContext(
                     composeSystemPromptText(
                         assistantSystemPrompt = assistant.systemPrompt,
                         conversationSystemPrompt = conversationSystemPrompt,
                         allowConversationSystemPrompt = assistant.allowConversationSystemPrompt,
                     ),
-                    appendedSystemContext.takeIf { videoRequestToken == null },
+                    requestSystemContext.takeIf { videoRequestToken == null },
                 )
                 if (effective.isNotBlank()) {
                     append(effective)
@@ -443,31 +473,54 @@ class GenerationHandler(
             }
             addAll(buildConversationRequestMessages(system, messages, assistant.contextMessageSize, conversationContextSummary))
         }
+        val cameraUrlsForThisTurn = if (videoRequestToken != null && transientImageAnchorMessageId != null) {
+            messages.singleOrNull { it.role == MessageRole.USER && it.id.toString() == transientImageAnchorMessageId }
+                ?.parts?.filterIsInstance<UIMessagePart.Image>()?.map { it.url }
+                .orEmpty().filter(::isVideoCameraResource)
+        } else emptyList()
         val internalMessages = chatInteractionRepository.decorate(
-            baseMessages,
+            baseMessages.withoutHistoricalCameraImages(),
             conversationId,
             assistant,
             sourceMessages = messages,
             turn = reactionTurn,
-        ).let { filesManager.validAttachments(it, forSending = true) }.transforms(
-            transformers = transformers,
-            context = context,
-            model = model,
-            assistant = assistant,
-            settings = settings,
-            processingStatus = processingStatus,
-            workspaceCwd = workspaceCwd,
-        ).let { filesManager.validAttachments(it, forSending = true) }.filterNot { it.parts.isEmpty() }
+        ).withoutHistoricalCameraImages().let { filesManager.validAttachments(it, forSending = true) }.let { clean ->
+            transformers.fold(clean) { request, transformer ->
+                request.transforms(
+                    transformers = listOf(transformer),
+                    context = context,
+                    model = model,
+                    assistant = assistant,
+                    settings = settings,
+                    processingStatus = processingStatus,
+                    workspaceCwd = workspaceCwd,
+                ).withoutHistoricalCameraImages()
+            }
+        }.let { filesManager.validAttachments(it, forSending = true) }.filterNot { it.parts.isEmpty() }
             // Request-scoped video capability must not be removed/HTML-escaped by user templates.
-            .withVideoTurnSystemContext(appendedSystemContext.takeIf { videoRequestToken != null })
-            .withTransientRequestImages(transientImageUrls, transientImageAnchorMessageId)
-            .withTransientRequestAudio(transientAudioUrl, transientAudioAnchorMessageId)
+            .withVideoTurnSystemContext(requestScopedVideoContext)
+            .withoutHistoricalCameraImages()
+            .withTransientRequestAudio(requestAudioUrl, transientAudioAnchorMessageId)
+            .let { request ->
+                if (!audioRejected) request else request.map { message ->
+                    if (message.role == MessageRole.USER && message.id.toString() == transientAudioAnchorMessageId) {
+                        message.copy(parts = message.parts + UIMessagePart.Text(audioUnavailableNote))
+                    } else message
+                }
+            }
             .let {
-                // 注入之后再校验一次附件（与图片那条路径一致）：文件确实存在才发给 provider。
-                if (transientImageUrls.isEmpty() && transientAudioUrl.isNullOrBlank()) it
-                else filesManager.validAttachments(it, forSending = true)
+                if (requestAudioUrl.isNullOrBlank()) it else filesManager.validAttachments(it, forSending = true)
             }
  
+        // Validate files before the final live authorization check: validation may suspend.
+        val candidateImages = filesManager.validAttachments(
+            listOf(UIMessage(role = MessageRole.USER, parts =
+                (transientImageUrls + cameraUrlsForThisTurn).distinct().map { UIMessagePart.Image(it) })),
+            forSending = true,
+        ).flatMap { it.parts.filterIsInstance<UIMessagePart.Image>() }.map { it.url }
+        val videoImages = VideoRequestImageAuthorization(candidateImages, transientImageAnchorMessageId) {
+            VideoCallRuntime.cameraEpochForTurn(conversationId, videoRequestToken) != null
+        }
         var messages: List<UIMessage> = messages
         val params = buildAssistantGenerationParams(
             assistant = assistant,
@@ -480,8 +533,8 @@ class GenerationHandler(
             AILogging.Generation(
                 params = params,
                 // Keep the existing UI message snapshot for the developer page, but also
-                // record a one-way fingerprint of the exact transformed request. This is
-                // enough to compare cache prefixes without retaining prompt contents.
+                // record a one-way fingerprint of the transformed camera-free request.
+                // Camera input is authorized later, immediately at the provider boundary.
                 messages = messages,
                 providerSetting = provider,
                 stream = stream,
@@ -493,10 +546,22 @@ class GenerationHandler(
                 ),
             )
         )
+        // Tag exactly the paragraph injected above. The fingerprint stays byte-identical to the
+        // request without markers (metadata is not part of the provider payload), while the final
+        // authorization point can retract only *our* text if no picture is delivered.
+        val requestMessages = internalMessages.markVideoTurnSystemContext(requestScopedVideoContext)
+        // Streaming flows may defer work until collect. Check there as well as at the suspend
+        // generateText boundary, after logging and every potentially suspending preparation step.
+        // `applyTo` reads the live grant ONCE per provider call and derives both the images and the
+        // request-scoped picture claim from it: a hang-up / camera-epoch revocation / paused resume
+        // that lands after this preparation but before the request cannot leave a "本轮附带了画面"
+        // system prompt without the picture (or the other way round).
+        // Each tool round rebuilds this wrapper from camera-free history.
+        val guardedProvider = providerImpl.withVideoRequestAuthorization(videoImages)
         messages = generateModelTurn(
-            providerImpl = providerImpl,
+            providerImpl = guardedProvider,
             providerSetting = provider,
-            requestMessages = internalMessages,
+            requestMessages = requestMessages,
             initialMessages = messages,
             params = params,
             model = model,
@@ -582,33 +647,6 @@ class GenerationHandler(
     }.flowOn(Dispatchers.IO)
 }
  
-/**
- * 把视频通话的自动抓帧作为"仅本次请求"的图片输入追加到**触发这一轮的用户消息**上。
- *
- * 锚点优先用 [anchorMessageId]（提交时分配的队列项 ID，也就是那条用户消息的 ID）。
- * 工具多步之后"最后一条 USER"可能已经变了，所以只有确实找不到锚点时，
- * 才退回到最后一条 USER。
- *
- * 只影响发给模型的 internalMessages：持久化的聊天消息里只有文字，
- * 临时文件在请求结束时由 ChatService 删除（工具多步期间一直有效）。
- */
-private fun List<UIMessage>.withTransientRequestImages(
-    urls: List<String>,
-    anchorMessageId: String? = null,
-): List<UIMessage> {
-    if (urls.isEmpty()) return this
-    val anchor = anchorMessageId?.trim()?.takeIf { it.isNotEmpty() }
-    val anchoredIndex = anchor?.let { id ->
-        indexOfLast { it.role == MessageRole.USER && it.id.toString() == id }
-    } ?: -1
-    val index = if (anchoredIndex >= 0) anchoredIndex else indexOfLast { it.role == MessageRole.USER }
-    if (index < 0) return this
-    val extra = urls.map { UIMessagePart.Image(url = it) }
-    return mapIndexed { position, message ->
-        if (position == index) message.copy(parts = message.parts + extra) else message
-    }
-}
-
 /**
  * 把原始 Flow 的高频发射节流成"每 periodMillis 毫秒最多发一次最新值"。
  *

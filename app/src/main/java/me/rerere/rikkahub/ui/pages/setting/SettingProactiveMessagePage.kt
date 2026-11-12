@@ -99,11 +99,12 @@ fun SettingProactiveMessagePage(vm: SettingVM = koinInject()) {
         activityRecords = emptyList()
         runCatching {
             withContext(Dispatchers.IO) {
-                val assistantId = runCatching { Uuid.parse(settings.proactiveMessageSetting.assistantId) }
-                    .getOrDefault(settings.getCurrentAssistant().id)
-                conversationRepository.getMostRecentConversationId(assistantId)?.let { id ->
-                    ProactiveActivityStore(context, assistantId.toString(), id.toString()).snapshot().reversed()
-                }.orEmpty()
+                settings.proactiveMessageSetting.assistantConfigs.orEmpty().flatMap { config ->
+                    ProactiveActivityStore(context, config.assistantId, config.conversationId).snapshot().map { record ->
+                        val name = settings.assistants.find { it.id.toString() == config.assistantId }?.name.orEmpty()
+                        record.copy(outcome = "$name：${record.outcome}")
+                    }
+                }.sortedByDescending { it.timestamp }
             }
         }.onSuccess {
             activityRecords = it
@@ -113,7 +114,7 @@ fun SettingProactiveMessagePage(vm: SettingVM = koinInject()) {
     if (showActivities) {
         AlertDialog(
             onDismissRequest = { showActivities = false },
-            title = { Text("最近会话的后台活动") },
+            title = { Text("主动消息运行记录") },
             text = {
                 LazyColumn(Modifier.heightIn(max = 440.dp)) {
                     if (activityStatus.isNotBlank()) item { Text(activityStatus) }
@@ -167,7 +168,11 @@ fun SettingProactiveMessagePage(vm: SettingVM = koinInject()) {
             message = stringResource(R.string.risk_proactive_message_message),
             onConfirm = {
                 showProactiveRiskDialog = false
-                val newSetting = settings.proactiveMessageSetting.copy(enabled = true, aggressiveModeEnabled = false)
+                val newSetting = settings.proactiveMessageSetting.copy(
+                    enabled = true,
+                    aggressiveModeEnabled = false,
+                    globalPolicy = settings.proactiveMessageSetting.globalPolicy.copy(paused = false),
+                )
                 vm.updateSettings(settings.copy(proactiveMessageSetting = newSetting))
                 me.rerere.rikkahub.data.service.DeviceEventAiTriggerService.stop(context)
                 ProactiveMessageService.scheduleNext(context, newSetting)
@@ -297,6 +302,7 @@ fun SettingProactiveMessagePage(vm: SettingVM = koinInject()) {
                     }
                 }
             }
+            item { ProactiveParticipantsSettings(settings, vm) }
             item {
                 ProactiveWakeupSettingsCard(settings.proactiveMessageSetting, settings.assistants) {
                     ProactiveMessageService.scheduleNext(context, vm.settings.value.proactiveMessageSetting)
@@ -321,7 +327,7 @@ fun SettingProactiveMessagePage(vm: SettingVM = koinInject()) {
                         },
                     )
                     item(
-                        headlineContent = { Text("查看后台活动记录") },
+                        headlineContent = { Text("查看主动消息运行记录") },
                         onClick = { showActivities = true },
                     )
                     if (settings.proactiveMessageSetting.activeHoursEnabled) {

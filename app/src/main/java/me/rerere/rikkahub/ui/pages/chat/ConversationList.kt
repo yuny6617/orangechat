@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -73,7 +73,11 @@ import androidx.paging.compose.itemKey
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.DisplayMaterialMode
 import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.ui.theme.LocalPackageSurfaceTokens
+import me.rerere.rikkahub.ui.theme.cardBorderStrokeColor
 import me.rerere.rikkahub.ui.theme.extendColors
+import me.rerere.rikkahub.ui.theme.packageCardBackground
+import me.rerere.rikkahub.ui.theme.packageSelectedColor
 import me.rerere.rikkahub.utils.toLocalString
 import java.time.LocalDate
 import java.time.ZoneId
@@ -140,7 +144,7 @@ fun ColumnScope.ConversationList(
                         .fillMaxWidth()
                         .padding(16.dp),
                     shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    color = packageCardBackground(MaterialTheme.colorScheme.surfaceContainerLow),
                     drawerItemAlpha = drawerItemAlpha,
                     materialMode = materialMode,
                 ) {
@@ -260,7 +264,7 @@ private fun PinnedHeader(
         modifier = modifier
             .fillMaxWidth(),
         shape = RectangleShape,
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        color = packageCardBackground(MaterialTheme.colorScheme.surfaceContainerLow),
         drawerItemAlpha = drawerItemAlpha,
         materialMode = materialMode,
     ) {
@@ -305,8 +309,9 @@ internal fun ConversationItem(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val itemShape = ConversationRowShape
+    // 包主题下选中行用包的 selected 角色；否则保持原 Material 提亮底色
     val backgroundColor = if (selected) {
-        MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp)
+        packageSelectedColor(MaterialTheme.colorScheme.surfaceColorAtElevation(8.dp))
     } else {
         Color.Transparent
     }
@@ -484,6 +489,9 @@ private fun ConversationListMaterialContainer(
     content: @Composable () -> Unit,
 ) {
     val backdrop = if (showBackdrop) LocalDrawerBackdrop.current else null
+    // 包主题扩展边框；token 自身 alpha 已压低，用户显式 drawerItemAlpha 再乘上去
+    val packageBorder = LocalPackageSurfaceTokens.current?.cardBorderStrokeColor()
+    val scaledPackageBorder = packageBorder?.let { it.copy(alpha = it.alpha * drawerItemAlpha) }
     if (backdrop != null && !selected) {
         // Image-backed rows need only one fine outline; gray glass overlays obscure the image.
         Box(
@@ -491,7 +499,8 @@ private fun ConversationListMaterialContainer(
                 .drawerBackdrop()
                 .border(
                     width = 0.5.dp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                    color = packageBorder
+                        ?: MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
                     shape = shape,
                 ),
         ) { content() }
@@ -508,13 +517,15 @@ private fun ConversationListMaterialContainer(
     val borderModifier = when (materialMode) {
         DisplayMaterialMode.TRANSLUCENT -> Modifier.border(
             width = if (backdrop != null) 0.5.dp else 1.dp,
-            color = onSurface.copy(alpha = 0.14f * drawerItemAlpha),
+            color = scaledPackageBorder
+                ?: onSurface.copy(alpha = 0.14f * drawerItemAlpha),
             shape = shape,
         )
 
         DisplayMaterialMode.GLASS -> Modifier.border(
             width = if (backdrop != null) 0.5.dp else 1.dp,
-            color = onSurface.copy(alpha = 0.1f * drawerItemAlpha),
+            color = scaledPackageBorder
+                ?: onSurface.copy(alpha = 0.1f * drawerItemAlpha),
             shape = shape,
         )
 

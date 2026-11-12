@@ -8,9 +8,16 @@ import kotlinx.coroutines.runBlocking
 import me.rerere.rikkahub.data.ai.transformers.TransformerContext
 import me.rerere.rikkahub.data.ai.transformers.VoiceMessageTransformer
 import me.rerere.rikkahub.data.datastore.Settings
-import me.rerere.rikkahub.data.datastore.getChatModelForAssistant
 import me.rerere.rikkahub.data.datastore.findProvider
+import me.rerere.rikkahub.data.datastore.getChatModelForAssistant
 import me.rerere.rikkahub.data.model.Assistant
+import me.rerere.rikkahub.data.model.Conversation
+import me.rerere.rikkahub.data.model.ConversationConfig
+import me.rerere.rikkahub.data.model.getChatModelOf
+import me.rerere.rikkahub.data.video.VideoVoiceAvailability
+import me.rerere.rikkahub.data.video.VideoVoiceInputMode
+import me.rerere.rikkahub.data.video.VideoVoicePolicy
+import me.rerere.rikkahub.data.video.VideoVoiceRoute
 import me.rerere.rikkahub.ui.hooks.recordedVoicePart
 import me.rerere.rikkahub.ui.hooks.completedRecordingAfter
 import me.rerere.asr.ASRState
@@ -66,6 +73,172 @@ class VoiceAudioPayloadTest {
         assertTrue(override.supportsDirectAudio(override.findProvider(overriddenSettings.providers)))
         assertFalse(Model(modelId = "notgemini-model").supportsDirectAudio(ProviderSetting.OpenAI()))
         assertFalse(Model(modelId = "gemini-image").supportsDirectAudio(ProviderSetting.Google()))
+    }
+
+    @Test fun gptAudioFamiliesRouteThroughChatCompletionsAcrossSnapshotsAndNamespaces() {
+        val chat = ProviderSetting.OpenAI()
+        val responseApi = ProviderSetting.OpenAI(useResponseApi = true)
+        // 官方名、日期快照、`-mini` 变体、命名空间前缀，以及大小写混写。
+        listOf(
+            "gpt-audio",
+            "gpt-audio-mini",
+            "gpt-audio-2025-08-28",
+            "gpt-audio-mini-2025-10-06",
+            "gpt-4o-audio-preview",
+            "gpt-4o-mini-audio-preview",
+            "gpt-4o-audio-preview-2024-12-17",
+            "gpt-4o-mini-audio-preview-2024-12-17",
+            "openai/gpt-audio",
+            "openai/gpt-audio-mini-2025-10-06",
+            "openai/gpt-4o-audio-preview-2024-12-17",
+            "GPT-4O-MINI-AUDIO-PREVIEW-2024-12-17",
+        ).forEach { modelId ->
+            val model = Model(modelId = modelId)
+            assertTrue("$modelId 走 ChatCompletions 应直传音频", model.supportsDirectAudio(chat))
+            assertFalse("$modelId 不能走 Response API", model.supportsDirectAudio(responseApi))
+            assertFalse("$modelId 不是 Google 原生音频模型", model.supportsDirectAudio(ProviderSetting.Google()))
+        }
+    }
+
+    @Test fun ordinaryGptRealtimeTtsAndTranscribeModelsNeverBypassTranscription() {
+        listOf(
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-realtime",
+            "gpt-4o-realtime-preview",
+            "gpt-4o-audio",
+            "gpt-audio-realtime",
+            "gpt-4o-transcribe",
+            "gpt-4o-mini-transcribe",
+            "gpt-4o-mini-tts",
+            "tts-1",
+            "whisper-1",
+            "gpt-image-1",
+            "my-gpt-audio",
+            "gpt-4o-audio-preview-extra",
+            "gpt-4o-audio-preview-2024-12-17-extra",
+        ).forEach { modelId ->
+            assertFalse("$modelId 不能收到 input_audio", Model(modelId = modelId).supportsDirectAudio(ProviderSetting.OpenAI()))
+        }
+        assertFalse(
+            "图像模型即使叫 gpt-audio 也不算",
+            Model(modelId = "gpt-audio", type = ModelType.IMAGE).supportsDirectAudio(ProviderSetting.OpenAI()),
+        )
+        assertFalse(
+            "用户显式选了 ASR 就不再直传",
+            Model(modelId = "gpt-audio", audioInputMode = AudioInputMode.ASR).supportsDirectAudio(ProviderSetting.OpenAI()),
+        )
+        // 显式 AUDIO 是用户自己的强制覆盖（兼容自定义代理别名），与 AUTO 的家族判断分开。
+        assertTrue(
+            Model(modelId = "gpt-4o", audioInputMode = AudioInputMode.AUDIO)
+                .supportsDirectAudio(ProviderSetting.OpenAI()),
+        )
+    }
+
+    @Test fun perModelTransportOverrideDecidesGptAudioSupport() {
+        val model = Model(modelId = "gpt-4o-audio-preview-2024-12-17")
+        // 父 provider 是 Response API：单看模型名不足以直传。
+        val responseParent = ProviderSetting.OpenAI(models = listOf(model), useResponseApi = true)
+        assertFalse(model.supportsDirectAudio(responseParent))
+
+        // 模型级覆盖回 ChatCompletions：同一份设置里必须按覆盖后的真实通道判定。
+        val forcedChat = model.copy(providerOverwrite = ProviderSetting.OpenAI(useResponseApi = false))
+        val chatSettings = Settings.dummy().copy(
+            providers = listOf(responseParent.copy(models = listOf(forcedChat))),
+        )
+        val resolvedChat = requireNotNull(forcedChat.findProvider(chatSettings.providers))
+        assertTrue(resolvedChat is ProviderSetting.OpenAI && !resolvedChat.useResponseApi)
+        assertTrue(forcedChat.supportsDirectAudio(resolvedChat))
+
+        // 反过来：父 provider 正常、模型级覆盖成 Response API 时必须禁用直传。
+        val forcedResponse = model.copy(providerOverwrite = ProviderSetting.OpenAI(useResponseApi = true))
+        val responseSettings = Settings.dummy().copy(
+            providers = listOf(ProviderSetting.OpenAI(models = listOf(forcedResponse))),
+        )
+        val resolvedResponse = requireNotNull(forcedResponse.findProvider(responseSettings.providers))
+        assertFalse(forcedResponse.supportsDirectAudio(resolvedResponse))
+    }
+
+    @Test fun autoVideoVoiceFollowsTheActualConversationModelCapability() {
+        val gemini = Model(modelId = "google/gemini-2.5-flash")
+        val gptAudio = Model(modelId = "gpt-4o-audio-preview-2024-12-17")
+        val textGpt = Model(modelId = "gpt-4o")
+        val geminiAssistant = Assistant(chatModelId = gemini.id)
+        val gptAssistant = Assistant(chatModelId = gptAudio.id)
+        val textAssistant = Assistant(chatModelId = textGpt.id)
+        val settings = Settings(
+            assistantId = geminiAssistant.id,
+            assistants = listOf(geminiAssistant, gptAssistant, textAssistant),
+            chatModelId = textGpt.id,
+            providers = listOf(
+                ProviderSetting.Google(models = listOf(gemini)),
+                ProviderSetting.OpenAI(models = listOf(gptAudio, textGpt)),
+            ),
+        )
+
+        fun conversation(assistant: Assistant, overrideModel: Model? = null) = Conversation(
+            assistantId = assistant.id,
+            messageNodes = emptyList(),
+            config = overrideModel?.let { ConversationConfig(chatModelId = it.id) },
+        )
+
+        fun availability(target: Conversation, asrConfigured: Boolean = true): VideoVoiceAvailability {
+            val model = requireNotNull(settings.getChatModelOf(target)) { "会话必须有可用模型" }
+            val provider = requireNotNull(model.findProvider(settings.providers)) { "模型必须属于某个 provider" }
+            return VideoVoicePolicy.resolve(
+                mode = VideoVoiceInputMode.AUTO,
+                directAudioSupported = model.supportsDirectAudio(provider),
+                asrConfigured = asrConfigured,
+                microphoneGranted = true,
+            )
+        }
+
+        // Gemini 与 GPT 音频家族都要在 AUTO 下真的直传，而不是只认 Gemini。
+        assertEquals(VideoVoiceRoute.DIRECT_AUDIO, availability(conversation(geminiAssistant)).route)
+        assertEquals(VideoVoiceRoute.DIRECT_AUDIO, availability(conversation(gptAssistant)).route)
+        // 普通 GPT 必须退回已配置的 ASR；没有 ASR 时明确禁用而不是假装能听。
+        assertEquals(VideoVoiceRoute.ASR, availability(conversation(textAssistant)).route)
+        val disabled = availability(conversation(textAssistant), asrConfigured = false)
+        assertFalse(disabled.enabled)
+        assertTrue(disabled.reason.contains("不支持音频直传"))
+        assertTrue("说明里要提到真正支持的家族", disabled.reason.contains("GPT 音频模型"))
+
+        // 会话自己的模型覆盖助手默认模型：同一助手切到文本模型，必须立刻按新能力裁决。
+        assertEquals(VideoVoiceRoute.ASR, availability(conversation(geminiAssistant, overrideModel = textGpt)).route)
+        assertEquals(VideoVoiceRoute.DIRECT_AUDIO, availability(conversation(textAssistant, overrideModel = gptAudio)).route)
+
+        // 会话模型走 Response API 时，即使名字是 GPT 音频家族也只能退到 ASR。
+        val responseSettings = settings.copy(
+            providers = listOf(
+                ProviderSetting.Google(models = listOf(gemini)),
+                ProviderSetting.OpenAI(models = listOf(gptAudio, textGpt), useResponseApi = true),
+            ),
+        )
+        val responseConversation = conversation(gptAssistant)
+        val responseModel = requireNotNull(responseSettings.getChatModelOf(responseConversation))
+        val responseProvider = requireNotNull(responseModel.findProvider(responseSettings.providers))
+        assertFalse(responseModel.supportsDirectAudio(responseProvider))
+        assertEquals(
+            VideoVoiceRoute.ASR,
+            VideoVoicePolicy.resolve(
+                mode = VideoVoiceInputMode.AUTO,
+                directAudioSupported = responseModel.supportsDirectAudio(responseProvider),
+                asrConfigured = true,
+                microphoneGranted = true,
+            ).route,
+        )
+
+        // 用户显式 DIRECT 但不支持时，原因必须指向真实支持范围（Google Gemini / GPT 音频模型）。
+        val directDisabled = VideoVoicePolicy.resolve(
+            mode = VideoVoiceInputMode.DIRECT,
+            directAudioSupported = false,
+            asrConfigured = true,
+            microphoneGranted = true,
+        )
+        assertFalse(directDisabled.enabled)
+        assertTrue(directDisabled.reason.contains("不支持直接上传录音"))
+        assertTrue(directDisabled.reason.contains("GPT 音频模型"))
     }
 
     @Test fun completionWaitsForIdleAndNeverReusesThePreviousRecording() {
@@ -209,6 +382,40 @@ class VoiceAudioPayloadTest {
         assertEquals(UIMessagePart.Text("回退文字"), openAi.last())
         val google = result(ProviderSetting.Google(models = listOf(model)))
         assertTrue(google.all { it is UIMessagePart.Audio })
+    }
+
+    @Test fun gptAudioKeepsRecordedWavWhileOrdinaryGptFallsBackToDisclosureText() = runBlocking {
+        val part = UIMessagePart.Audio("file:///voice/clip.wav")
+        val message = UIMessage.user("").copy(parts = listOf(part))
+        suspend fun transform(model: Model): UIMessage {
+            val settings = Settings.dummy().copy(providers = listOf(ProviderSetting.OpenAI(models = listOf(model))))
+            return VoiceMessageTransformer.transform(
+                TransformerContext(RuntimeEnvironment.getApplication(), model, Assistant(), settings),
+                listOf(message),
+            ).single()
+        }
+
+        // GPT 音频家族（含命名空间与日期快照）必须把 WAV 原样留给请求，而不是转成文字/占位。
+        listOf(
+            "gpt-audio",
+            "gpt-audio-mini-2025-10-06",
+            "openai/gpt-4o-mini-audio-preview-2024-12-17",
+        ).forEach { modelId ->
+            assertEquals("$modelId 必须保留原音频", part, transform(Model(modelId = modelId)).parts.single())
+        }
+
+        // 普通 GPT（文本/视觉）没有音频通道：只能明确告诉模型音频未提供，不能伪造逐字稿。
+        val textOnly = transform(
+            Model(
+                modelId = "gpt-4o",
+                inputModalities = listOf(Modality.TEXT, Modality.IMAGE),
+            ),
+        )
+        val adapted = textOnly.parts.single()
+        assertTrue(adapted is UIMessagePart.Text)
+        assertTrue((adapted as UIMessagePart.Text).text.contains("未提供给当前模型"))
+        // 只改请求副本，历史里的音频不被就地改写。
+        assertEquals(part, message.parts.single())
     }
 
     @Test fun wavBytesSurviveOpenAiAndGoogleMessageSerialization() = runBlocking {

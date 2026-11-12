@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -15,8 +15,11 @@ import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.data.files.FileFolders
 import me.rerere.rikkahub.data.sync.BackupArchiveRestorer
 import me.rerere.rikkahub.data.sync.DatabaseBackupCoordinator
+import me.rerere.rikkahub.data.sync.PLUGIN_BACKUP_ENTRY_PREFIX
+import me.rerere.rikkahub.data.sync.PluginDataBackupCoordinator
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.WebDavConfig
+import me.rerere.rikkahub.plugin.localdata.LocalDataValidation
 import me.rerere.rikkahub.plugin.repository.PluginRepository
 import me.rerere.rikkahub.plugin.scanner.PluginScanner
 import me.rerere.rikkahub.utils.fileSizeToString
@@ -120,7 +123,11 @@ class WebDavSync(
         Log.i(TAG, "deleteBackupFile: Deleted ${item.displayName}")
     }
 
-    suspend fun restoreFromLocalFile(file: File, config: WebDavConfig) = withContext(Dispatchers.IO) {
+    suspend fun restoreFromLocalFile(
+        file: File,
+        config: WebDavConfig,
+        restoreLocalTaskSettings: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
         Log.i(TAG, "restoreFromLocalFile: Starting restore from ${file.absolutePath}")
 
         if (!file.exists()) {
@@ -132,7 +139,12 @@ class WebDavSync(
         }
 
         try {
-            restoreFromBackupFile(file, config, includePlugins = true)
+            restoreFromBackupFile(
+                file,
+                config,
+                includePlugins = true,
+                restoreLocalTaskSettings = restoreLocalTaskSettings,
+            )
             Log.i(TAG, "restoreFromLocalFile: Restore completed successfully")
         } catch (e: Exception) {
             Log.e(TAG, "restoreFromLocalFile: Failed to restore from local file", e)
@@ -212,6 +224,11 @@ class WebDavSync(
                         }
 
                         val pluginsFolder = PluginScanner(context).pluginsDir
+                        val pluginIds = pluginsFolder
+                            .listFiles { file -> file.isDirectory && !file.name.startsWith(".") }
+                            ?.map { it.name }
+                            ?.filter { LocalDataValidation.PLUGIN_ID_PATTERN.matches(it) }
+                            .orEmpty()
                         if (pluginsFolder.exists() && pluginsFolder.isDirectory) {
                             Log.i(TAG, "prepareBackupFile: Backing up plugins from ${pluginsFolder.absolutePath}")
                             addDirectoryToZip(
@@ -222,6 +239,38 @@ class WebDavSync(
                             )
                         } else {
                             Log.w(TAG, "prepareBackupFile: Plugins folder does not exist or is not a directory")
+                        }
+
+                        // Full local backup: one versioned logical archive per plugin, including
+                        // localdata media and native localtasks settings/ledger. A failure aborts
+                        // the whole backup instead of producing one without moments data.
+                        val pluginBackupDirectory = File(
+                            context.cacheDir,
+                            "plugin_backup_${java.util.UUID.randomUUID()}"
+                        )
+                        try {
+                            val pluginBackups = PluginDataBackupCoordinator(context).snapshot(
+                                destination = pluginBackupDirectory,
+                                pluginIds = pluginIds,
+                            )
+                            pluginBackups.forEach { backup ->
+                                addFileToZip(
+                                    zipOut = zipOut,
+                                    file = backup.file,
+                                    entryName = "$PLUGIN_BACKUP_ENTRY_PREFIX${backup.pluginId}.zip",
+                                )
+                            }
+                            if (pluginBackups.isNotEmpty()) {
+                                Log.i(TAG, "prepareBackupFile: Backed up ${pluginBackups.size} plugin data archives")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "prepareBackupFile: Failed to back up plugin local data", e)
+                            throw IllegalStateException(
+                                "插件本地数据备份失败，已中止本次备份（不会生成缺少朋友圈数据的备份）：${e.message}",
+                                e,
+                            )
+                        } finally {
+                            pluginBackupDirectory.deleteRecursively()
                         }
                     }
                 }
@@ -239,13 +288,17 @@ class WebDavSync(
     }
 
     private suspend fun restoreFromBackupFile(
-        backupFile: File, config: WebDavConfig, includePlugins: Boolean = true,
+        backupFile: File,
+        config: WebDavConfig,
+        includePlugins: Boolean = true,
+        restoreLocalTaskSettings: Boolean = false,
     ) {
         BackupArchiveRestorer(context, settingsStore, json, databaseBackupCoordinator, pluginRepository).restore(
             archive = backupFile,
             restoreFiles = config.items.contains(WebDavConfig.BackupItem.FILES),
             restoreDatabase = config.items.contains(WebDavConfig.BackupItem.DATABASE),
             includePlugins = includePlugins,
+            restoreLocalTaskSettings = restoreLocalTaskSettings,
         )
         Log.i(TAG, "restoreFromBackupFile: Restore committed; restart required for database activation")
     }

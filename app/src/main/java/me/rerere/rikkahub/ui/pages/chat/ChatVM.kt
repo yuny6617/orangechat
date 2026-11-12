@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -48,6 +48,7 @@ import me.rerere.rikkahub.data.model.withConversation
 import me.rerere.rikkahub.data.model.withConversationConfig
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.NodeFavoriteTarget
+import me.rerere.rikkahub.data.ai.tools.LocalMomentsChatSelectionStore
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.data.repository.FavoriteRepository
 import me.rerere.rikkahub.data.interaction.ChatInteractionRepository
@@ -193,6 +194,8 @@ class ChatVM(
 
     override fun onCleared() {
         super.onCleared()
+        // 换会话/离开聊天页即作废这一次性的朋友圈整理选择，绝不带到别的会话。
+        LocalMomentsChatSelectionStore.clear(_conversationId.toString())
         // 移除对话引用
         chatService.removeConversationReference(_conversationId)
     }

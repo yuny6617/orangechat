@@ -14,6 +14,7 @@ on:
   push:
     branches:
       - feature/video-call-gifts-ci
+      - feature/local-moments-themes-export
   workflow_dispatch:
     inputs:
       update_version_code:

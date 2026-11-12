@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -16,6 +16,9 @@ fun interface ModelData<T> {
 object ModelRegistry {
     private val GPT4O = defineModel {
         tokens("gpt", "4", "o")
+        // Audio endpoints must not inherit the ordinary GPT-4o image capability.
+        // Users of compatible multimodal aliases can still explicitly configure modalities.
+        notTokens("audio")
         visionInput()
         toolAbility()
     }
@@ -493,7 +496,11 @@ object ModelRegistry {
     )
 
     val MODEL_INPUT_MODALITIES = ModelData { modelId ->
-        resolveModalities(modelId) { it.inputModalities }
+        // Snapshot date tokens must not accidentally match another GPT family (for example 4.1).
+        if (Regex("(^|/)(gpt-audio(?:-mini)?|gpt-4o(?:-mini)?-audio-preview)(?:-\\d{4}-\\d{2}-\\d{2})?$",
+                RegexOption.IGNORE_CASE).containsMatchIn(modelId)) {
+            listOf(Modality.TEXT)
+        } else resolveModalities(modelId) { it.inputModalities }
     }
 
     val MODEL_OUTPUT_MODALITIES = ModelData { modelId ->

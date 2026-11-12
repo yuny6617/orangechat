@@ -26,6 +26,8 @@
     "delete": "删除",
     "export_markdown": "导出为 Markdown",
     "export_markdown_with_reasoning": "导出为 Markdown（含推理过程）",
+    "select_for_export": "选择此消息用于导出",
+    "export_failed": "导出失败：{{message}}",
     "prompt_tokens_with_cache": "{{promptTokens}} tokens ({{cachedTokens}} cached)",
     "prompt_tokens": "{{promptTokens}} tokens",
     "completion_tokens": "{{completionTokens}} tokens",

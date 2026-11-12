@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -47,6 +47,8 @@ import me.rerere.rikkahub.data.datastore.DisplaySetting
 import me.rerere.rikkahub.ui.context.LocalDisplaySettings
 import me.rerere.rikkahub.ui.theme.CustomColors
 import me.rerere.rikkahub.ui.theme.LocalMaterialMode
+import me.rerere.rikkahub.ui.theme.LocalPackageSurfaceTokens
+import me.rerere.rikkahub.ui.theme.cardBorderStrokeColor
 
 private val CardGroupCorner = 20.dp
 private val CardGroupItemSpacing = 2.dp
@@ -130,7 +132,13 @@ private fun CardGroupListItem(
         bottomStart = bottomCorner,
         bottomEnd = bottomCorner,
     )
-    val baseColors = item.colors ?: CustomColors.listItemColors
+    val packageSurfaces = LocalPackageSurfaceTokens.current
+    val baseColors = item.colors ?: packageSurfaces?.let { surfaces ->
+        CustomColors.listItemColors.copy(
+            containerColor = surfaces.cardBackground,
+            supportingTextColor = surfaces.mutedText,
+        )
+    } ?: CustomColors.listItemColors
     val containerColor = baseColors.containerColor.copy(alpha = interfaceSurfaceAlpha)
     val colors = baseColors.copy(
         containerColor = if (isGlass) Color.Transparent else containerColor,
@@ -140,11 +148,20 @@ private fun CardGroupListItem(
         0.45f to Color.White.copy(alpha = 0.08f),
         1f to Color.Transparent,
     )
-    val glassBorder = Brush.linearGradient(
-        0f to Color.White.copy(alpha = 0.42f),
-        0.5f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.20f),
-        1f to Color.White.copy(alpha = 0.09f),
-    )
+    val packageBorder = packageSurfaces?.cardBorderStrokeColor()
+    val glassBorder = if (packageBorder != null) {
+        Brush.linearGradient(
+            0f to packageBorder,
+            0.55f to packageBorder.copy(alpha = packageBorder.alpha * 0.65f),
+            1f to Color.Transparent,
+        )
+    } else {
+        Brush.linearGradient(
+            0f to Color.White.copy(alpha = 0.42f),
+            0.5f to MaterialTheme.colorScheme.onSurface.copy(alpha = 0.20f),
+            1f to Color.White.copy(alpha = 0.09f),
+        )
+    }
 
     ListItem(
         headlineContent = item.headlineContent,
@@ -173,7 +190,8 @@ private fun CardGroupListItem(
                     Modifier.border(
                         border = BorderStroke(
                             width = 1.dp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                            color = packageBorder
+                                ?: MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
                         ),
                         shape = dynamicShape,
                     )

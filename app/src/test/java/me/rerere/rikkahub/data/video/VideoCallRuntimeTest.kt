@@ -57,6 +57,41 @@ class VideoCallRuntimeTest {
     }
 
     @Test
+    fun `queued camera permission cannot revive after closing and reopening the camera`() {
+        VideoCallRuntime.enterVideoCall(conversationId)
+        VideoCallRuntime.registerCamera(conversationId, Gateway())
+        assertTrue(VideoCallRuntime.beginTurnRequest(conversationId, "queued"))
+        val original = VideoCallRuntime.currentCameraEpoch()
+        assertEquals(original, VideoCallRuntime.cameraEpochForTurn(conversationId, "queued"))
+        assertNull(VideoCallRuntime.cameraEpochForTurn(otherConversation, "queued"))
+        assertTrue(VideoCallRuntime.setCameraEnabled(conversationId, false))
+        assertNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "queued"))
+        assertTrue(VideoCallRuntime.setCameraEnabled(conversationId, true))
+        assertTrue(VideoCallRuntime.beginTurnRequest(conversationId, "queued"))
+        assertTrue(VideoCallRuntime.isTurnGranted(conversationId, "queued"))
+        assertNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "queued"))
+        assertTrue(VideoCallRuntime.beginTurnRequest(conversationId, "fresh"))
+        assertEquals(VideoCallRuntime.currentCameraEpoch(),
+            VideoCallRuntime.cameraEpochForTurn(conversationId, "fresh"))
+        VideoCallRuntime.cancelTurnRequest("fresh")
+        assertNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "fresh"))
+    }
+
+    @Test
+    fun `camera geometry changes invalidate queued image grants without revoking text turns`() {
+        VideoCallRuntime.enterVideoCall(conversationId)
+        val gateway = Gateway()
+        VideoCallRuntime.registerCamera(conversationId, gateway)
+        VideoCallRuntime.beginTurnRequest(conversationId, "geometry")
+        assertNotNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "geometry"))
+        assertTrue(VideoCallRuntime.notifyCameraGenerationChanged(gateway))
+        assertNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "geometry"))
+        assertTrue(VideoCallRuntime.isTurnGranted(conversationId, "geometry"))
+        VideoCallRuntime.exitVideoCall(conversationId)
+        assertNull(VideoCallRuntime.cameraEpochForTurn(conversationId, "geometry"))
+    }
+
+    @Test
     fun `only the owning call can end or replace the live one`() {
         assertTrue(VideoCallRuntime.enterVideoCall(conversationId))
         assertTrue("同一会话重入是幂等的", VideoCallRuntime.enterVideoCall(conversationId))

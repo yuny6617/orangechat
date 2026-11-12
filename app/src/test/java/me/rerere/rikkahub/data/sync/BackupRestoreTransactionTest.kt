@@ -6,6 +6,8 @@ import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -57,6 +59,87 @@ class BackupRestoreTransactionTest {
         assertEquals("old-file", file.readText())
         assertEquals("old-settings", preferences.readText())
         assertFalse(File(root, "databases/rikka_hub").exists())
+    }
+
+    /**
+     * The ordinary rollback path (a prepared transaction that never reached `.ready`) must persist
+     * the plugin verdict itself: the plugin journal is only retired after `onDecision` succeeded.
+     * Without this, a crash between file rollback and plugin recovery would keep the restored
+     * plugin data next to rolled-back files.
+     */
+    @Test fun startupBeforeDatabaseReadyRecordsRollbackDecision() {
+        val root = temporary.newFolder("root")
+        val file = File(root, "files/upload/item.txt").apply { parentFile!!.mkdirs(); writeText("old-file") }
+        val preferences = File(root, "files/datastore/settings.preferences_pb")
+            .apply { parentFile!!.mkdirs(); writeText("old-settings") }
+        val transaction = BackupRestoreTransaction(root).apply { begin() }
+        transaction.stagePath("files/upload/item.txt").apply { parentFile!!.mkdirs(); writeText("new-file") }
+        transaction.stagePath("databases/rikka_hub").apply { parentFile!!.mkdirs(); writeText("new-db") }
+        transaction.prepare(
+            files = listOf("files/upload/item.txt"),
+            preferences = listOf("files/datastore/settings.preferences_pb"),
+            databases = listOf("databases/rikka_hub"),
+        )
+        transaction.installFiles()
+        preferences.writeText("new-settings")
+
+        val decisions = mutableListOf<Boolean>()
+        val recovery = BackupRestoreTransaction.recoverBeforeStartupWithOutcome(root) { committed ->
+            decisions += committed
+            null
+        }
+
+        assertEquals(BackupRestoreStartupOutcome.ROLLED_BACK, recovery.outcome)
+        assertNull(recovery.error)
+        assertNull(recovery.decisionError)
+        assertEquals(listOf(false), decisions)
+        assertEquals("old-file", file.readText())
+        assertEquals("old-settings", preferences.readText())
+        assertFalse(File(root, "databases/rikka_hub").exists())
+        assertFalse(File(root, "files/.backup_restore").exists())
+    }
+
+    /**
+     * A failed verdict write must keep the transaction journal and retry on the next launch; the
+     * rollback itself is already durable and must remain idempotent when it runs again.
+     */
+    @Test fun normalRollbackRetriesDecisionWhenPluginVerdictWriteFails() {
+        val root = temporary.newFolder("root")
+        val file = File(root, "files/upload/item.txt").apply { parentFile!!.mkdirs(); writeText("old-file") }
+        val preferences = File(root, "files/datastore/settings.preferences_pb")
+            .apply { parentFile!!.mkdirs(); writeText("old-settings") }
+        val transaction = BackupRestoreTransaction(root).apply { begin() }
+        transaction.stagePath("files/upload/item.txt").apply { parentFile!!.mkdirs(); writeText("new-file") }
+        transaction.prepare(
+            files = listOf("files/upload/item.txt"),
+            preferences = listOf("files/datastore/settings.preferences_pb"),
+            databases = emptyList(),
+        )
+        transaction.installFiles()
+        preferences.writeText("new-settings")
+
+        val first = BackupRestoreTransaction.recoverBeforeStartupWithOutcome(root) {
+            error("cannot persist plugin verdict")
+        }
+        assertEquals(BackupRestoreStartupOutcome.ROLLED_BACK, first.outcome)
+        assertNull(first.error)
+        assertNotNull(first.decisionError)
+        assertEquals("old-file", file.readText())
+        assertEquals("old-settings", preferences.readText())
+        assertTrue(File(root, "files/.backup_restore").exists())
+
+        val decisions = mutableListOf<Boolean>()
+        val second = BackupRestoreTransaction.recoverBeforeStartupWithOutcome(root) { committed ->
+            decisions += committed
+            null
+        }
+        assertEquals(BackupRestoreStartupOutcome.ROLLED_BACK, second.outcome)
+        assertNull(second.error)
+        assertNull(second.decisionError)
+        assertEquals(listOf(false), decisions)
+        assertEquals("old-file", file.readText())
+        assertEquals("old-settings", preferences.readText())
+        assertFalse(File(root, "files/.backup_restore").exists())
     }
 
     @Test fun startupActivatesReadyDatabaseAndDropsAbsentOldSidecars() {

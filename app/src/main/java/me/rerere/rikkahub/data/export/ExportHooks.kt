@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -21,11 +21,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
+import com.dokar.sonner.ToastType
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.rerere.rikkahub.ui.context.LocalToaster
 import java.io.File
+import java.io.IOException
 
 @Stable
 class ExporterState<T>(
@@ -34,6 +38,7 @@ class ExporterState<T>(
     private val context: Context,
     private val scope: CoroutineScope,
     private val createDocumentLauncher: ManagedActivityResultLauncher<String, Uri?>,
+    private val onResult: (Result<Unit>) -> Unit = {},
 ) {
     val value: String
         get() = serializer.exportToJson(data)
@@ -47,31 +52,50 @@ class ExporterState<T>(
 
     fun exportAndShare(fileName: String = this.fileName) {
         scope.launch {
-            val file = withContext(Dispatchers.IO) {
-                val cacheDir = File(context.cacheDir, "export")
-                cacheDir.mkdirs()
-                val file = File(cacheDir, fileName)
-                file.writeText(value)
-                file
+            try {
+                val intent = withContext(Dispatchers.IO) {
+                    val cacheDir = File(context.cacheDir, "export")
+                    check(cacheDir.isDirectory || cacheDir.mkdirs()) { "无法创建导出临时目录" }
+                    val file = File(cacheDir, fileName).apply { writeText(value) }
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "application/json"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        clipData = android.content.ClipData.newUri(
+                            context.contentResolver,
+                            fileName,
+                            uri,
+                        )
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+                context.startActivity(Intent.createChooser(intent, null))
+                onResult(Result.success(Unit))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onResult(Result.failure(error))
             }
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                file
-            )
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/json"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(Intent.createChooser(intent, null))
         }
     }
 
     internal fun writeToUri(uri: Uri) {
-        scope.launch(Dispatchers.IO) {
-            context.contentResolver.openOutputStream(uri)?.use { output ->
-                output.write(value.toByteArray())
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val output = context.contentResolver.openOutputStream(uri)
+                        ?: throw IOException("无法写入所选文件")
+                    output.use { it.write(value.toByteArray()) }
+                }
+                onResult(Result.success(Unit))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onResult(Result.failure(error))
             }
         }
     }
@@ -84,6 +108,7 @@ fun <T> rememberExporter(
 ): ExporterState<T> {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val toaster = LocalToaster.current
 
     var pendingState by remember { mutableStateOf<ExporterState<T>?>(null) }
 
@@ -100,6 +125,16 @@ fun <T> rememberExporter(
             context = context,
             scope = scope,
             createDocumentLauncher = createDocumentLauncher,
+            onResult = { result ->
+                result.onSuccess {
+                    toaster.show("导出成功", type = ToastType.Success)
+                }.onFailure { error ->
+                    toaster.show(
+                        "导出失败：${error.message ?: "请稍后重试"}",
+                        type = ToastType.Error,
+                    )
+                }
+            },
         ).also { pendingState = it }
     }
 

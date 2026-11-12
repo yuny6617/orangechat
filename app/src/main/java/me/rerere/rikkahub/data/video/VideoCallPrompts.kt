@@ -24,7 +24,7 @@ data class VideoCallContext(
     val cameraUnavailableReason: String = "",
     val visionSupported: Boolean = true,
     val giftsEnabled: Boolean = false,
-    val captureMode: VideoFrameCaptureMode = VideoFrameCaptureMode.EVERY_REPLY,
+    val captureMode: VideoFrameCaptureMode = VideoFrameCaptureMode.CONTINUOUS_SEQUENCE,
     val giftsSent: VideoGiftTally = VideoGiftTally(),
     val pictureAttached: Boolean = false,
     val audioAttached: Boolean = false,
@@ -183,9 +183,12 @@ object VideoCallPrompts {
 
     fun captureModeNote(mode: VideoFrameCaptureMode): String? = when (mode) {
         VideoFrameCaptureMode.OFF -> "本次通话不会自动附带画面；你可以主动用 <ws_vsnap/> 请求留影。"
-        VideoFrameCaptureMode.EVERY_REPLY -> "每轮对话会附带一张当前画面，可能不是你此刻看到的样子，不要过度推断细节。"
+        VideoFrameCaptureMode.CONTINUOUS_SEQUENCE ->
+            "每轮对话会附带一张最近几秒的连续画面拼图（约每秒一帧），可能不是你此刻看到的样子，不要过度推断细节。"
+        VideoFrameCaptureMode.EVERY_REPLY ->
+            "每轮对话会附带一张当前画面，可能不是你此刻看到的样子，不要过度推断细节。"
         VideoFrameCaptureMode.EVERY_30S, VideoFrameCaptureMode.EVERY_60S ->
-            "画面约每${mode.intervalMillis?.div(1000) ?: 30}秒刷新一次，只有轮到下一轮对话时才会传给你。"
+            "不会持续采样；画面约每${mode.intervalMillis?.div(1000) ?: 30}秒刷新一次，只有轮到下一轮对话时才会传给你。"
     }
 
     /** 通知栏/气泡里用的简短状态文案。 */

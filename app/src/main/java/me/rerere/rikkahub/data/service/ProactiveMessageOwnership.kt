@@ -9,7 +9,32 @@ package me.rerere.rikkahub.data.service
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
+import me.rerere.rikkahub.data.ai.buildConversationRequestMessages
+import me.rerere.rikkahub.data.video.withoutHistoricalCameraImages
 import kotlin.uuid.Uuid
+
+/**
+ * Compose the initial proactive request from durable history.
+ *
+ * A background wake-up has no camera capability, so historical video-call frames/clips/snapshots
+ * must never be replayed here. Clean before transformers (so nothing can encode a camera file into
+ * anonymous base64 or OCR text) and again after the request messages are assembled; ordinary
+ * attachments are deliberately kept by [withoutHistoricalCameraImages].
+ */
+internal fun buildProactiveRequestMessages(
+    systemPrompt: String,
+    historyMessages: List<UIMessage>,
+    summary: String?,
+    context: String,
+): List<UIMessage> = beginProactiveRequest(
+    buildConversationRequestMessages(
+        systemPrompt = systemPrompt,
+        messages = historyMessages.withoutHistoricalCameraImages(),
+        contextMessageSize = 0,
+        summary = summary,
+    ).withoutHistoricalCameraImages(),
+    context = context,
+)
 
 /** A new background decision is a request-only user turn, never a persisted chat message. */
 internal fun beginProactiveRequest(messages: List<UIMessage>, context: String = ""): List<UIMessage> =

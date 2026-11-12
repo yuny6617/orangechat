@@ -1,10 +1,12 @@
 package me.rerere.rikkahub.ui.pages.chat
 
 import android.app.Application
+import android.content.ActivityNotFoundException
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.ui.UIMessage
@@ -95,6 +97,82 @@ class PagedChatImageExportTest {
             finally { page.recycle() }
         } finally {
             source.recycle()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun everyPageDrawsAnExplicitPageNumber() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val dir = File(context.cacheDir, "export-footer-${System.nanoTime()}")
+        try {
+            val pages = renderPagedChatPngs(
+                context, "Title", sequenceOf(ExportTextBlock("", "footer page")), dir,
+            )
+            val page = BitmapFactory.decodeFile(pages.single().absolutePath)
+            try {
+                var nonWhite = 0
+                for (y in 1870 until 1915) {
+                    for (x in 40 until 300) {
+                        if (page.getPixel(x, y) != Color.WHITE) nonWhite++
+                    }
+                }
+                assertTrue("Page number must be drawn in the bottom margin", nonWhite > 0)
+            } finally {
+                page.recycle()
+            }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun shareFailureDeletesRenderedPagesAndKeepsTheError() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val dir = File(context.cacheDir, "export-share-failure-${System.nanoTime()}")
+        val messages = listOf(
+            UIMessage(role = MessageRole.USER, parts = listOf(UIMessagePart.Text("share failure"))),
+        )
+        try {
+            val failure = runCatching {
+                exportToImage(
+                    context = context,
+                    title = "Title",
+                    messages = messages,
+                    options = ImageExportOptions(),
+                    outputDir = dir,
+                    share = { _, _ -> throw ActivityNotFoundException("no share target") },
+                    progressDispatcher = Dispatchers.Unconfined,
+                    onProgress = {},
+                )
+            }.exceptionOrNull()
+            assertTrue(failure is ActivityNotFoundException)
+            assertFalse(dir.listFiles()?.any { it.name.endsWith(".png") } == true)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test fun successfulShareReceivesEveryRenderedPage() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val dir = File(context.cacheDir, "export-share-success-${System.nanoTime()}")
+        val messages = listOf(
+            UIMessage(role = MessageRole.USER, parts = listOf(UIMessagePart.Text("share success"))),
+        )
+        var shared: List<File> = emptyList()
+        try {
+            val count = exportToImage(
+                context = context,
+                title = "Title",
+                messages = messages,
+                options = ImageExportOptions(),
+                outputDir = dir,
+                share = { _, pages -> shared = pages },
+                progressDispatcher = Dispatchers.Unconfined,
+                onProgress = {},
+            )
+            assertEquals(1, count)
+            assertEquals(1, shared.size)
+            assertTrue(shared.single().isFile)
+        } finally {
             dir.deleteRecursively()
         }
     }

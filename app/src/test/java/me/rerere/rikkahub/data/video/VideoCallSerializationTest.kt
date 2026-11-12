@@ -17,9 +17,33 @@ class VideoCallSerializationTest {
     fun `video call setting defaults keep gifts off`() {
         val decoded = JsonInstant.decodeFromString<VideoCallSetting>("{}")
         assertFalse(decoded.giftsEnabled)
-        assertEquals(VideoFrameCaptureMode.EVERY_REPLY, decoded.frameCaptureMode)
+        assertEquals(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE, decoded.frameCaptureMode)
         assertEquals(VideoFrameQuality.P512, decoded.frameQuality)
         assertTrue(decoded.showUserDanmaku)
+    }
+
+    @Test
+    fun `continuous sequence is the new default while saved legacy enums stay untouched`() {
+        assertEquals(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE, VideoCallSetting().frameCaptureMode)
+        val continuous = VideoCallSetting(frameCaptureMode = VideoFrameCaptureMode.CONTINUOUS_SEQUENCE)
+        val encodedContinuous = JsonInstant.encodeToString(continuous)
+        assertTrue(encodedContinuous.contains("continuous_sequence"))
+        assertEquals(continuous, JsonInstant.decodeFromString<VideoCallSetting>(encodedContinuous))
+
+        // 已保存的旧枚举名原样读回并原样写回：不迁移 every_reply，也不暗改 30/60 秒。
+        val saved = mapOf(
+            "off" to VideoFrameCaptureMode.OFF,
+            "every_reply" to VideoFrameCaptureMode.EVERY_REPLY,
+            "every_30s" to VideoFrameCaptureMode.EVERY_30S,
+            "every_60s" to VideoFrameCaptureMode.EVERY_60S,
+        )
+        saved.forEach { (serial, expected) ->
+            val decoded = JsonInstant.decodeFromString<VideoCallSetting>(
+                """{"frameCaptureMode":"$serial"}""",
+            )
+            assertEquals(expected, decoded.frameCaptureMode)
+            assertTrue(JsonInstant.encodeToString(decoded).contains("\"$serial\""))
+        }
     }
 
     @Test
@@ -37,7 +61,7 @@ class VideoCallSerializationTest {
         // 旧版本没有这个字段时也必须能以默认值读回
         val legacy = JsonInstant.decodeFromString<VideoCallSetting>("""{"giftsEnabled":true}""")
         assertTrue(legacy.giftsEnabled)
-        assertEquals(VideoFrameCaptureMode.EVERY_REPLY, legacy.frameCaptureMode)
+        assertEquals(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE, legacy.frameCaptureMode)
     }
 
     @Test

@@ -57,6 +57,7 @@ fun PluginFolderPage(
     val plugins by viewModel.plugins.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val importState by viewModel.importState.collectAsState()
+    val pendingTheme by viewModel.pendingTheme.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val folder = folders.find { it.id == folderId }
     val folderPlugins = plugins.filter { it.folderId == folderId }
@@ -72,6 +73,12 @@ fun PluginFolderPage(
                 snackbarHostState.showSnackbar(message = "插件导入成功")
                 viewModel.resetImportState()
             }
+            is PluginViewModel.ImportState.ThemeInstalled -> {
+                snackbarHostState.showSnackbar(
+                    message = "主题包已应用：${(importState as PluginViewModel.ImportState.ThemeInstalled).themeName}",
+                )
+                viewModel.resetImportState()
+            }
             is PluginViewModel.ImportState.Error -> {
                 snackbarHostState.showSnackbar(
                     message = "导入失败: ${(importState as PluginViewModel.ImportState.Error).message}"
@@ -80,6 +87,14 @@ fun PluginFolderPage(
             }
             else -> {}
         }
+    }
+
+    pendingTheme?.let { pack ->
+        PluginThemeImportDialog(
+            themePackage = pack,
+            onApply = { themeId -> viewModel.applyPendingTheme(themeId) },
+            onDismiss = { viewModel.cancelThemePreview() },
+        )
     }
 
     Scaffold(

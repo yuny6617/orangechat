@@ -33,6 +33,22 @@
     },
     "header": {
       "select_conversation": "请选择会话"
+    },
+    "export_selection": {
+      "toggle": "选择这条消息用于导出",
+      "selected": "已选 {{count}} 条",
+      "select_all": "全选",
+      "clear": "清除选择",
+      "cancel": "取消选择",
+      "export": "导出选中消息",
+      "export_with_reasoning": "导出选中消息（含思考）",
+      "exporting": "正在导出，请稍后再试",
+      "export_progress": "正在生成 Markdown {{done}}/{{total}}…",
+      "export_cancelled": "已取消导出",
+      "export_success": "已导出 Markdown（{{count}} 条消息）",
+      "export_success_pages": "已导出 Markdown（{{count}} 条消息，分 {{pages}} 页）",
+      "export_failed": "导出失败：{{message}}",
+      "empty_selection": "请选择至少一条消息"
     }
   }
 }

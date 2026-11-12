@@ -8,6 +8,7 @@ package me.rerere.rikkahub.data.video
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import android.app.Application
 import android.graphics.Matrix
@@ -431,16 +432,21 @@ class VideoPreviewGeometryTest {
         assertEquals("0°", PreviewCalibration.label(360))
     }
 
-    /** 校准只进预览矩阵：抓帧角度与它无关（用户要求"不改变 JPEG 方向"）。 */
+    /**
+     * 校准**同时**进入预览与抓帧：两者用同一个角度，且各自只加一次。
+     *
+     * 用户要求"看到的画面就是发给模型的画面"，所以抓帧角 = 基准角 + 校准角；
+     * 预览矩阵的 `rotationDegrees` 仍是基准角（日志可分开看），
+     * `rotation + calibration` 必须正好等于抓帧角。
+     */
     @Test
-    fun `calibration never changes the capture angle`() {
-        // 预览矩阵里携带的 rotationDegrees 必须始终等于抓帧用的那个纯函数结果，
-        // 无论校准转了多少度——否则"调预览"就会顺手把存下来的照片转歪。
-        val captureAngle = VideoPreviewGeometry.captureRotationDegrees(
-            sensorOrientation = 90,
-            displayRotationDegrees = 0,
-            frontFacing = false,
-        )
+    fun `capture angle includes preview calibration exactly once`() {
+        val base = VideoPreviewGeometry.uprightRotation(90, 0, frontFacing = false)
+        assertEquals(90, base)
+        assertEquals(90, VideoPreviewGeometry.captureRotationDegrees(90, 0, frontFacing = false))
+        assertEquals(180, VideoPreviewGeometry.captureRotationDegrees(90, 0, frontFacing = false, calibrationDegrees = 90))
+        assertEquals(0, VideoPreviewGeometry.captureRotationDegrees(90, 0, frontFacing = false, calibrationDegrees = 270))
+
         listOf(0, 90, 180, 270).forEach { calibration ->
             val preview = VideoPreviewGeometry.textureViewTransform(
                 sensorOrientation = 90,
@@ -452,8 +458,557 @@ class VideoPreviewGeometryTest {
                 viewHeight = 640,
                 calibrationDegrees = calibration,
             )
-            assertEquals("预览校准 $calibration° 不许改变抓帧角度", captureAngle, preview.rotationDegrees)
+            assertEquals("预览基准角不因校准改变", base, preview.rotationDegrees)
             assertEquals(calibration, preview.calibrationDegrees)
+            assertEquals(
+                "抓帧角必须等于预览的基准角 + 校准角",
+                VideoPreviewGeometry.captureRotationDegrees(90, 0, frontFacing = false, calibrationDegrees = calibration),
+                VideoPreviewGeometry.normalizeDegrees(preview.rotationDegrees + preview.calibrationDegrees),
+            )
+        }
+    }
+
+    /**
+     * 预览卡用的比例必须是"旋转 + 校准"之后整张源图的正立尺寸。
+     *
+     * 4:3 的 buffer 在竖屏基准角 90° 下是 3:4；再校准 90° 后应变成 4:3。
+     * UI 按它设置卡片宽高比，预览的 cover 才等于整图贴合（不裁、不拉伸）。
+     */
+    @Test
+    fun `preview content size is the upright source size after calibration`() {
+        assertEquals(
+            PixelSize(480, 640),
+            VideoPreviewGeometry.orientedContentSize(640, 480, rotationDegrees = 90),
+        )
+        assertEquals(
+            PixelSize(640, 480),
+            VideoPreviewGeometry.orientedContentSize(640, 480, rotationDegrees = 90, calibrationDegrees = 90),
+        )
+        assertEquals(
+            PixelSize(480, 640),
+            VideoPreviewGeometry.orientedContentSize(640, 480, rotationDegrees = 90, calibrationDegrees = 180),
+        )
+        assertEquals(
+            PixelSize(640, 480),
+            VideoPreviewGeometry.orientedContentSize(640, 480, rotationDegrees = 90, calibrationDegrees = 270),
+        )
+        // 尺寸未知时必须是 0x0，不能被当成 1:1 的有效比例。
+        assertEquals(PixelSize(0, 0), VideoPreviewGeometry.orientedContentSize(0, 480, 90))
+        assertEquals(PixelSize(0, 0), VideoPreviewGeometry.orientedContentSize(640, -1, 90))
+
+        assertEquals(
+            PixelSize(480, 640),
+            VideoPreviewGeometry.textureViewTransform(
+                sensorOrientation = 90,
+                displayRotationDegrees = 0,
+                frontFacing = false,
+                bufferWidth = 640,
+                bufferHeight = 480,
+                viewWidth = 480,
+                viewHeight = 640,
+            ).contentSize,
+        )
+    }
+
+    /**
+     * 预览卡按 contentSize 定比例时，整张 sensor 画面必须可见：四个 buffer 角点
+     * **精确落在**视图四角（没有被 cover 裁掉），也就是预览与抓帧 JPEG 的取景范围相同。
+     *
+     * 这是"不能依赖 TextureView 默认拉伸"的直接检查：只要视图比例 = 正立源图比例，
+     * 预览的可见范围就是整个 buffer，不需要猜 TextureView 会把画面裁掉多少。
+     */
+    @Test
+    fun `card aspect matching the content size shows the whole sensor frame`() {
+        val bufferWidth = 640
+        val bufferHeight = 480
+        listOf(0, 90, 180, 270).forEach { rotation ->
+            val content = VideoPreviewGeometry.orientedContentSize(bufferWidth, bufferHeight, rotation)
+            // 视图按 contentSize 同比例放大 2 倍（真实设备上只是像素不同）。
+            val viewWidth = content.width * 2
+            val viewHeight = content.height * 2
+            val visible = VideoPreviewGeometry.visibleAffine(
+                rotationDegrees = rotation,
+                mirror = false,
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+            )
+            assertEquals("rotation=$rotation 必须等比", 2f, visible.uniformScale, delta)
+            // buffer 四角必须一一落到视图四角：整图可见、没有被裁，也没有超出视图。
+            assertCornersLandOnView(
+                mapped = listOf(
+                    visible.map(0f, 0f),
+                    visible.map(bufferWidth.toFloat(), 0f),
+                    visible.map(bufferWidth.toFloat(), bufferHeight.toFloat()),
+                    visible.map(0f, bufferHeight.toFloat()),
+                ),
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                tag = "rotation=$rotation",
+            )
+        }
+    }
+
+    /**
+     * 校准之后同样不能裁掉画面：卡片比例取自 `PreviewTransform.contentSize`，
+     * 把 `setTransform` 的矩阵与 TextureView 默认拉伸复合（`M ∘ S`）后，整张源图仍恰好铺满视图。
+     *
+     * 这同时验证"预览与 JPEG 的取景范围一致"在**校准路径**上成立，而不只是 0° 校准。
+     */
+    @Test
+    fun `calibrated preview with content-sized card still shows the whole frame`() {
+        val bufferWidth = 640
+        val bufferHeight = 480
+        listOf(0, 90, 180, 270).forEach { calibration ->
+            val baseRotation = VideoPreviewGeometry.uprightRotation(90, 0, frontFacing = false)
+            val content = VideoPreviewGeometry.orientedContentSize(
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                rotationDegrees = baseRotation,
+                calibrationDegrees = calibration,
+            )
+            // 视图按 contentSize 同比例放大 2 倍；矩阵必须按这个真实 view 尺寸计算。
+            val viewWidth = content.width * 2
+            val viewHeight = content.height * 2
+            val transform = VideoPreviewGeometry.textureViewTransform(
+                sensorOrientation = 90,
+                displayRotationDegrees = 0,
+                frontFacing = false,
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                calibrationDegrees = calibration,
+            )
+            assertEquals(content, transform.contentSize)
+            val stretch = textureViewDefaultStretch(bufferWidth, bufferHeight, viewWidth, viewHeight)
+            val shown = stretch.then(transform.matrix)
+            // M ∘ S 必须把整张源图的四角一一送到视图四角（校准后仍不裁、不拉伸）。
+            assertCornersLandOnView(
+                mapped = listOf(
+                    shown.map(0f, 0f),
+                    shown.map(bufferWidth.toFloat(), 0f),
+                    shown.map(bufferWidth.toFloat(), bufferHeight.toFloat()),
+                    shown.map(0f, bufferHeight.toFloat()),
+                ),
+                viewWidth = viewWidth,
+                viewHeight = viewHeight,
+                tag = "calibration=$calibration",
+            )
+        }
+    }
+
+    /**
+     * 前后摄、横竖屏、校准、镜像的**所有组合**下，预览最终画面与 JPEG 归一化必须只差
+     * 一个统一缩放（旋转方向、镜像轴完全一致）。
+     *
+     * 这是"模型收到的方向/镜像与预览一致"的纯几何证明：比较两者的线性部分
+     * （`mapVector`），不用管视图尺寸和裁剪平移。
+     */
+    @Test
+    fun `preview and jpeg normalization share rotation and mirror in every combination`() {
+        listOf(0, 90, 180, 270).forEach { sensor ->
+            listOf(0, 90, 180, 270).forEach { display ->
+                listOf(false, true).forEach { front ->
+                    listOf(0, 90, 180, 270).forEach { calibration ->
+                        listOf(false, true).forEach { mirror ->
+                            val baseRotation = VideoPreviewGeometry.uprightRotation(sensor, display, front)
+                            val content = VideoPreviewGeometry.orientedContentSize(
+                                bufferWidth = 640,
+                                bufferHeight = 480,
+                                rotationDegrees = baseRotation,
+                                calibrationDegrees = calibration,
+                            )
+                            val viewWidth = content.width * 2
+                            val viewHeight = content.height * 2
+                            val transform = VideoPreviewGeometry.textureViewTransform(
+                                sensorOrientation = sensor,
+                                displayRotationDegrees = display,
+                                frontFacing = front,
+                                bufferWidth = 640,
+                                bufferHeight = 480,
+                                viewWidth = viewWidth,
+                                viewHeight = viewHeight,
+                                calibrationDegrees = calibration,
+                                previewMirrored = mirror,
+                            )
+                            assertEquals(content, transform.contentSize)
+                            val shown = textureViewDefaultStretch(640, 480, viewWidth, viewHeight)
+                                .then(transform.matrix)
+                            val jpeg = VideoPreviewGeometry.uprightImageAffine(
+                                rotationDegrees = VideoPreviewGeometry.captureRotationDegrees(
+                                    sensorOrientation = sensor,
+                                    displayRotationDegrees = display,
+                                    frontFacing = front,
+                                    calibrationDegrees = calibration,
+                                ),
+                                mirror = mirror,
+                                width = 640,
+                                height = 480,
+                            )
+                            val tag = "sensor=$sensor display=$display front=$front calibration=$calibration mirror=$mirror"
+                            val shownX = shown.mapVector(1f, 0f)
+                            val shownY = shown.mapVector(0f, 1f)
+                            val jpegX = jpeg.mapVector(1f, 0f)
+                            val jpegY = jpeg.mapVector(0f, 1f)
+                            val scale = kotlin.math.hypot(shownX.x, shownX.y) /
+                                kotlin.math.hypot(jpegX.x, jpegX.y)
+                            assertEquals(tag, scale * jpegX.x, shownX.x, 1e-3f)
+                            assertEquals(tag, scale * jpegX.y, shownX.y, 1e-3f)
+                            assertEquals(tag, scale * jpegY.x, shownY.x, 1e-3f)
+                            assertEquals(tag, scale * jpegY.y, shownY.y, 1e-3f)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 预览 / 抓帧尺寸配对：同一宽高比，优先 4:3
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `stream sizes prefer a matching four by three pair over larger wide sizes`() {
+        val previews = listOf(
+            PixelSize(1920, 1080),
+            PixelSize(1280, 720),
+            PixelSize(1280, 960),
+            PixelSize(640, 480),
+            PixelSize(320, 240),
+        )
+        val captures = listOf(
+            PixelSize(1920, 1080),
+            PixelSize(1280, 720),
+            PixelSize(1280, 960),
+            PixelSize(640, 480),
+        )
+        val chosen = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamSizes(previews, captures, maxEdge = 1280),
+        )
+        assertEquals(PixelSize(1280, 960), chosen.preview)
+        assertEquals(PixelSize(1280, 960), chosen.capture)
+        assertEquals(
+            VideoPreviewGeometry.aspectRatio(chosen.preview.width, chosen.preview.height),
+            VideoPreviewGeometry.aspectRatio(chosen.capture.width, chosen.capture.height),
+            1e-6f,
+        )
+    }
+
+    @Test
+    fun `stream sizes pair different resolutions when they share an aspect`() {
+        // 预览只有 640x480(4:3)，JPEG 有更大的 1280x960(4:3)：允许不同分辨率，只要比例相同。
+        val chosen = VideoPreviewGeometry.chooseCameraStreamSizes(
+            previewSizes = listOf(PixelSize(1280, 720), PixelSize(640, 480)),
+            captureSizes = listOf(PixelSize(1280, 720), PixelSize(1280, 960)),
+            maxEdge = 1280,
+        )
+        assertEquals(PixelSize(640, 480), chosen?.preview)
+        assertEquals(PixelSize(1280, 960), chosen?.capture)
+    }
+
+    @Test
+    fun `stream sizes fall back to a shared wide aspect when no four by three exists`() {
+        val chosen = VideoPreviewGeometry.chooseCameraStreamSizes(
+            previewSizes = listOf(PixelSize(1280, 720), PixelSize(960, 540)),
+            captureSizes = listOf(PixelSize(1920, 1080), PixelSize(1280, 720)),
+            maxEdge = 1280,
+        )
+        assertEquals(PixelSize(1280, 720), chosen?.preview)
+        assertEquals(PixelSize(1280, 720), chosen?.capture)
+    }
+
+    @Test
+    fun `stream sizes reject invalid and oversized entries`() {
+        val chosen = VideoPreviewGeometry.chooseCameraStreamSizes(
+            previewSizes = listOf(PixelSize(0, 480), PixelSize(4032, 3024), PixelSize(640, 480)),
+            captureSizes = listOf(PixelSize(0, 0), PixelSize(4000, 3000), PixelSize(1280, 960)),
+            maxEdge = 1280,
+        )
+        assertEquals(PixelSize(640, 480), chosen?.preview)
+        assertEquals(PixelSize(1280, 960), chosen?.capture)
+    }
+
+    @Test
+    fun `stream pairing rejects transposed axes and merely close ratios`() {
+        val preview = listOf(PixelSize(640, 480))
+        assertNull(VideoPreviewGeometry.chooseCameraStreamSizes(preview, listOf(PixelSize(480, 640))))
+        assertNull(VideoPreviewGeometry.chooseCameraStreamSizes(preview, listOf(PixelSize(640, 482))))
+        val exact = VideoPreviewGeometry.chooseCameraStreamSizes(
+            preview,
+            listOf(PixelSize(1280, 964), PixelSize(800, 600)),
+        )
+        assertEquals(PixelSize(800, 600), exact?.capture)
+    }
+
+    @Test
+    fun `stream sizes return null when no common aspect exists`() {
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamSizes(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(1280, 720)),
+            ),
+        )
+        assertNull(VideoPreviewGeometry.chooseCameraStreamSizes(emptyList(), listOf(PixelSize(640, 480))))
+        assertNull(VideoPreviewGeometry.chooseCameraStreamSizes(listOf(PixelSize(640, 480)), emptyList()))
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamSizes(
+                listOf(PixelSize(640, 480)),
+                listOf(PixelSize(640, 480)),
+                maxEdge = 0,
+            ),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Round1 相机兼容：同比例优先、只有大 JPEG 时的有界兜底、无同比例时保留预览
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `stream plan picks the smallest larger same aspect jpeg when none fits the preview limit`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1280, 720), PixelSize(640, 480)),
+                captureSizes = listOf(
+                    PixelSize(3840, 2160),
+                    PixelSize(1920, 1080),
+                    PixelSize(2560, 1440),
+                ),
+            ),
+        )
+        assertEquals(PixelSize(1280, 720), plan.preview)
+        // 只有 16:9 能配对：选最小的更大输出 1920x1080，而不是 4K/2K。
+        assertEquals(PixelSize(1920, 1080), plan.capture)
+        assertTrue(plan.captureEnabled)
+        assertEquals("", plan.captureDisabledReason)
+        val capture = requireNotNull(plan.capture)
+        assertTrue("兜底 JPEG 必须大于预览上限", capture.maxEdge > VideoPreviewGeometry.PREVIEW_MAX_EDGE)
+        assertTrue(
+            capture.width.toLong() * capture.height <=
+                VideoPreviewGeometry.CAPTURE_MAX_PIXELS.toLong(),
+        )
+        // 比例必须精确相等：所见即所发不允许近似比例。
+        assertEquals(
+            VideoPreviewGeometry.aspectRatio(plan.preview.width, plan.preview.height),
+            VideoPreviewGeometry.aspectRatio(capture.width, capture.height),
+            1e-6f,
+        )
+    }
+
+    @Test
+    fun `stream plan chooses the smallest bounded fallback not the largest jpeg`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(
+                    PixelSize(4000, 3000),
+                    PixelSize(1600, 1200),
+                    PixelSize(2048, 1536),
+                ),
+            ),
+        )
+        assertEquals(PixelSize(640, 480), plan.preview)
+        // 1600x1200 在该比例下是唯一落在 1080p 级预算内的更大输出；
+        // 2048x1536(3.1MP) 与 4000x3000(12MP) 都必须被拒绝（整张解码会 OOM）。
+        assertEquals(PixelSize(1600, 1200), plan.capture)
+    }
+
+    @Test
+    fun `stream plan keeps preview and disables capture when every matching jpeg is too large`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1280, 960)),
+                captureSizes = listOf(
+                    PixelSize(1920, 1440),
+                    PixelSize(3264, 2448),
+                    PixelSize(4000, 3000),
+                ),
+            ),
+        )
+        assertEquals(PixelSize(1280, 960), plan.preview)
+        assertNull("超预算的同比例 JPEG 不能当成可用抓帧", plan.capture)
+        assertFalse(plan.captureEnabled)
+        assertEquals(
+            VideoPreviewGeometry.CAPTURE_DISABLED_OVERSIZED_CAPTURE,
+            plan.captureDisabledReason,
+        )
+    }
+
+    @Test
+    fun `stream plan keeps preview and never approximates when no aspect is shared`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1280, 720), PixelSize(960, 540)),
+                captureSizes = listOf(PixelSize(1280, 960), PixelSize(640, 480)),
+            ),
+        )
+        // 没有共同比例：保留面积最大的预览，但绝不把 16:9 的预览配给 4:3 的 JPEG。
+        assertEquals(PixelSize(1280, 720), plan.preview)
+        assertNull(plan.capture)
+        assertEquals(
+            VideoPreviewGeometry.CAPTURE_DISABLED_NO_MATCHING_ASPECT,
+            plan.captureDisabledReason,
+        )
+    }
+
+    @Test
+    fun `preview only plan keeps a valid preview geometry without any jpeg`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1280, 720)),
+                captureSizes = listOf(PixelSize(1280, 960)),
+            ),
+        )
+        assertNull("4:3 JPEG 不能配给 16:9 预览", plan.capture)
+        // 停用抓帧不能影响预览几何：正立内容的宽高比必须仍然等于选中预览的宽高比。
+        val transform = VideoPreviewGeometry.textureViewTransform(
+            sensorOrientation = 90,
+            displayRotationDegrees = 0,
+            frontFacing = false,
+            bufferWidth = plan.preview.width,
+            bufferHeight = plan.preview.height,
+            viewWidth = 480,
+            viewHeight = 640,
+        )
+        assertTrue(transform.contentSize.width > 0 && transform.contentSize.height > 0)
+        assertEquals(
+            VideoPreviewGeometry.aspectRatio(plan.preview.width, plan.preview.height),
+            VideoPreviewGeometry.aspectRatio(transform.contentSize.width, transform.contentSize.height),
+            1e-6f,
+        )
+    }
+
+    @Test
+    fun `stream plan prefers a within limit jpeg over a larger fallback`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(1600, 1200), PixelSize(1280, 960)),
+            ),
+        )
+        assertEquals(PixelSize(640, 480), plan.preview)
+        // 有 <=1280 的同比例输出时就用它，不必去解一张更大的图。
+        assertEquals(PixelSize(1280, 960), plan.capture)
+        // 严格入口（只允许两边都 <=1280）也不会去选那张更大的 1600x1200。
+        assertEquals(
+            PixelSize(1280, 960),
+            VideoPreviewGeometry.chooseCameraStreamSizes(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(1600, 1200), PixelSize(1280, 960)),
+            )?.capture,
+        )
+    }
+
+    @Test
+    fun `stream plan never falls back to a merely close or transposed aspect`() {
+        val exact = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(1920, 1080), PixelSize(1600, 1200)),
+            ),
+        )
+        // 1600x1200 是精确 4:3；1920x1080 只是"接近"，不能拿来兜底。
+        assertEquals(PixelSize(1600, 1200), exact.capture)
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(1920, 1080)),
+            )?.capture,
+        )
+        // 横竖互换也不是同一个 sensor 轴，不能配对。
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(480, 640)),
+                captureSizes = listOf(PixelSize(1600, 1200)),
+            )?.capture,
+        )
+    }
+
+    @Test
+    fun `stream plan prefers a capturable preview over a larger preview only one`() {
+        val plan = requireNotNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1280, 720), PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(640, 480)),
+            ),
+        )
+        // 4:3 能配对，就选 640x480 的预览 + 抓帧；不是保留 1280x720 预览却停用抓帧。
+        assertEquals(PixelSize(640, 480), plan.preview)
+        assertEquals(PixelSize(640, 480), plan.capture)
+    }
+
+    @Test
+    fun `stream plan needs a preview even when a matching jpeg exists`() {
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = emptyList(),
+                captureSizes = listOf(PixelSize(640, 480)),
+            ),
+        )
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(1920, 1080)),
+                captureSizes = listOf(PixelSize(1280, 720)),
+            ),
+        )
+        assertNull(
+            VideoPreviewGeometry.chooseCameraStreamPlan(
+                previewSizes = listOf(PixelSize(640, 480)),
+                captureSizes = listOf(PixelSize(640, 480)),
+                previewMaxEdge = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun `preview card aspect and capture jpeg aspect agree for every orientation`() {
+        val pair = VideoPreviewGeometry.chooseCameraStreamSizes(
+            previewSizes = listOf(PixelSize(1280, 960)),
+            captureSizes = listOf(PixelSize(1280, 960)),
+        )!!
+        listOf(0, 90, 180, 270).forEach { sensor ->
+            listOf(0, 90, 180, 270).forEach { display ->
+                listOf(false, true).forEach { front ->
+                    listOf(0, 90, 180, 270).forEach { calibration ->
+                        val rotation = VideoPreviewGeometry.uprightRotation(sensor, display, front)
+                        val previewTransform = VideoPreviewGeometry.textureViewTransform(
+                            sensorOrientation = sensor,
+                            displayRotationDegrees = display,
+                            frontFacing = front,
+                            bufferWidth = pair.preview.width,
+                            bufferHeight = pair.preview.height,
+                            viewWidth = 480,
+                            viewHeight = 640,
+                            calibrationDegrees = calibration,
+                        )
+                        val captureRotation = VideoPreviewGeometry.captureRotationDegrees(
+                            sensorOrientation = sensor,
+                            displayRotationDegrees = display,
+                            frontFacing = front,
+                            calibrationDegrees = calibration,
+                        )
+                        val captureSize = VideoPreviewGeometry.uprightSize(
+                            pair.capture.width,
+                            pair.capture.height,
+                            captureRotation,
+                        )
+                        assertEquals(
+                            "sensor=$sensor display=$display front=$front calibration=$calibration",
+                            VideoPreviewGeometry.aspectRatio(captureSize.width, captureSize.height),
+                            VideoPreviewGeometry.aspectRatio(
+                                previewTransform.contentSize.width,
+                                previewTransform.contentSize.height,
+                            ),
+                            1e-4f,
+                        )
+                        assertEquals(
+                            VideoPreviewGeometry.normalizeDegrees(rotation + calibration),
+                            captureRotation,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -548,6 +1103,35 @@ class VideoPreviewGeometryTest {
         assertEquals("y", expectedY, actual.y, delta)
     }
 
+    /**
+     * 四个映射点必须一一命中视图四角（顺序不计）：说明整张源图正好铺满视图，
+     * 既没有被 cover 裁掉，也没有超出去或留下黑边。
+     */
+    private fun assertCornersLandOnView(
+        mapped: List<Point2>,
+        viewWidth: Int,
+        viewHeight: Int,
+        tag: String,
+    ) {
+        val expected = listOf(
+            Point2(0f, 0f),
+            Point2(viewWidth.toFloat(), 0f),
+            Point2(viewWidth.toFloat(), viewHeight.toFloat()),
+            Point2(0f, viewHeight.toFloat()),
+        )
+        assertEquals("$tag 映射点数量", expected.size, mapped.size)
+        val remaining = mapped.toMutableList()
+        expected.forEach { want ->
+            val hit = remaining.firstOrNull {
+                kotlin.math.abs(it.x - want.x) <= delta && kotlin.math.abs(it.y - want.y) <= delta
+            } ?: run {
+                assertTrue("$tag 缺少视图角 (${want.x},${want.y})，实际映射=$mapped", false)
+                return@forEach
+            }
+            remaining.remove(hit)
+        }
+    }
+
     /** 铺满：buffer 四个角映射出来的包围盒必须把整个视图包住（否则就是黑边）。 */
     private fun assertCoversView(
         visible: Affine,
@@ -573,6 +1157,48 @@ class VideoPreviewGeometryTest {
         assertTrue("上边有黑边：$minY > 0", minY <= delta)
         assertTrue("右边有黑边：$maxX < $viewWidth", maxX >= viewWidth - delta)
         assertTrue("下边有黑边：$maxY < $viewHeight", maxY >= viewHeight - delta)
+    }
+
+    @Test
+    fun `fit preview keeps the whole buffer inside a 4x3 view without stretching`() {
+        val buffers = listOf(1280 to 720, 640 to 480, 480 to 640, 1080 to 1920)
+        val views = listOf(800 to 600, 810 to 607)
+        for ((bw, bh) in buffers) for ((vw, vh) in views) {
+            for (rotation in listOf(0, 90, 180, 270)) for (calibration in listOf(0, 90)) {
+                val transform = VideoPreviewGeometry.textureViewTransform(
+                    sensorOrientation = rotation,
+                    displayRotationDegrees = 0,
+                    frontFacing = false,
+                    bufferWidth = bw,
+                    bufferHeight = bh,
+                    viewWidth = vw,
+                    viewHeight = vh,
+                    calibrationDegrees = calibration,
+                    previewMirrored = false,
+                    fit = true,
+                )
+                val stretch = Matrix().apply { setScale(vw.toFloat() / bw, vh.toFloat() / bh) }
+                val shown = Matrix().apply {
+                    setConcat(transform.matrix.toAndroidMatrix(), stretch)
+                }
+                val tag = "buffer=${bw}x$bh view=${vw}x$vh r=$rotation c=$calibration"
+                val vectors = floatArrayOf(1f, 0f, 0f, 1f)
+                shown.mapVectors(vectors)
+                // Both axes must use the same scale: no horizontal/vertical compression.
+                assertEquals(tag, kotlin.math.hypot(vectors[0], vectors[1]),
+                    kotlin.math.hypot(vectors[2], vectors[3]), 0.001f)
+                val corners = floatArrayOf(
+                    0f, 0f, bw.toFloat(), 0f, bw.toFloat(), bh.toFloat(), 0f, bh.toFloat(),
+                )
+                shown.mapPoints(corners)
+                for (index in corners.indices step 2) {
+                    assertTrue("$tag 左边越界 x=${corners[index]}", corners[index] >= -0.01f)
+                    assertTrue("$tag 上边越界 y=${corners[index + 1]}", corners[index + 1] >= -0.01f)
+                    assertTrue("$tag 右边越界 x=${corners[index]}", corners[index] <= vw + 0.01f)
+                    assertTrue("$tag 下边越界 y=${corners[index + 1]}", corners[index + 1] <= vh + 0.01f)
+                }
+            }
+        }
     }
 
     private data class Case(

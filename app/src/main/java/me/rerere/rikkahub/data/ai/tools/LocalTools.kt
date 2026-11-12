@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -184,7 +184,16 @@ class LocalTools(
     private val settingsStore: me.rerere.rikkahub.data.datastore.SettingsStore,
     private val providerManager: ProviderManager,
     private val filesManager: FilesManager,
+    private val pluginManager: me.rerere.rikkahub.plugin.manager.PluginManager,
 ) {
+    /**
+     * Host-side plugin manager for native tool factories assembled by ChatService itself
+     * (for example `moments_chat_draft`). Reusing this instance keeps one plugin registry and
+     * avoids passing a second PluginManager into ChatService's constructor.
+     */
+    val hostPluginManager: me.rerere.rikkahub.plugin.manager.PluginManager
+        get() = pluginManager
+
     suspend fun showIncomingChatCall(conversationId: String) {
         eventBus.emit(AppEvent.RequestVoiceCall(conversationId))
         // Notification opens the chat invitation; it never starts recording itself.
@@ -654,12 +663,24 @@ class LocalTools(
     /**
      * 工具调用上下文重载 - 供工作流引擎等无头调用方使用. 在基础工具之上额外注册
      * workflow_* 工具 (当助手开启了 Workflows 选项时), 以便 AI 能创建/管理工作流.
+     *
+     * [momentsBudgetRegistry] is the registry for user-turn scoped LocalMoments reads. ChatService
+     * passes its process-owned registry plus the current user-message anchor, so approval rebuilds
+     * resolve the same budget in buildLocalMomentsTools. Headless/legacy callers may omit them.
      */
     fun getTools(
         options: List<LocalToolOption>,
         invocationContext: ToolInvocationContext,
+        momentsBudgetRegistry: LocalMomentsBudgetRegistry? = null,
+        momentsBudgetAnchorUserId: String? = null,
     ): List<Tool> {
-        val tools = buildTools(options, invocationContext.callerConversationId, invocationContext)
+        val tools = buildTools(
+            options,
+            invocationContext.callerConversationId,
+            invocationContext,
+            momentsBudgetRegistry,
+            momentsBudgetAnchorUserId,
+        )
         if (options.contains(LocalToolOption.Workflows)) {
             // knownToolNamesProvider 返回空集 = 跳过创建时的工具名校验, 改在触发时由
             // ToolSurfaceBuilder 构建的完整工具面 (含 system/MCP/plugin) 校验. 这样 AI
@@ -687,6 +708,8 @@ class LocalTools(
         options: List<LocalToolOption>,
         conversationId: String? = null,
         invocationContext: ToolInvocationContext = ToolInvocationContext.EMPTY,
+        momentsBudgetRegistry: LocalMomentsBudgetRegistry? = null,
+        momentsBudgetAnchorUserId: String? = null,
     ): MutableList<Tool> {
         val tools = mutableListOf<Tool>()
         if (options.contains(LocalToolOption.ChartDisplay)) {
@@ -745,6 +768,21 @@ class LocalTools(
             tools.add(me.rerere.rikkahub.data.ai.tools.local.sshUploadTool(context, sshHostRepository))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.sshDownloadTool(context, sshHostRepository))
             tools.add(me.rerere.rikkahub.data.ai.tools.local.forgetSshHostKeyTool(context))
+        }
+        // 朋友圈助手读取工具。是否真正注册由宿主原生门槛决定（插件安装并启用、localdata read
+        // 授权、LocalTaskSettings 参与助手、非 headless 的正常聊天），模型无法自证身份。
+        if (!invocationContext.isHeadless && invocationContext.callerAssistantId != null) {
+            tools.addAll(
+                buildLocalMomentsTools(
+                    context = context,
+                    settingsStore = settingsStore,
+                    pluginManager = pluginManager,
+                    filesManager = filesManager,
+                    invocationContext = invocationContext,
+                    budgetRegistry = momentsBudgetRegistry,
+                    budgetAnchorUserId = momentsBudgetAnchorUserId,
+                ),
+            )
         }
         return tools
     }

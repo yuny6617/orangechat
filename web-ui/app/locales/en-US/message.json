@@ -26,6 +26,8 @@
     "delete": "Delete",
     "export_markdown": "Export as Markdown",
     "export_markdown_with_reasoning": "Export as Markdown (with reasoning)",
+    "select_for_export": "Select this message for export",
+    "export_failed": "Export failed: {{message}}",
     "prompt_tokens_with_cache": "{{promptTokens}} tokens ({{cachedTokens}} cached)",
     "prompt_tokens": "{{promptTokens}} tokens",
     "completion_tokens": "{{completionTokens}} tokens",

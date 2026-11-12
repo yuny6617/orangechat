@@ -9,6 +9,7 @@ package me.rerere.rikkahub.plugin.di
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.service.MemoryBankService
 import me.rerere.rikkahub.plugin.loader.PluginLoader
+import me.rerere.rikkahub.plugin.localtasks.LocalTaskHosts
 import me.rerere.rikkahub.plugin.manager.PluginManager
 import me.rerere.rikkahub.plugin.provider.PluginImageResults
 import me.rerere.rikkahub.plugin.provider.PluginChatImages
@@ -35,7 +36,13 @@ val pluginModule = module {
     single { PluginLoader(androidContext(), get<OkHttpClient>(), get<MemoryBankService>(), get<SettingsStore>()) }
 
     // Manager
-    single { PluginManager(androidContext(), get(), get(), get(), get(), get()) }
+    single {
+        PluginManager(
+            androidContext(), get(), get(), get(), get(), get(),
+            stopActiveTasks = { pluginId -> LocalTaskHosts.peek(pluginId)?.stopAll() ?: 0 },
+            releaseActiveTasks = { pluginId -> LocalTaskHosts.release(pluginId) },
+        )
+    }
 
     // Provider - 需要PluginManager来确保插件已初始化
     single { PluginImageResults(androidContext(), get<me.rerere.rikkahub.data.files.FilesManager>()) }
@@ -43,5 +50,5 @@ val pluginModule = module {
     single { PluginToolProvider(get(), get(), get(), get()) }
 
     // ViewModel
-    viewModel { PluginViewModel(get()) }
+    viewModel { PluginViewModel(get(), get(), androidContext()) }
 }

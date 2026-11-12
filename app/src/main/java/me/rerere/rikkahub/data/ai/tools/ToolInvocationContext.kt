@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -27,18 +27,22 @@ package me.rerere.rikkahub.data.ai.tools
  *  - [isHeadless]: true when the dispatch is happening from a system flow rather than the
  *    user typing in a chat. Sub-agents, cron jobs, workflows, and external-automation
  *    runs all set this to true so the recursion guard fires.
- *  - [modelCanSeeImages]: true iff the model handling this turn has image input in its
- *    modalities. `show_image` reads this so a text-only model is told plainly it cannot
- *    see the picture (and must OCR / file-process it) instead of being handed dimensions
- *    that read like "I looked at it" — the root cause of confabulated image descriptions.
- *    Defaults to `true`: the no-knowledge fallback preserves the pre-fix behaviour, and
- *    ChatService (the only LLM-driven dispatch path) always sets it explicitly.
+ *  - [modelCanSeeImages]: true iff the model handling this turn — after provider + conversation
+ *    overrides have been resolved — has image input in its modalities. The LocalMoments image
+ *    tools read this before attaching image bytes: a text-only model gets metadata plus a
+ *    `model_cannot_see_images` denial instead of pixels it would confabulate about.
+ *    Defaults to `false` (conservative): a caller that does not know which model actually runs
+ *    this turn must not claim image vision. ChatService, the only LLM-driven interactive
+ *    dispatch path, always computes it explicitly from `settings.getChatModelOf(conversation)`,
+ *    so a conversation-level model override is honoured. Headless callers (workflow / sub-agent)
+ *    keep the false default; image bytes stay denied rather than being handed to a model that
+ *    may not understand them.
  */
 data class ToolInvocationContext(
     val callerAssistantId: String? = null,
     val callerConversationId: String? = null,
     val isHeadless: Boolean = false,
-    val modelCanSeeImages: Boolean = true,
+    val modelCanSeeImages: Boolean = false,
 ) {
     companion object {
         /** No-knowledge fallback. Factories that depend on context MUST handle this. */

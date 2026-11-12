@@ -44,7 +44,7 @@ class ProactiveMessageWorker(
             setting: me.rerere.rikkahub.data.datastore.ProactiveMessageSetting,
             triggerTime: Long,
         ) {
-            if (!setting.enabled) {
+            if (!setting.enabled || setting.globalPolicy.paused) {
                 cancel(context)
                 return
             }
@@ -104,7 +104,7 @@ class ProactiveMessageWorker(
         val settings = settingsStore.settingsFlow.first()
         val proactiveSetting = settings.proactiveMessageSetting
 
-        if (!proactiveSetting.enabled) {
+        if (!proactiveSetting.enabled || proactiveSetting.globalPolicy.paused) {
             Log.d(TAG, "Proactive message disabled, skipping")
             return Result.success()
         }

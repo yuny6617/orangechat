@@ -61,6 +61,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -121,6 +122,10 @@ import me.rerere.rikkahub.ui.hooks.rememberIsPlayStoreVersion
 import me.rerere.rikkahub.ui.hooks.useEditState
 import me.rerere.rikkahub.ui.modifier.onClick
 import me.rerere.rikkahub.ui.theme.LocalMaterialMode
+import me.rerere.rikkahub.ui.theme.LocalPackageSurfaceTokens
+import me.rerere.rikkahub.ui.theme.cardBorderStrokeColor
+import me.rerere.rikkahub.ui.theme.packageCardBackground
+import me.rerere.rikkahub.ui.theme.packageSelectedColor
 import me.rerere.rikkahub.utils.navigateToChatPage
 import me.rerere.rikkahub.utils.toDp
 import org.koin.androidx.compose.koinViewModel
@@ -202,6 +207,8 @@ fun ChatDrawerContent(
 
     val drawerSurfaceAlpha =
         (settings.displaySetting.drawerSurfaceOpacity / 100f).coerceIn(0.6f, 1f)
+    // 包主题扩展 surface：仅在实际由包配色驱动时非空，其余情况保持原有 Material 回退。
+    val packageSurfaces = LocalPackageSurfaceTokens.current
     // GLASS + 界面实时渲染 + API 31+：Drawer 容器透明，透出 ChatPage 同宿主原生模糊层；否则静态回退
     val useLiveDrawerGlass =
         settings.displaySetting.interfaceRealtimeRendering &&
@@ -218,10 +225,25 @@ fun ChatDrawerContent(
     val drawerModifier = Modifier
         .width(300.dp)
         .then(
+            // 包主题用包自己的阴影色给 Drawer 面板投影，其他主题不加投影
+            if (packageSurfaces != null) {
+                Modifier.shadow(
+                    elevation = 10.dp,
+                    shape = drawerShape,
+                    clip = false,
+                    ambientColor = packageSurfaces.shadow,
+                    spotColor = packageSurfaces.shadow,
+                )
+            } else {
+                Modifier
+            }
+        )
+        .then(
             if (showDrawerBorder) {
                 Modifier.border(
                     width = 1.dp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
+                    color = packageSurfaces?.cardBorderStrokeColor()
+                        ?: MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f),
                     shape = drawerShape,
                 )
             } else {
@@ -232,6 +254,8 @@ fun ChatDrawerContent(
     ModalDrawerSheet(
         modifier = drawerModifier,
         drawerShape = drawerShape,
+        // 容器仍用主题 surfaceContainerLow（包主题已映射到自己的色板），
+        // 条目的 cardBackground 因此与面板拉开层次；背景图与显式 opacity 逻辑不变。
         drawerContainerColor = if (useLiveDrawerGlass) {
             // 实时玻璃：保留克制的最低半透明主题底色（不遮死 ChatPage 高斯模糊），
             // 确保即使模糊副本绘制失败，Drawer 也不会全透明
@@ -922,19 +946,35 @@ private fun DrawerItemSurface(
     color: Color,
     drawerItemAlpha: Float,
     materialMode: DisplayMaterialMode,
+    // 包主题下是否用包 cardBackground 取代调用方传入的容器色；
+    // 强调色圆形入口（primaryContainer）保留自己的颜色。
+    usePackageSurface: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    val packageSurfaces = LocalPackageSurfaceTokens.current
     val contentColor = MaterialTheme.colorScheme.onSurface
+    val baseColor = if (usePackageSurface) {
+        packageCardBackground(color)
+    } else {
+        color
+    }
     val backgroundColor = when (materialMode) {
         DisplayMaterialMode.FLAT,
-        DisplayMaterialMode.FOLLOW_THEME -> color
+        DisplayMaterialMode.FOLLOW_THEME -> baseColor
 
         DisplayMaterialMode.TRANSLUCENT,
-        DisplayMaterialMode.GLASS -> color.copy(alpha = drawerItemAlpha)
+        DisplayMaterialMode.GLASS -> baseColor.copy(alpha = drawerItemAlpha)
     }
+    // 包边框本身已压低 alpha，再乘用户显式透明度，保证「显式用户 opacity 优先」
+    val packageBorder = packageSurfaces?.cardBorderStrokeColor()
+        ?.let { it.copy(alpha = it.alpha * drawerItemAlpha) }
     val borderColor = when (materialMode) {
-        DisplayMaterialMode.TRANSLUCENT -> contentColor.copy(alpha = 0.14f * drawerItemAlpha)
-        DisplayMaterialMode.GLASS -> contentColor.copy(alpha = 0.1f * drawerItemAlpha)
+        DisplayMaterialMode.TRANSLUCENT -> packageBorder
+            ?: contentColor.copy(alpha = 0.14f * drawerItemAlpha)
+
+        DisplayMaterialMode.GLASS -> packageBorder
+            ?: contentColor.copy(alpha = 0.1f * drawerItemAlpha)
+
         DisplayMaterialMode.FLAT,
         DisplayMaterialMode.FOLLOW_THEME -> Color.Transparent
     }
@@ -1036,6 +1076,7 @@ private fun DrawerAction(
             shape = CircleShape,
             drawerItemAlpha = drawerItemAlpha,
             materialMode = materialMode,
+            usePackageSurface = false,
         ) {
             Tooltip(tooltip = { label() }) {
                 Box(
@@ -1132,9 +1173,9 @@ private fun FolderChip(
     Surface(
         shape = CircleShape,
         color = if (selected) {
-            MaterialTheme.colorScheme.secondaryContainer
+            packageSelectedColor(MaterialTheme.colorScheme.secondaryContainer)
         } else {
-            MaterialTheme.colorScheme.surfaceContainerLow
+            packageCardBackground(MaterialTheme.colorScheme.surfaceContainerLow)
         },
         modifier = Modifier
             .clip(CircleShape)
@@ -1255,11 +1296,21 @@ private fun DrawerSectionButton(
     selected: Boolean,
     onClick: () -> Unit,
 ) {
+    val packageSurfaces = LocalPackageSurfaceTokens.current
+    val selectedContainer = packageSelectedColor(
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+    )
+    // 包 selected 是比较中性的底色，选中文字改用 onSurface 保证对比度
+    val labelColor = when {
+        selected && packageSurfaces != null -> MaterialTheme.colorScheme.onSurface
+        selected -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(18.dp),
         color = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+            selectedContainer
         } else {
             Color.Transparent
         },
@@ -1267,8 +1318,7 @@ private fun DrawerSectionButton(
         Text(
             text = label,
             style = MaterialTheme.typography.titleMedium,
-            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
-            else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = labelColor,
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
         )
     }
@@ -1311,7 +1361,8 @@ private fun DrawerPluginShortcuts(
                     .fillMaxWidth()
                     .alpha(drawerItemAlpha),
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.78f),
+                color = packageCardBackground(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .copy(alpha = 0.78f),
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),

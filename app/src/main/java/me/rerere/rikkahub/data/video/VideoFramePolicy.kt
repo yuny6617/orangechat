@@ -12,14 +12,24 @@ import kotlinx.serialization.Serializable
 /**
  * 自动抓帧频率。
  *
- * 只有 [EVERY_REPLY] 会在每一轮发送前抓一帧；[EVERY_30S] / [EVERY_60S] 只刷新"待发送帧"，
- * 不会自己发起请求，也不会自己发消息。定时抓到的帧同样只活在内存里。
+ * [CONTINUOUS_SEQUENCE] 是新安装/未保存过该字段时的默认值：通话中约每秒采一帧，
+ * 每轮发送最近 1..9 帧拼成的一张图。
+ *
+ * [EVERY_REPLY] 是**旧设置的兼容项**，不是新默认：已经保存为 `every_reply` 的用户
+ * 不会被迁移成新枚举，仍然保留原来的每轮 1 Hz 滚动序列语义。
+ * [EVERY_30S] / [EVERY_60S] 只刷新"待发送帧"，不会持续采样，不会自己发起请求，
+ * 也不会自己发消息。定时抓到的帧同样只活在内存里。
  */
 @Serializable
 enum class VideoFrameCaptureMode {
     @SerialName("off")
     OFF,
 
+    /** 连续画面（每秒）：1 Hz 滚动采样，每轮拼图。 */
+    @SerialName("continuous_sequence")
+    CONTINUOUS_SEQUENCE,
+
+    /** 旧设置兼容项：已保存的 `every_reply` 原样保留，不迁移、不暗改。 */
     @SerialName("every_reply")
     EVERY_REPLY,
 
@@ -31,18 +41,32 @@ enum class VideoFrameCaptureMode {
 
     val intervalMillis: Long?
         get() = when (this) {
-            OFF, EVERY_REPLY -> null
+            OFF, CONTINUOUS_SEQUENCE, EVERY_REPLY -> null
             EVERY_30S -> 30_000L
             EVERY_60S -> 60_000L
         }
 
+    /** 只有 30/60 秒模式由面板定时器刷新待发送帧；连续模式走通话内的 1 Hz 采样。 */
     val timerDriven: Boolean
         get() = intervalMillis != null
+
+    /**
+     * 通话中是否使用 1 Hz 滚动序列。
+     *
+     * [EVERY_REPLY] 保留此行为，是为了让已保存的旧枚举保持原来的语义；
+     * 新默认是显式的 [CONTINUOUS_SEQUENCE]。
+     */
+    val sequenceDriven: Boolean
+        get() = when (this) {
+            CONTINUOUS_SEQUENCE, EVERY_REPLY -> true
+            OFF, EVERY_30S, EVERY_60S -> false
+        }
 
     val displayName: String
         get() = when (this) {
             OFF -> "关闭"
-            EVERY_REPLY -> "每轮一帧"
+            CONTINUOUS_SEQUENCE -> "连续画面（每秒）"
+            EVERY_REPLY -> "每轮一帧（旧设置）"
             EVERY_30S -> "每 30 秒"
             EVERY_60S -> "每 60 秒"
         }
@@ -92,8 +116,11 @@ object VideoFramePolicy {
     /** 单帧像素上限之外再兜一层，避免超大 sensor 输出把内存打满。 */
     const val MAX_CAPTURE_EDGE: Int = 1280
 
-    /** 每轮发送是否需要在发送前现场抓一帧。 */
-    fun captureOnTurn(mode: VideoFrameCaptureMode): Boolean = mode == VideoFrameCaptureMode.EVERY_REPLY
+    /**
+     * 这一轮是否由通话内的 1 Hz 滚动序列供帧
+     * （[VideoFrameCaptureMode.CONTINUOUS_SEQUENCE] 或旧 [VideoFrameCaptureMode.EVERY_REPLY]）。
+     */
+    fun captureOnTurn(mode: VideoFrameCaptureMode): Boolean = mode.sequenceDriven
 
     /** 等比缩放，最长边不超过 maxEdge。 */
     fun fit(srcWidth: Int, srcHeight: Int, maxEdge: Int): PixelSize {

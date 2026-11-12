@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -43,6 +43,7 @@ import me.rerere.rikkahub.data.service.DeviceEventAiTriggerService
 import me.rerere.rikkahub.data.service.ProactiveMessageService
 import me.rerere.rikkahub.data.sync.DatabaseBackupCoordinator
 import me.rerere.rikkahub.data.sync.BackupRestoreTransaction
+import me.rerere.rikkahub.data.sync.PluginRestoreStartupRecovery
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
@@ -78,11 +79,28 @@ class RikkaHubApp : Application() {
         me.rerere.ai.util.RequestImageEncoding.configure(java.io.File(cacheDir, "request-images-v1"))
         me.rerere.rikkahub.data.sync.StartupRecoveryDiagnostics.beginLaunch(this)
         // Must precede Room and DataStore creation. Failed recovery must not open mixed app data.
-        BackupRestoreTransaction.recoverBeforeStartup(dataDir)?.let {
+        val fileRecovery = BackupRestoreTransaction.recoverBeforeStartupWithOutcome(dataDir) { committed ->
+            PluginRestoreStartupRecovery.recordStartupDecision(filesDir, committed)
+        }
+        fileRecovery.error?.let {
             Log.e(TAG, "Backup activation failed; original files and preferences recovered", it)
         }
-        runCatching { DatabaseBackupCoordinator.applyPendingRestore(this) }
+        fileRecovery.decisionError?.let {
+            Log.e(TAG, "Unable to record plugin restore startup decision; journal kept for retry", it)
+        }
+        val databaseRestoreFailure = runCatching { DatabaseBackupCoordinator.applyPendingRestore(this) }
             .onFailure { Log.e(TAG, "Failed to apply pending database restore", it) }
+            .exceptionOrNull()
+        // The file/settings/database step above decides the outcome; the logical plugin data (and its
+        // native localtasks state) is committed or restored only after that verdict is durable.
+        PluginRestoreStartupRecovery.recover(
+            context = this,
+            filesDir = filesDir,
+            outcome = fileRecovery.outcome,
+            databaseRestoreFailure = databaseRestoreFailure,
+        )?.let {
+            Log.e(TAG, "Plugin restore recovery failed; rollback snapshots kept for the next launch", it)
+        }
         // Capture startup failures too, and configure large-row reads before opening Room.
         CrashHandler.install(this)
         DatabaseUtil.setCursorWindowSize(32 * 1024 * 1024)

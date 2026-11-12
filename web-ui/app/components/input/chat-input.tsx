@@ -55,6 +55,7 @@ export interface ChatInputProps {
   onCancelEdit?: () => void;
   onSuggestionClick?: (suggestion: string) => void;
   onExportConversation?: (includeReasoning: boolean) => void;
+  exportSelectionCount?: number;
   className?: string;
 }
 
@@ -190,6 +191,7 @@ function ChatInputInner({
   onCancelEdit,
   onSuggestionClick,
   onExportConversation,
+  exportSelectionCount = 0,
   className,
 }: ChatInputProps) {
   const { t } = useTranslation("input");
@@ -683,7 +685,9 @@ function ChatInputInner({
                       }}
                     >
                       <FileDown className="size-4" />
-                      {t("chat.export_conversation")}
+                      {exportSelectionCount > 0
+                        ? t("chat.export_selected", { count: exportSelectionCount })
+                        : t("chat.export_conversation")}
                     </DropdownMenuItem>
                   )}
                   {onExportConversation && (
@@ -693,7 +697,11 @@ function ChatInputInner({
                       }}
                     >
                       <FileDown className="size-4" />
-                      {t("chat.export_conversation_with_reasoning")}
+                      {exportSelectionCount > 0
+                        ? t("chat.export_selected_with_reasoning", {
+                            count: exportSelectionCount,
+                          })
+                        : t("chat.export_conversation_with_reasoning")}
                     </DropdownMenuItem>
                   )}
                 </DropdownMenuContent>

@@ -31,7 +31,9 @@ import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.dokar.sonner.ToastType
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ui.CardGroup
 import me.rerere.rikkahub.ui.components.ui.StickyHeader
@@ -54,6 +56,7 @@ fun ImportExportTab(
     val resources = LocalResources.current
     var isExporting by remember { mutableStateOf(false) }
     var isRestoring by remember { mutableStateOf(false) }
+    var restoreLocalTaskSettings by remember { mutableStateOf(false) }
 
     // 导入类型：local 为本地备份，chatbox 为 Chatbox 导入，cherry 为 Cherry Studio 导入
     var importType by remember { mutableStateOf("local") }
@@ -68,16 +71,21 @@ fun ImportExportTab(
                 runCatching {
                     // 导出文件
                     val exportFile = vm.exportToFile()
-
-                    // 复制到用户选择的位置
-                    context.contentResolver.openOutputStream(targetUri)?.use { outputStream ->
-                        FileInputStream(exportFile).use { inputStream ->
-                            inputStream.copyTo(outputStream)
+                    try {
+                        // 复制到用户选择的位置；备份可能很大，不能在主线程复制
+                        withContext(Dispatchers.IO) {
+                            val outputStream = context.contentResolver.openOutputStream(targetUri)
+                                ?: error("无法写入所选位置")
+                            outputStream.use { output ->
+                                FileInputStream(exportFile).use { inputStream ->
+                                    inputStream.copyTo(output)
+                                }
+                            }
                         }
+                    } finally {
+                        // 清理临时文件，失败时也不残留
+                        exportFile.delete()
                     }
-
-                    // 清理临时文件
-                    exportFile.delete()
 
                     toaster.show(
                         resources.getString(R.string.backup_page_backup_success),
@@ -116,7 +124,7 @@ fun ImportExportTab(
                             }
 
                             // 从临时文件恢复
-                            vm.restoreFromLocalFile(tempFile)
+                            vm.restoreFromLocalFile(tempFile, restoreLocalTaskSettings)
 
                             // 清理临时文件
                             tempFile.delete()
@@ -182,6 +190,19 @@ fun ImportExportTab(
         contentPadding = PaddingValues(16.dp)
     ) {
         item { ChatHistoryBackupCard() }
+        item {
+            androidx.compose.material3.ListItem(
+                headlineContent = { Text("恢复朋友圈助手互动设置") },
+                supportingContent = { Text("仅用于本地完整备份；默认关闭。恢复后只保留仍存在的助手，旧任务不会重跑，原生授权不会随备份导入。") },
+                trailingContent = {
+                    androidx.compose.material3.Switch(
+                        checked = restoreLocalTaskSettings,
+                        enabled = !isRestoring,
+                        onCheckedChange = { restoreLocalTaskSettings = it },
+                    )
+                },
+            )
+        }
         stickyHeader {
             StickyHeader {
                 Text(stringResource(R.string.backup_page_local_backup_export))

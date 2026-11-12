@@ -19,11 +19,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -34,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -60,6 +64,9 @@ import me.rerere.hugeicons.stroke.PlusSign
 import me.rerere.hugeicons.stroke.Reload
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.plugin.loader.PluginNetworkPolicy
+import me.rerere.rikkahub.plugin.manager.PluginUninstallDataPolicy
+import me.rerere.rikkahub.plugin.manager.PluginUninstallPolicyRelay
+import me.rerere.rikkahub.plugin.manager.declaresLocalData
 import me.rerere.rikkahub.plugin.model.PluginFolder
 import me.rerere.rikkahub.plugin.model.PluginInfo
 import me.rerere.rikkahub.ui.components.ui.RiskConfirmDialog
@@ -83,6 +90,7 @@ fun PluginManagePage(
     val importState by viewModel.importState.collectAsState()
     val operationState by viewModel.operationState.collectAsState()
     val pendingImport by viewModel.pendingImport.collectAsState()
+    val pendingTheme by viewModel.pendingTheme.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var showCreateFolderDialog by remember { mutableStateOf(false) }
@@ -95,10 +103,28 @@ fun PluginManagePage(
         uri?.let { viewModel.previewPlugin(it) }
     }
 
+    // SAF export offered directly from the uninstall dialog, before any localdata is removed.
+    var backupExportPluginId by remember { mutableStateOf<String?>(null) }
+    val backupExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip")
+    ) { uri ->
+        val pluginId = backupExportPluginId
+        backupExportPluginId = null
+        if (uri != null && pluginId != null) {
+            viewModel.exportLocalDataBackup(pluginId, uri)
+        }
+    }
+
     LaunchedEffect(importState) {
         when (importState) {
             is PluginViewModel.ImportState.Success -> {
                 snackbarHostState.showSnackbar(message = "插件导入成功")
+                viewModel.resetImportState()
+            }
+            is PluginViewModel.ImportState.ThemeInstalled -> {
+                snackbarHostState.showSnackbar(
+                    message = "主题包已应用：${(importState as PluginViewModel.ImportState.ThemeInstalled).themeName}",
+                )
                 viewModel.resetImportState()
             }
             is PluginViewModel.ImportState.Error -> {
@@ -183,11 +209,22 @@ fun PluginManagePage(
         )
     }
 
+    pendingTheme?.let { pack ->
+        PluginThemeImportDialog(
+            themePackage = pack,
+            onApply = { themeId -> viewModel.applyPendingTheme(themeId) },
+            onDismiss = { viewModel.cancelThemePreview() },
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("插件管理") },
                 actions = {
+                    TextButton(onClick = { filePickerLauncher.launch("application/zip") }) {
+                        Text("导入")
+                    }
                     IconButton(onClick = { viewModel.refreshPlugins() }) {
                         Icon(imageVector = HugeIcons.Reload, contentDescription = "刷新")
                     }
@@ -221,7 +258,15 @@ fun PluginManagePage(
                     onTogglePlugin = { plugin, enabled ->
                         viewModel.togglePlugin(plugin.manifest.id, enabled)
                     },
-                    onDeletePlugin = { plugin -> viewModel.deletePlugin(plugin.manifest.id) },
+                    onDeletePlugin = { plugin, policy ->
+                        viewModel.deletePlugin(plugin.manifest.id, policy)
+                    },
+                    onExportBackup = { plugin ->
+                        backupExportPluginId = plugin.manifest.id
+                        runCatching {
+                            backupExportLauncher.launch("${plugin.manifest.id}-localdata.zip")
+                        }.onFailure { backupExportPluginId = null }
+                    },
                     onImportPlugin = { filePickerLauncher.launch("application/zip") }
                 )
             }
@@ -298,7 +343,8 @@ private fun PluginFolderContent(
     onFolderLongClick: (PluginFolder) -> Unit,
     onPluginClick: (PluginInfo) -> Unit,
     onTogglePlugin: (PluginInfo, Boolean) -> Unit,
-    onDeletePlugin: (PluginInfo) -> Unit,
+    onDeletePlugin: (PluginInfo, PluginUninstallDataPolicy) -> Unit,
+    onExportBackup: (PluginInfo) -> Unit,
     onImportPlugin: () -> Unit
 ) {
     LazyColumn(
@@ -404,7 +450,11 @@ private fun PluginFolderContent(
                 plugin = plugin,
                 onClick = { onPluginClick(plugin) },
                 onToggle = { enabled -> onTogglePlugin(plugin, enabled) },
-                onDelete = { onDeletePlugin(plugin) }
+                onDelete = { onDeletePlugin(plugin, PluginUninstallDataPolicy.PRESERVE_LOCAL_DATA) },
+                uninstallActions = PluginUninstallActions(
+                    onConfirm = { policy -> onDeletePlugin(plugin, policy) },
+                    onExportBackup = { onExportBackup(plugin) }
+                )
             )
         }
     }
@@ -457,12 +507,18 @@ private fun FolderCard(
     }
 }
 
+internal data class PluginUninstallActions(
+    val onConfirm: (PluginUninstallDataPolicy) -> Unit,
+    val onExportBackup: () -> Unit
+)
+
 @Composable
 internal fun PluginCard(
     plugin: PluginInfo,
     onClick: () -> Unit,
     onToggle: (Boolean) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    uninstallActions: PluginUninstallActions? = null
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
@@ -522,19 +578,146 @@ internal fun PluginCard(
     }
 
     if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("确认删除") },
-            text = { Text("确定要删除插件 \"${plugin.manifest.name}\" 吗？此操作不可撤销。") },
-            confirmButton = {
-                TextButton(onClick = { onDelete(); showDeleteConfirm = false }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
+        if (plugin.declaresLocalData()) {
+            PluginLocalDataUninstallDialog(
+                plugin = plugin,
+                onDismiss = { showDeleteConfirm = false },
+                onConfirm = { policy ->
+                    if (uninstallActions != null) {
+                        uninstallActions.onConfirm(policy)
+                    } else {
+                        // Folder page still calls deletePlugin(id); stage the choice for it.
+                        PluginUninstallPolicyRelay.stage(plugin.manifest.id, policy)
+                        onDelete()
+                    }
+                    showDeleteConfirm = false
+                },
+                onExportBackup = uninstallActions?.onExportBackup
+            )
+        } else {
+            // Plugins without localdata keep the original uninstall dialog/semantics.
+            AlertDialog(
+                onDismissRequest = { showDeleteConfirm = false },
+                title = { Text("确认删除") },
+                text = { Text("确定要删除插件 \"${plugin.manifest.name}\" 吗？此操作不可撤销。") },
+                confirmButton = {
+                    TextButton(onClick = { onDelete(); showDeleteConfirm = false }) {
+                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("取消") }
+            )
+        }
+    }
+}
+
+/**
+ * Native uninstall dialog for plugins that own a localdata database/media root.
+ *
+ * Keeping the data is the preselected choice so a reinstall resumes the moments feed. Deleting it
+ * is an explicit opt-in, and the user can export a native SAF backup before deciding either way.
+ */
+@Composable
+private fun PluginLocalDataUninstallDialog(
+    plugin: PluginInfo,
+    onDismiss: () -> Unit,
+    onConfirm: (PluginUninstallDataPolicy) -> Unit,
+    onExportBackup: (() -> Unit)?
+) {
+    var policy by remember(plugin.manifest.id) {
+        mutableStateOf(PluginUninstallDataPolicy.PRESERVE_LOCAL_DATA)
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("卸载「${plugin.manifest.name}」") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("插件文件会被删除，此操作不可撤销。")
+                Text("本地数据", style = MaterialTheme.typography.titleSmall)
+                LocalDataPolicyRow(
+                    selected = policy == PluginUninstallDataPolicy.PRESERVE_LOCAL_DATA,
+                    title = "保留本地数据（推荐）",
+                    description = "动态、评论、草稿与图片仍保存在本机；重新安装同一插件后可以继续使用。",
+                    onSelect = { policy = PluginUninstallDataPolicy.PRESERVE_LOCAL_DATA }
+                )
+                LocalDataPolicyRow(
+                    selected = policy == PluginUninstallDataPolicy.DELETE_LOCAL_DATA,
+                    title = "同时删除本地数据",
+                    description = "永久删除该插件的动态、评论、草稿与图片，无法恢复。",
+                    onSelect = { policy = PluginUninstallDataPolicy.DELETE_LOCAL_DATA }
+                )
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("卸载前先导出备份", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (onExportBackup != null) {
+                                "建议先在插件提供的备份入口导出数据；也可以直接在这里选择导出位置。"
+                            } else {
+                                "建议先在插件提供的备份入口导出数据。"
+                            },
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (onExportBackup != null) {
+                            TextButton(onClick = onExportBackup) {
+                                Text("导出备份文件…")
+                            }
+                        }
+                    }
+                }
             }
-        )
+        },
+        confirmButton = {
+            val deleting = policy == PluginUninstallDataPolicy.DELETE_LOCAL_DATA
+            TextButton(onClick = { onConfirm(policy) }) {
+                Text(
+                    text = if (deleting) "卸载并删除数据" else "卸载并保留数据",
+                    color = if (deleting) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun LocalDataPolicyRow(
+    selected: Boolean,
+    title: String,
+    description: String,
+    onSelect: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        RadioButton(selected = selected, onClick = onSelect)
+        Column(modifier = Modifier.padding(start = 8.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 

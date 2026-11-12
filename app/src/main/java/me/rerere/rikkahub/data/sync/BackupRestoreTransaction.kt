@@ -8,6 +8,20 @@ import java.io.FileOutputStream
 import java.util.UUID
 
 /**
+ * What startup recovery did with a prepared restore journal. Callers use this to bring the logical
+ * plugin data to the same side of the commit: [COMMITTED] keeps the restored files/database,
+ * [ROLLED_BACK] means the previous state is live again, and [NONE] means nothing was pending.
+ */
+internal enum class BackupRestoreStartupOutcome { NONE, COMMITTED, ROLLED_BACK }
+
+internal data class BackupRestoreStartupResult(
+    val outcome: BackupRestoreStartupOutcome,
+    val error: Throwable? = null,
+    /** The plugin journal verdict could not be persisted; the transaction journal is kept. */
+    val decisionError: Throwable? = null,
+)
+
+/**
  * Recoverable file replacement journal. Paths are relative to the private app data directory.
  * Preferences are changed through DataStore while running; raw snapshots are used only before
  * DataStore opens on process startup. Database files are installed only on that startup.
@@ -34,6 +48,11 @@ internal class BackupRestoreTransaction(private val root: File) {
         check(!directory.exists()) { "A previous restore needs an app restart before another restore" }
         check(!File(root, "files/pending_database_restore/.ready").exists()) {
             "An earlier database restore needs an app restart"
+        }
+        // A logical plugin restore that is waiting for this transaction would be corrupted if a new
+        // attempt created a second set of rollback snapshots next to it.
+        check(!PluginRestoreStartupRecovery.hasPending(File(root, "files"))) {
+            "A previous plugin restore needs an app restart before another restore"
         }
         check(staging.mkdirs()) { "Unable to create restore staging directory" }
     }
@@ -176,34 +195,88 @@ internal class BackupRestoreTransaction(private val root: File) {
 
         /** Call before Room, Koin and either DataStore can open files. Returns an activation error only
          * after rollback has succeeded; a recovery failure throws so startup cannot use mixed data. */
-        fun recoverBeforeStartup(root: File): Throwable? {
+        fun recoverBeforeStartup(root: File): Throwable? =
+            recoverBeforeStartupWithOutcome(root).error
+
+        /**
+         * Same recovery as [recoverBeforeStartup], but reports which side of the commit is now live.
+         *
+         * [onDecision] runs after the file/database verdict is durable and before this transaction
+         * journal is retired, so a caller that owns another journal (the logical plugin rollback)
+         * can persist the same verdict. If the process dies after [onDecision] but before its own
+         * recovery, the next launch still knows whether to commit or roll back the plugin data.
+         * When [onDecision] reports a failure, this journal is deliberately kept so the verdict is
+         * retried by the next launch instead of being lost.
+         */
+        fun recoverBeforeStartupWithOutcome(
+            root: File,
+            onDecision: ((Boolean) -> Throwable?)? = null,
+        ): BackupRestoreStartupResult {
             val transaction = BackupRestoreTransaction(root)
             val directory = transaction.directory
-            if (!directory.exists()) return null
+            var decisionError: Throwable? = null
+            fun recordDecision(committed: Boolean) {
+                if (onDecision == null) return
+                decisionError = try {
+                    onDecision(committed)
+                } catch (error: Throwable) {
+                    error
+                }
+            }
+            fun retire() {
+                // A failed verdict write must keep the journal so the next launch retries it.
+                if (decisionError == null) transaction.cleanup()
+            }
+            if (!directory.exists()) return BackupRestoreStartupResult(BackupRestoreStartupOutcome.NONE)
             if (File(directory, COMMITTED).isFile || !File(directory, APPLYING).isFile) {
-                transaction.cleanup()
-                return null
+                val committed = File(directory, COMMITTED).isFile
+                if (committed) {
+                    recordDecision(true)
+                    retire()
+                } else {
+                    transaction.cleanup()
+                }
+                return BackupRestoreStartupResult(
+                    if (committed) BackupRestoreStartupOutcome.COMMITTED
+                    else BackupRestoreStartupOutcome.NONE,
+                    decisionError = decisionError,
+                )
             }
             val targets = transaction.readJournal().targets
             if (File(directory, READY).isFile && !File(directory, ROLLING_BACK).isFile) {
                 try {
                     transaction.install(targets.filter { it.database }, File::renameTo)
-                    transaction.commit()
-                    return null
+                    writeDurably(File(directory, COMMITTED), "committed")
                 } catch (error: Throwable) {
                     transaction.beginRollback()
                     try { transaction.rollback(targets) } catch (recovery: Throwable) {
                         recovery.addSuppressed(error)
                         throw recovery
                     }
-                    transaction.cleanup()
-                    return error
+                    recordDecision(false)
+                    retire()
+                    return BackupRestoreStartupResult(
+                        BackupRestoreStartupOutcome.ROLLED_BACK,
+                        error,
+                        decisionError,
+                    )
                 }
+                recordDecision(true)
+                // Cleanup failure must not turn a successfully activated restore into a failure.
+                if (decisionError == null) runCatching { transaction.cleanup() }
+                return BackupRestoreStartupResult(
+                    BackupRestoreStartupOutcome.COMMITTED,
+                    decisionError = decisionError,
+                )
             }
             transaction.beginRollback()
             transaction.rollback(targets)
-            transaction.cleanup()
-            return null
+            recordDecision(false)
+            retire()
+            return BackupRestoreStartupResult(
+                BackupRestoreStartupOutcome.ROLLED_BACK,
+                decisionError = decisionError,
+            )
         }
     }
 }

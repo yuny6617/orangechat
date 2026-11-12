@@ -158,4 +158,50 @@ class ProactiveMessageStateTest {
         assertTrue(decision.shouldSend)
         assertEquals("我还是问问你，在忙吗？", decision.message)
     }
+
+    @Test
+    fun `empty and followup-limited checks use the durable four-hour slot`() {
+        assertEquals(240, proactiveNoGenerationSlotMinutes())
+        val now = 2_000_000L
+        val due = now + proactiveNoGenerationSlotMinutes() * 60_000L
+        assertEquals(240, durableSlotRemainingMinutes(due, now))
+        // Rounds up: a one-millisecond-late scheduler still waits a full minute, never early.
+        assertEquals(240, durableSlotRemainingMinutes(due, now + 1))
+    }
+
+    @Test
+    fun `durable decision slot overrides random interval and expires once due`() {
+        val now = 1_000_000L
+        val due = now + 45 * 60_000L
+        assertEquals(45, durableSlotRemainingMinutes(due, now))
+        assertEquals(1, durableSlotRemainingMinutes(due, due - 1))
+        assertEquals(null, durableSlotRemainingMinutes(due, due))
+        assertEquals(null, durableSlotRemainingMinutes(due, due + 1))
+    }
+
+    @Test
+    fun `durable decision slot is bounded to one week`() {
+        val now = 1_000_000L
+        assertEquals(ProactiveMessageService.MAX_DURABLE_SLOT_MINUTES,
+            durableSlotRemainingMinutes(now + 30L * 24 * 60 * 60_000, now))
+        assertEquals(ProactiveMessageService.MAX_DURABLE_SLOT_MINUTES,
+            durableSlotRemainingMinutes(Long.MAX_VALUE, 0L))
+    }
+
+    @Test
+    fun `recovered commit IDs are recorded once without changing a new anchor followup count`() {
+        val old = ProactiveSessionState(anchorUserMessageId = "old", followUpCount = 1)
+        val (recorded, changed) = recordProactiveCommitOnce(old, "old", listOf("id-1", "id-2"), "sent")
+        assertTrue(changed)
+        assertEquals(2, recorded.followUpCount)
+        assertEquals(setOf("id-1", "id-2"), recorded.recentProactiveMessageIds)
+        val (duplicate, changedAgain) = recordProactiveCommitOnce(recorded, "old", listOf("id-1", "id-2"), "sent")
+        assertFalse(changedAgain)
+        assertEquals(recorded, duplicate)
+        val newer = recorded.copy(anchorUserMessageId = "new", followUpCount = 0)
+        val (indexed, indexedChanged) = recordProactiveCommitOnce(newer, "old", listOf("id-1", "id-2"), "sent")
+        assertFalse(indexedChanged)
+        assertEquals(0, indexed.followUpCount)
+        assertEquals(setOf("id-1", "id-2"), indexed.recentProactiveMessageIds)
+    }
 }

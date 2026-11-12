@@ -57,7 +57,7 @@ class VideoCallPrivacyTest {
         assertFalse(VideoCallRuntime.isSnapshotPermitUsable(permit))
     }
 
-    @Test fun `preview mirror flips screen x after every calibration while jpeg text stays unmirrored`() {
+    @Test fun `preview mirror flips screen x after every calibration and jpeg honors the same switch`() {
         for (front in listOf(false, true)) for (calibration in listOf(0, 90, 180, 270)) {
             fun transform(mirror: Boolean) = VideoPreviewGeometry.textureViewTransform(
                 90, 0, front, 640, 480, 300, 500, calibration, mirror,
@@ -66,9 +66,11 @@ class VideoCallPrivacyTest {
             val flipped = transform(true).matrix.map(80f, 170f)
             assertEquals(300f - plain.x, flipped.x, .001f)
             assertEquals(plain.y, flipped.y, .001f)
-            // JPEG normalization is independent of preview: a horizontal text baseline stays left-to-right.
+            // The controller passes the same mirror choice into JPEG normalization.
             val jpeg = VideoPreviewGeometry.uprightImageAffine(0, false, 640, 480)
+            val mirroredJpeg = VideoPreviewGeometry.uprightImageAffine(0, true, 640, 480)
             assertTrue(jpeg.map(10f, 20f).x < jpeg.map(30f, 20f).x)
+            assertTrue(mirroredJpeg.map(10f, 20f).x > mirroredJpeg.map(30f, 20f).x)
         }
     }
 }

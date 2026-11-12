@@ -125,9 +125,15 @@ class VideoCallPromptsTest {
     @Test
     fun `capture mode notes describe what is actually attached`() {
         assertNotNull(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.EVERY_REPLY))
+        val continuous = VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.CONTINUOUS_SEQUENCE)!!
+        assertTrue(continuous.contains("连续画面"))
+        assertTrue(continuous.contains("每秒"))
         assertTrue(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.OFF)!!.contains("不会自动附带画面"))
         assertTrue(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.EVERY_30S)!!.contains("30"))
         assertTrue(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.EVERY_60S)!!.contains("60"))
+        // 30/60 秒必须明确说明"不持续采样"，不能让模型以为它们也在每秒抓帧。
+        assertTrue(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.EVERY_30S)!!.contains("不会持续采样"))
+        assertTrue(VideoCallPrompts.captureModeNote(VideoFrameCaptureMode.EVERY_60S)!!.contains("不会持续采样"))
     }
 
     @Test

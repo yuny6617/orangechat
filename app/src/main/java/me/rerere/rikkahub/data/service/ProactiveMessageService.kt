@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -74,6 +74,7 @@ import kotlinx.serialization.json.Json
 import me.rerere.rikkahub.CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.CHAT_LIVE_UPDATE_NOTIFICATION_CHANNEL_ID
 import me.rerere.rikkahub.data.datastore.ProactiveMessageSetting
+import me.rerere.rikkahub.data.datastore.effectivePromptOverride
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.findProvider
@@ -86,6 +87,8 @@ import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.video.cameraFreeRequests
+import me.rerere.rikkahub.data.video.withoutHistoricalCameraImages
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.service.generationMessageMutation
 import me.rerere.rikkahub.utils.sendNotification
@@ -108,22 +111,33 @@ class ProactiveMessageService {
 
         internal const val PREFS_NAME = "proactive_message_prefs"
         private const val KEY_NEXT_TRIGGER_TIME = "next_trigger_time"
+        private const val KEY_DURABLE_NEXT_SLOT = "durable_next_slot_ms"
+        internal const val MAX_DURABLE_SLOT_MINUTES = 7 * 24 * 60
 
         fun scheduleNext(
             context: Context,
             setting: ProactiveMessageSetting,
             delayMinutesOverride: Int? = null,
         ) {
-            if (!setting.enabled) {
+            ProactiveTaskExecutor.initialize(context)
+            if (!setting.enabled || setting.globalPolicy.paused) {
                 cancel(context)
                 return
             }
 
             val minMinutes = setting.minIntervalMinutes.coerceIn(1, Int.MAX_VALUE - 1)
             val maxMinutes = setting.maxIntervalMinutes.coerceIn(minMinutes, Int.MAX_VALUE - 1)
-            val delayMinutes = delayMinutesOverride?.coerceAtLeast(1)
-                ?: Random.nextInt(minMinutes, maxMinutes + 1)
             val now = System.currentTimeMillis()
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val durableSlot = prefs.getLong(KEY_DURABLE_NEXT_SLOT, 0L)
+            val explicitOverride = delayMinutesOverride?.coerceAtLeast(1)
+            val durableOverride = durableSlotRemainingMinutes(durableSlot, now)
+            val delayMinutes = explicitOverride ?: durableOverride ?: Random.nextInt(minMinutes, maxMinutes + 1)
+            if (durableSlot > 0L && durableSlot <= now) {
+                check(prefs.edit().remove(KEY_DURABLE_NEXT_SLOT).commit()) {
+                    "Could not consume proactive decision slot"
+                }
+            }
             val wakeupStore = ProactiveWakeupStore(context)
             if (!setting.allowAiScheduledWakeup) wakeupStore.clear()
             val appointment = nextProactiveWakeup(wakeupStore.all(), setting, now, java.time.ZoneId.systemDefault())
@@ -213,6 +227,24 @@ class ProactiveMessageService {
             ProactiveMessageWorker.scheduleNext(context, setting, triggerTime)
         }
 
+        internal fun persistDurableNextSlot(context: Context, nowMillis: Long, delayMinutes: Int): Boolean {
+            val boundedMinutes = delayMinutes.coerceIn(1, MAX_DURABLE_SLOT_MINUTES)
+            val dueAt = if (nowMillis > Long.MAX_VALUE - TimeUnit.MINUTES.toMillis(boundedMinutes.toLong())) {
+                Long.MAX_VALUE
+            } else nowMillis + TimeUnit.MINUTES.toMillis(boundedMinutes.toLong())
+            return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .putLong(KEY_DURABLE_NEXT_SLOT, dueAt)
+                .commit()
+        }
+
+        internal fun durableNextSlot(context: Context): Long? =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_DURABLE_NEXT_SLOT, 0L).takeIf { it > 0L }
+
+        internal fun clearDurableNextSlot(context: Context): Boolean =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                .remove(KEY_DURABLE_NEXT_SLOT).commit()
+
         fun getNextTriggerTime(context: Context): Long? {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val triggerTime = prefs.getLong(KEY_NEXT_TRIGGER_TIME, 0L)
@@ -220,6 +252,7 @@ class ProactiveMessageService {
         }
 
         fun cancel(context: Context) {
+            ProactiveTaskExecutor.cancel(context)
             // 清除保存的触发时间
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
@@ -273,9 +306,9 @@ class ProactiveMessageService {
         }
 
         fun triggerNow(context: Context, setting: ProactiveMessageSetting) {
-            // 先安排下一次（写入SP让UI立即显示），再立即触发
-            scheduleNext(context, setting)
-            // 立即触发：直接启动TriggerService
+            if (!setting.enabled || setting.globalPolicy.paused) return
+            // 手动触发优先保证"现在就跑"：不再先做一次 scheduleNext 的落盘/闹钟计算。
+            // 本次运行结束后，服务自己的 finally 会安排下一次。
             val serviceIntent = Intent(context, ProactiveMessageTriggerService::class.java).apply {
                 putExtra(EXTRA_TRIGGER_SOURCE, "manual")
                 putExtra(EXTRA_FORCE_TRIGGER, true)
@@ -298,6 +331,36 @@ class ProactiveMessageService {
         minutes >= 60 -> "${minutes / 60}小时${minutes % 60}分钟"
         else -> "${minutes.coerceAtLeast(0)}分钟"
     }
+}
+
+internal fun proactiveNoGenerationSlotMinutes(): Int = 240
+
+internal fun durableSlotRemainingMinutes(dueAtMillis: Long, nowMillis: Long): Int? {
+    if (dueAtMillis <= nowMillis) return null
+    val minute = TimeUnit.MINUTES.toMillis(1)
+    val maxMinutes = ProactiveMessageService.MAX_DURABLE_SLOT_MINUTES
+    val boundedDelay = (dueAtMillis - nowMillis).coerceAtMost(TimeUnit.MINUTES.toMillis(maxMinutes.toLong()))
+    return ((boundedDelay + minute - 1) / minute).coerceIn(1, maxMinutes.toLong()).toInt()
+}
+
+internal fun proactiveCommittedMessageIds(taskId: String, messageCount: Int): List<String> =
+    List(messageCount.coerceAtLeast(0)) { index -> proactiveCommitMessageId(taskId, index) }
+
+/**
+ * Keeps only visible text from previously committed proactive messages. Persisted IDs are the
+ * durable commit keys, not the streaming IDs allocated while generating.
+ */
+internal fun sanitizeProactiveHistory(
+    messages: List<UIMessage>,
+    proactiveMessageIds: Set<String>,
+    preserveReasoning: Boolean = false,
+): List<UIMessage> = messages.mapNotNull { message ->
+    if (preserveReasoning || message.role != MessageRole.ASSISTANT || message.id.toString() !in proactiveMessageIds) {
+        return@mapNotNull message
+    }
+    val text = message.parts.filterIsInstance<UIMessagePart.Text>()
+        .joinToString("\n") { it.text }.trim()
+    text.takeIf(String::isNotBlank)?.let { message.copy(parts = listOf(UIMessagePart.Text(it))) }
 }
 
 private fun UIMessage.visibleTextForProactiveContext(): String = parts
@@ -345,6 +408,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
     private val chatInteractionRepository: ChatInteractionRepository by inject()
     private val extraInfoCollector: ExtraInfoInjectionCollector by inject()
     private val proactiveMessageService = ProactiveMessageService()
+    private val executor by lazy { ProactiveTaskExecutor(this, settingsStore, conversationRepository, chatService) }
     private val activeRunCount = AtomicInteger(0)
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
@@ -353,6 +417,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
     companion object {
         private const val TAG = "ProactiveMessageTrigger"
         private const val MAX_TOOL_STEPS = 5 // 主动消息最大工具调用步数
+        private val PROACTIVE_DISALLOWED_PAID_TOOLS = setOf("generate_image")
         private const val MAX_PROACTIVE_CONTEXT_MESSAGES = 20
         private const val GENERATION_WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1000L
         // 外部触发（网关轮询）时跳过内部 minInterval 去重
@@ -414,766 +479,740 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
         activeRunCount.incrementAndGet()
         acquireGenerationWakeLock(startId)
         trace.event("wake_lock", "acquired=true")
+        val nextDelayOverride = java.util.concurrent.atomic.AtomicReference<Int?>(null)
 
         serviceScope.launch {
-            var conversationId: kotlin.uuid.Uuid? = null
-            var nextDelayOverrideMinutes: Int? = null
-            var outcome = "completed"
-            var failure: Throwable? = null
-            var selectedAppointment: ProactiveWakeup? = null
-            var appointmentMessageSaved = false
-            val runAssistantMessageIds = linkedSetOf<Uuid>()
-            val protectedMessageIds = linkedSetOf<Uuid>()
             try {
-                val baseSettings = settingsStore.settingsFlow.first()
-                val proactiveSetting = baseSettings.proactiveMessageSetting
-                trace.event("settings", "enabled=${proactiveSetting.enabled}")
+                executor.drain(triggerSource) { task ->
+                    kotlinx.coroutines.supervisorScope {
+                        launch {
+                            executor.bindJob(task)
+                            var conversationId: kotlin.uuid.Uuid? = null
+                            var outcome = "completed"
+                            var failure: Throwable? = null
+                            var selectedAppointment: ProactiveWakeup? = null
+                            var appointmentMessageSaved = false
+                            val runAssistantMessageIds = linkedSetOf<Uuid>()
+                            val protectedMessageIds = linkedSetOf<Uuid>()
+                            try {
+                                val baseSettings = settingsStore.settingsFlow.first()
+                                val proactiveSetting = baseSettings.proactiveMessageSetting
+                                trace.event("settings", "enabled=${proactiveSetting.enabled}")
 
-                if (!proactiveSetting.enabled) {
-                    outcome = "disabled"
-                    return@launch
-                }
-
-                // Only an explicit manual check may bypass quiet hours, never a gateway signal.
-                if (triggerSource != "manual" && !isProactiveActiveTime(
-                        proactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
-                    )
-                ) {
-                    outcome = "quiet_hours"
-                    return@launch
-                }
-
-                val wakeupStore = ProactiveWakeupStore(this@ProactiveMessageTriggerService)
-                fun consumeAppointment(value: ProactiveWakeup): Boolean = wakeupStore.consume(value).also {
-                    if (it) selectedAppointment = value
-                }
-                val appointment = if (triggerSource == "manual") null else nextProactiveWakeup(
-                    wakeupStore.all(), proactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
-                )
-                if (!canRunProactiveWakeup(
-                        appointment, proactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
-                        manual = triggerSource == "manual",
-                    )
-                ) {
-                    outcome = "waiting_for_appointment"
-                    return@launch
-                }
-                val prefs = getSharedPreferences(ProactiveMessageService.PREFS_NAME, Context.MODE_PRIVATE)
-
-                // 去重判断：防止 AlarmManager 和 WorkManager 在同一窗口内重复触发。
-                // 外部触发（网关轮询/激进模式设备事件）跳过此检查，因为这是独立信号源，不受内部闹钟链约束。
-                // 注意：isForceTrigger 跳过的是"时间间隔节流"（两回事），不跳过后面 tryClaimGeneration 的并发安全检查。
-                // 把"读取 last_triggered_time -> 判断 -> 写入"整段放在同步块里，修复 check-then-act 竞态。
-                if (!isForceTrigger && appointment == null) {
-                    val skipDueToInterval = synchronized(prefsLock) {
-                        val lastTriggeredTime = prefs.getLong("last_triggered_time", 0L)
-                        val minIntervalMs = proactiveSetting.minIntervalMinutes.coerceAtLeast(1) * 60 * 1000L
-                        if (System.currentTimeMillis() - lastTriggeredTime < minIntervalMs) {
-                            true
-                        } else {
-                            // 立即写入触发时间，防止并发重复
-                            prefs.edit().putLong("last_triggered_time", System.currentTimeMillis()).apply()
-                            false
-                        }
-                    }
-                    if (skipDueToInterval) {
-                        outcome = "duplicate_trigger"
-                        trace.event("dedupe", "skipped=true")
-                        Log.d(TAG, "Duplicate trigger within min interval, skipping")
-                        return@launch
-                    }
-                } else {
-                    // 强制触发也写入时间戳，保持与常规触发一致的状态记录
-                    synchronized(prefsLock) {
-                        prefs.edit().putLong("last_triggered_time", System.currentTimeMillis()).apply()
-                    }
-                }
-
-                // 先按共享设置定位目标会话，再读取该会话自己的请求配置。
-                val scheduledAssistant = appointment?.let { pending ->
-                    baseSettings.assistants.find { it.id.toString() == pending.assistantId }
-                }
-                if (appointment != null && scheduledAssistant == null) {
-                    consumeAppointment(appointment)
-                    outcome = "appointment_assistant_removed"
-                    return@launch
-                }
-                val targetAssistant = scheduledAssistant ?: baseSettings.assistants.find {
-                    it.id.toString() == proactiveSetting.assistantId
-                } ?: baseSettings.getCurrentAssistant()
-                val assistantUuid = targetAssistant.id
-
-                // 找到最近的对话。分段记录可以区分鸿蒙究竟冻结在列表查询还是正文读取。
-                trace.event("database_recent_start")
-                val recentConversationId = appointment?.let { Uuid.parse(it.conversationId) }
-                    ?: conversationRepository.getMostRecentConversationId(assistantUuid)
-                trace.event("database_recent_end", "found=${recentConversationId != null}")
-                trace.event("database_load_start")
-                val conversation = recentConversationId?.let { conversationRepository.getConversationById(it) }
-                trace.conversation("database_load_end", conversation)
-                if (appointment != null && (conversation == null || conversation.assistantId != assistantUuid)) {
-                    consumeAppointment(appointment)
-                    outcome = "appointment_conversation_removed"
-                    return@launch
-                }
-
-                val latestUserMessage = conversation?.currentMessages
-                    ?.lastOrNull { it.role == MessageRole.USER }
-                if (latestUserMessage == null) {
-                    appointment?.let { consumeAppointment(it) }
-                    outcome = "no_user_message"
-                    Log.d(TAG, "No real user message found; skipping proactive generation")
-                    nextDelayOverrideMinutes = 240
-                    return@launch
-                }
-                val loadedConversation = requireNotNull(conversation)
-                // 跳过的唤醒只做只读检查，不为旧会话无谓冻结默认值。
-                if (baseSettings.getChatModelOf(loadedConversation) == null) {
-                    outcome = "no_model"
-                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
-                    return@launch
-                }
-                // Cleanup must never be allowed to delete anything that existed before this run.
-                // Protect every branch alternative, not only currentMessages.
-                loadedConversation.messageNodes
-                    .flatMapTo(protectedMessageIds) { node -> node.messages.map { it.id } }
-                val stateStore = ProactiveMessageStateStore(
-                    this@ProactiveMessageTriggerService, "${targetAssistant.id}_${loadedConversation.id}",
-                )
-                val activityStore = ProactiveActivityStore(
-                    this@ProactiveMessageTriggerService, targetAssistant.id.toString(), loadedConversation.id.toString(),
-                )
-                val proactiveState = stateStore.synchronizeWithUser(latestUserMessage.id.toString())
-                val maxFollowUps = proactiveSetting.maxFollowUpMessages.coerceIn(1, 8)
-                if (proactiveState.stopUntilUserReturns ||
-                    proactiveState.followUpCount >= maxFollowUps
-                ) {
-                    outcome = "follow_up_limit"
-                    appointment?.let { consumeAppointment(it) }
-                    Log.d(TAG, "No proactive generation: waiting for a new real user message")
-                    nextDelayOverrideMinutes = 240
-                    return@launch
-                }
-
-                conversationId = conversation?.id ?: kotlin.uuid.Uuid.random()
-                val conversationId = conversationId!!
-
-                // 持有会话引用，防止生成期间 session 被 idle 清除（finally 块会对应 release）。
-                // 放在 claim 之前：即使 claim 失败提前返回，引用也能在 finally 里被正确释放，保持计数平衡。
-                // 同时把数据库里的完整对话同步到 session，防止流式更新时 conv 是空状态导致覆盖历史。
-                chatService.addConversationReference(conversationId)
-
-                // 抢占生成权：尝试把当前协程的 Job 注册进 ConversationSession。
-                // 这一步对所有触发源（含 isForceTrigger / 激进模式设备事件）一视同仁，是并发安全的核心。
-                // 如果当前已有生成在跑（正常聊天或另一路主动消息），直接放弃本次触发，不排队等待、不重试。
-                // 理由：等对方生成结束后，上下文（用户可能已在聊别的话题）大概率已过时，硬等没有意义。
-                val myJob = coroutineContext[Job]
-                if (myJob == null || !chatService.getOrCreateSession(conversationId).tryClaimGeneration(myJob)) {
-                    outcome = "generation_busy"
-                    trace.event("generation_claim", "success=false")
-                    Log.d(
-                        TAG,
-                        "Skip proactive trigger: session $conversationId already generating " +
-                            "(normal chat or another proactive trigger in progress)"
-                    )
-                    // 必须走到 finally 块的"安排下一次触发"逻辑，不能绕过定时链收尾。
-                    // 用 stopSelf + return@launch 退出主流程，finally 会正常执行（scheduleNext 已用 NonCancellable 保护）。
-                    return@launch
-                }
-                trace.event("generation_claim", "success=true")
-                val session = chatService.getOrCreateSession(conversationId)
-                val sessionMatches = session.withStateLock {
-                    coroutineContext.ensureActive()
-                    val current = chatService.getConversationFlow(conversationId).value
-                    if (current.messageNodes.isEmpty()) {
-                        chatService.updateConversation(conversationId, loadedConversation)
-                        true
-                    } else {
-                        current.currentMessages.lastOrNull { it.role == MessageRole.USER }?.id == latestUserMessage.id
-                    }
-                }
-                if (!sessionMatches) {
-                    outcome = "user_returned"
-                    return@launch
-                }
-
-                // 构建上下文
-                val idleMinutes = latestUserMessage.createdAt
-                    .toInstant(TimeZone.currentSystemDefault())
-                    .let { ((kotlin.time.Clock.System.now() - it).inWholeMinutes).toInt().coerceAtLeast(0) }
-                if (!isForceTrigger && appointment == null && idleMinutes < proactiveSetting.minIntervalMinutes.coerceAtLeast(1)) {
-                    outcome = "user_not_idle"
-                    trace.event(
-                        "idle_guard",
-                        "passed=false idleMinutes=$idleMinutes minimum=${proactiveSetting.minIntervalMinutes}",
-                    )
-                    return@launch
-                }
-                trace.event("idle_guard", "passed=true idleMinutes=$idleMinutes")
-                // 只有真正取得生成权并通过跳过条件后才绑定；绑定自行持锁，不能嵌套在上面的锁中。
-                if (settingsStore.settingsFlow.first().getChatModelOf(session.state.value) == null) {
-                    outcome = "no_model"
-                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
-                    return@launch
-                }
-                // Consume after generation ownership is acquired; a newer replacement wins.
-                if (appointment != null && !consumeAppointment(appointment)) {
-                    outcome = "appointment_changed"
-                    return@launch
-                }
-                val activeConversation = chatService.bindConversationConfig(conversationId)
-                // 后续历史、工具和参数共享这一份快照，不将覆盖写回全局设置。
-                val settings = settingsStore.settingsFlow.first().withConversationConfig(activeConversation)
-                val assistant = settings.getAssistantOf(activeConversation)
-                val model = settings.getChatModelOf(activeConversation)
-                if (model == null) {
-                    outcome = "no_model"
-                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
-                    return@launch
-                }
-                val priorActivities = activityStore.snapshot().takeLast(8)
-                val contextStr = proactiveMessageService.buildProactiveContext(settings, idleMinutes) +
-                    "\n" + proactiveActivityText(priorActivities)
-                val extraContext = extraInfoCollector.collect(
-                    settings = settings.forProactiveExtraInfo(),
-                    assistantId = assistant.id.toString(),
-                    queryText = latestUserMessage.visibleTextForProactiveContext(),
-                    proactive = true,
-                    onItem = { name, status, chars ->
-                        trace.event("extra_info_item", "item=$name status=$status chars=$chars")
-                    },
-                )
-                trace.event(
-                    "proactive_context",
-                    "idleIncluded=true currentTimeIncluded=${settings.systemToolsSetting.shouldInjectTimeContext(proactive = true)}",
-                )
-
-                val rawHistoryMessages = activeConversation.messagesForGeneration().let {
-                    val configuredSize = assistant.contextMessageSize
-                        .takeIf { size -> size > 0 }
-                        ?: MAX_PROACTIVE_CONTEXT_MESSAGES
-                    it.takeLast(configuredSize.coerceAtMost(MAX_PROACTIVE_CONTEXT_MESSAGES))
-                }
-                val latestUserText = latestUserMessage.visibleTextForProactiveContext()
-                val latestRegularAssistantText = rawHistoryMessages.lastOrNull { message ->
-                    message.role == MessageRole.ASSISTANT &&
-                        message.id.toString() !in proactiveState.recentProactiveMessageIds
-                }?.visibleTextForProactiveContext().orEmpty()
-
-                val providerSetting = model.findProvider(settings.providers)
-                if (providerSetting == null) {
-                    outcome = "no_provider"
-                    Log.e(ProactiveMessageService.TAG, "No provider found for proactive message")
-                    return@launch
-                }
-
-                // 完整轮次复用聊天工具，轻量轮次只带记忆检索。AppUsage 需要额外授权；
-                // 未授权时连它的 schema 都不暴露，更不会预先读取或注入任何手机使用数据。
-                val appUsageToolAllowed = proactiveSetting.allowProactiveAppUsage &&
-                    me.rerere.rikkahub.data.ai.tools.SystemToolOption.AppUsage in
-                    settings.systemToolsSetting.getEnabledOptions()
-                val fullTools = useFullProactiveTools(proactiveSetting, Random.nextInt(100)) &&
-                    me.rerere.ai.provider.ModelAbility.TOOL in model.abilities
-                val tools = if (fullTools) chatService.buildAvailableTools(
-                    settings = settings,
-                    assistant = assistant,
-                    conversationId = conversationId,
-                    conversation = activeConversation,
-                    allowAppUsage = appUsageToolAllowed,
-                ) else if (me.rerere.ai.provider.ModelAbility.TOOL in model.abilities) {
-                    chatService.buildProactiveMemoryTools(assistant) +
-                        chatService.buildProactiveWakeupTools(settings, assistant, activeConversation)
-                } else emptyList()
-                val timeline = if (appUsageToolAllowed && proactiveSetting.includeAppTimeline) {
-                    AppUsageService(this@ProactiveMessageTriggerService).getRecentProactiveTimeline()
-                } else ""
-                trace.event("activity_mode", "fullTools=$fullTools timelineIncluded=${timeline.isNotBlank()}")
-                val deepSeekThinkingWithTools = isDeepSeekCompatible(providerSetting, model) &&
-                    assistant.reasoningLevel.isEnabled && tools.isNotEmpty()
-                val missingReasoningHistory = deepSeekThinkingWithTools && rawHistoryMessages.any { message ->
-                    message.role == MessageRole.ASSISTANT &&
-                        message.getTools().isNotEmpty() &&
-                        message.parts.none { it is UIMessagePart.Reasoning && it.reasoning.isNotBlank() }
-                }
-                val providerSafeHistory = if (missingReasoningHistory) {
-                    // Keep current tools available. Only remove an old, incomplete tool protocol
-                    // from historical turns that cannot satisfy DeepSeek's reasoning_content rule.
-                    trace.event("provider_compat", "deepseek_missing_reasoning=true old_tool_parts_removed=true")
-                    rawHistoryMessages.mapNotNull { message ->
-                        val incompleteToolTurn = message.role == MessageRole.ASSISTANT &&
-                            message.getTools().isNotEmpty() &&
-                            message.parts.none {
-                                it is UIMessagePart.Reasoning && it.reasoning.isNotBlank()
-                            }
-                        if (!incompleteToolTurn) {
-                            message
-                        } else {
-                            message.copy(parts = message.parts.filterNot { it is UIMessagePart.Tool })
-                                .takeIf { it.parts.isNotEmpty() }
-                        }
-                    }
-                } else {
-                    rawHistoryMessages
-                }
-
-                // DeepSeek 带工具时必须保留历史 reasoning_content；其他场景仍精简旧主动消息。
-                val historyMessages = filterInvalidToolMessages(
-                    sanitizeProactiveHistory(
-                        messages = providerSafeHistory,
-                        proactiveMessageIds = proactiveState.recentProactiveMessageIds,
-                        preserveReasoning = isDeepSeekCompatible(providerSetting, model) && tools.isNotEmpty(),
-                    ),
-                ).let { messages ->
-                    if (tools.isEmpty()) stripHistoricalToolParts(messages) else messages
-                }
-                trace.messages("history", historyMessages)
-                trace.event(
-                    "tools_exposed",
-                    "count=${tools.size} appUsage=$appUsageToolAllowed " +
-                        "sample=${tools.take(8).joinToString(",") { it.name }} " +
-                        "remaining=${(tools.size - 8).coerceAtLeast(0)}",
-                )
-
-                // 世界书只按真实聊天历史匹配，并作为 system 背景设定注入。
-                // 合成的主动判定消息既不能触发世界书，也不能让世界书伪装成用户新消息。
-                val proactiveInjections = collectInjections(
-                    messages = rawHistoryMessages,
-                    assistant = assistant,
-                    modeInjections = settings.modeInjections,
-                    lorebooks = settings.lorebooks,
-                ).map { it.content }
-                trace.event("background_injections", "count=${proactiveInjections.size}")
-
-                // 构建系统提示词（包含记忆 + 上下文，都放在最后面避免被网关淹没）
-                val systemPrompt = buildSystemPrompt(
-                    assistant = assistant,
-                    context = contextStr + "\n" + timeline + (appointment?.let {
-                        "\n## 本次约定唤醒\n你此前为这个会话约定了联系时间：" +
-                            java.time.Instant.ofEpochMilli(it.timeMillis).atZone(java.time.ZoneId.systemDefault()) +
-                            "\n约定缘由：${it.reason}\n请先依据最新聊天判断缘由是否仍适用，再决定如何联系；" +
-                            "这不是用户的新消息，也不是预写的待发送正文。\n"
-                    } ?: "") + if (fullTools) {
-                        "\n这次可按需使用已配置的工具。"
-                    } else {
-                        "\n这次是轻量判断，可使用列出的记忆搜索与联系时间约定工具；若没有工具，就依据现有上下文判断。" +
-                            "不能声称完成未实际执行的外部行动。"
-                    },
-                    state = proactiveState,
-                    maxFollowUps = maxFollowUps,
-                    allowAppUsage = appUsageToolAllowed && tools.any { it.name == "get_app_usage" },
-                    proactiveInjections = proactiveInjections,
-                    latestUserText = latestUserText,
-                    latestAssistantText = latestRegularAssistantText,
-                    alwaysRespond = proactiveSetting.alwaysRespond,
-                )
-
-                // Keep the wake-up user turn request-only. Claude/Gemini cannot start from
-                // an assistant prefill; tool continuations below retain their result pairing.
-                val messages = filesManager.validAttachments(beginProactiveRequest(
-                    me.rerere.rikkahub.data.ai.buildConversationRequestMessages(
-                        systemPrompt, historyMessages, 0, activeConversation.summaryForGeneration(),
-                    ),
-                    context = extraContext.orEmpty(),
-                ), forSending = true).transforms(
-                    transformers = me.rerere.rikkahub.data.ai.transformers.historyMediaTransformers,
-                    context = this@ProactiveMessageTriggerService,
-                    model = model,
-                    assistant = assistant,
-                    settings = settings,
-                ).filterNot { it.parts.isEmpty() }
-                trace.messages("request", messages)
-
-                val providerImpl = usageRecorder.wrap(
-                    providerManager.getProviderByType(providerSetting),
-                    UsageTag(UsageSource.PROACTIVE, assistant.id, conversationId),
-                )
-
-                // 主动消息场景：支持工具调用，但限制最大步数
-                // temperature 不强制默认 0.8f，保持与 GenerationHandler 一致（assistant.temperature 为 null 时不传），
-                // 否则对智谱 GLM 等 thinking 模型会同时下发 temperature + thinking，触发 "Invalid request body" 400。
-                val params = buildAssistantGenerationParams(
-                    assistant = assistant,
-                    model = model,
-                    provider = providerSetting,
-                    conversationId = conversationId.toString(),
-                    tools = tools,
-                )
-
-                Log.d(TAG, "Calling AI API for proactive message with ${historyMessages.size} history messages, ${tools.size} tools (reasoning=${assistant.reasoningLevel}, model=${model.modelId}, provider=${providerSetting::class.simpleName})...")
-                // 诊断: 列出工具及其 parameters 是否为 null, 便于定位 "Invalid request body"
-                tools.forEach { t ->
-                    val hasSchema = t.parameters() != null
-                    if (!hasSchema) Log.w(TAG, "Tool '${t.name}' has NULL parameters schema — may cause API rejection")
-                }
-
-                // 执行生成，支持工具调用
-                val reactionTurn = chatInteractionRepository.prepareContext(
-                    activeConversation.currentMessages, conversationId.toString(), assistant, messages,
-                )
-                var (finalMessages, hasToolCalls, hasJumpFlag) = generateWithTools(
-                    conversationId = conversationId,
-                    providerImpl = providerImpl,
-                    providerSetting = providerSetting,
-                    initialMessages = messages,
-                    params = params,
-                    tools = tools,
-                    model = model,
-                    assistant = assistant,
-                    settings = settings,
-                    trace = trace,
-                    runAssistantMessageIds = runAssistantMessageIds,
-                    protectedMessageIds = protectedMessageIds,
-                    activityStore = activityStore,
-                    reactionTurn = reactionTurn,
-                )
-
-                // 部分 thinking 模型会结束在 Reasoning/Tool 上而没有 Text 正文。
-                // 追加一次禁用工具和推理的收尾生成，确保得到真正可发送的最终消息，
-                // 同时不把内部思考内容直接暴露给用户。
-                val generatedAssistant = finalMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
-                val generatedText = generatedAssistant?.parts
-                    ?.filterIsInstance<UIMessagePart.Text>()
-                    ?.joinToString("\n") { it.text }
-                    ?.trim().orEmpty()
-                val hasReasoning = generatedAssistant?.parts
-                    ?.filterIsInstance<UIMessagePart.Reasoning>()
-                    ?.any { it.reasoning.isNotBlank() } == true
-                if (generatedText.isBlank() && hasReasoning) {
-                    Log.w(TAG, "Thinking response has no final text; requesting a final user-visible message")
-                    val finalizePrompt = UIMessage(
-                        role = MessageRole.USER,
-                        parts = listOf(UIMessagePart.Text(
-                            "根据刚才的想法给出最终结果。只输出 [PASS]、[WAIT:分钟]、[STOP]，" +
-                                "或者真正想说的一句话；不要再次解释过程。"
-                        )),
-                    )
-                    var finalized = filesManager.validAttachments(
-                        mergeAdjacentSameRoleMessages(finalMessages + finalizePrompt), forSending = true,
-                    ).filterNot { it.parts.isEmpty() }
-                    providerImpl.streamText(
-                        providerSetting = providerSetting,
-                        messages = finalized,
-                        params = params.copy(tools = emptyList(), reasoningLevel = ReasoningLevel.OFF),
-                    ).collect { chunk ->
-                        finalized = finalized.handleMessageChunk(chunk = chunk, model = model)
-                        finalized.lastOrNull { it.role == MessageRole.ASSISTANT }?.let { message ->
-                            updateOrAppendAiMessage(
-                                conversationId,
-                                message,
-                                trace,
-                                runAssistantMessageIds,
-                                protectedMessageIds,
-                            )
-                        }
-                    }
-                    finalized.lastOrNull { it.role == MessageRole.ASSISTANT }?.let { message ->
-                        val now = kotlin.time.Clock.System.now()
-                        // Keep the complete visible thinking chain. The old finalizer retained only
-                        // Reasoning and silently dropped Tool parts, so proactive tool calls were
-                        // executed but disappeared from the normal ChatMessage tool UI.
-                        val originalThinkingTrace = generatedAssistant?.parts
-                            ?.filter { it is UIMessagePart.Reasoning || it is UIMessagePart.Tool }
-                            ?.map { part ->
-                                if (part is UIMessagePart.Reasoning && part.finishedAt == null) {
-                                    part.copy(finishedAt = now)
-                                } else {
-                                    part
+                                if (!proactiveSetting.enabled) {
+                                    outcome = "disabled"
+                                    return@launch
                                 }
-                            }
-                            .orEmpty()
-                        val finalVisibleParts = message.parts.filterNot { it is UIMessagePart.Reasoning }
-                        // 沿用原 thinking 消息的 id，把思考链与最终正文合在同一条气泡中。
-                        val completed = message.copy(
-                            id = generatedAssistant?.id ?: message.id,
-                            parts = originalThinkingTrace + finalVisibleParts,
-                        )
-                        trace.event(
-                            "finalizer",
-                            "preservedTools=${originalThinkingTrace.count { it is UIMessagePart.Tool }} " +
-                                "shape=${ProactiveMessageTrace.messageShape(completed)}",
-                        )
-                        updateOrAppendAiMessage(
-                            conversationId,
-                            completed,
-                            trace,
-                            runAssistantMessageIds,
-                            protectedMessageIds,
-                        )
-                        if (message.id != completed.id) {
-                            val session = chatService.getOrCreateSession(conversationId)
-                            session.withStateLock {
-                                val conv = chatService.getConversationFlow(conversationId).value
-                                val cleaned = conv.copy(messageNodes = conv.messageNodes.filterNot { node ->
-                                    node.messages.any { it.id == message.id }
-                                })
-                                chatService.updateConversation(conversationId, cleaned)
-                                chatService.saveConversationLocked(conversationId, cleaned)
-                            }
-                        }
-                        finalMessages = finalized.dropLast(1) + completed
-                    }
-                }
 
-                // 提取AI消息
-                val aiMessage = finalMessages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: UIMessage(
-                    role = MessageRole.ASSISTANT,
-                    parts = emptyList()
-                )
-                if (hasToolCalls && aiMessage.getTools().isEmpty()) {
-                    trace.event("warning", "tool_called_but_missing_from_final_message=true")
-                }
-
-                // 用户可能在主动生成期间回来了。即使厂商 ROM/Provider 没及时传播取消，
-                // 保存前也必须重新读取真实会话并核对锚点，绝不把过期主动回复插入正常聊天。
-                trace.event("anchor_recheck_start")
-                val latestPersistedUserId = conversationRepository.getConversationById(conversationId)
-                    ?.currentMessages
-                    ?.lastOrNull { it.role == MessageRole.USER }
-                    ?.id
-                    ?.toString()
-                val anchorUnchanged = latestPersistedUserId == latestUserMessage.id.toString()
-                trace.event("anchor_recheck_end", "unchanged=$anchorUnchanged")
-                val latestProactiveSetting = settingsStore.settingsFlow.first().proactiveMessageSetting
-                val stillAllowed = canRunProactiveWakeup(
-                    appointment, latestProactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
-                    manual = triggerSource == "manual",
-                )
-                if (!anchorUnchanged || !stillAllowed) {
-                    outcome = if (!anchorUnchanged) "user_returned" else "disabled_or_quiet_hours"
-                    removeProactiveRunMessages(
-                        conversationId = conversationId,
-                        messageIds = runAssistantMessageIds + aiMessage.id,
-                        protectedMessageIds = protectedMessageIds,
-                        trace = trace,
-                        label = "user_returned",
-                    )
-                    return@launch
-                }
-
-                val rawText = aiMessage.parts.filterIsInstance<UIMessagePart.Text>()
-                    .joinToString("\n") { it.text }.trim()
-                val reasoningText = aiMessage.parts.filterIsInstance<UIMessagePart.Reasoning>()
-                    .joinToString("\n") { it.reasoning }
-                val decision = parseProactiveDecision(
-                    rawText,
-                    reasoningText,
-                    hasJumpFlag,
-                    alwaysRespond = proactiveSetting.alwaysRespond,
-                )
-                val replyText = decision.message
-                val shouldJump = decision.shouldJump
-                nextDelayOverrideMinutes = decision.waitMinutes
-                if (decision.stopUntilUserReturns) {
-                    wakeupStore.cancel(conversationId.toString())
-                    stateStore.stopUntilUserReturns(proactiveState)
-                    nextDelayOverrideMinutes = 240
-                }
-
-                // 若移除了标记，同步更新 session 里 aiMessage 的文本 parts
-                val cleanedAiMessage = if (rawText != replyText) {
-                    var visibleTextWritten = false
-                    aiMessage.copy(
-                        parts = aiMessage.parts.map { part ->
-                            if (part is UIMessagePart.Text) {
-                                if (!visibleTextWritten) {
-                                    visibleTextWritten = true
-                                    UIMessagePart.Text(replyText)
-                                } else {
-                                    UIMessagePart.Text("")
+                                // Only an explicit manual check may bypass quiet hours, never a gateway signal.
+                                if (triggerSource != "manual" && !isProactiveActiveTime(
+                                        proactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
+                                    )
+                                ) {
+                                    outcome = "quiet_hours"
+                                    return@launch
                                 }
-                            } else {
-                                part
-                            }
-                        }
-                    )
-                } else aiMessage
-                trace.event(
-                    "decision",
-                    "send=${decision.shouldSend} wait=${decision.waitMinutes ?: 0} " +
-                        "stop=${decision.stopUntilUserReturns} jump=${decision.shouldJump} " +
-                        "shape=${ProactiveMessageTrace.messageShape(aiMessage)}",
-                )
 
-                Log.d(
-                    TAG,
-                    "Proactive message generated: length=${replyText.length}, " +
-                        "hasToolCalls=$hasToolCalls, shouldJump=$shouldJump",
-                )
+                                val wakeupStore = ProactiveWakeupStore(this@ProactiveMessageTriggerService)
+                                val appointment = task.appointmentToken?.let { token -> wakeupStore.all().singleOrNull { it.token == token } }
+                                if (task.appointmentToken != null && appointment == null) return@launch
+                                fun consumeAppointment(value: ProactiveWakeup): Boolean = wakeupStore.consume(value).also {
+                                    if (it) selectedAppointment = value
+                                }
+                                val targetAssistant = baseSettings.assistants.singleOrNull { it.id.toString() == task.assistantId }
+                                    ?: return@launch
+                                val assistantUuid = targetAssistant.id
+                                val conversation = conversationRepository.getConversationById(Uuid.parse(task.conversationId))
+                                if (conversation == null || conversation.assistantId != assistantUuid) return@launch
 
-                if (!decision.shouldSend) {
-                    outcome = when {
-                        decision.stopUntilUserReturns -> "stop"
-                        decision.waitMinutes != null -> "wait"
-                        else -> "pass"
-                    }
-                    // AI 选择跳过，移除本次生成的 aiMessage node（基于 id 匹配，不误删历史）
-                    Log.d(ProactiveMessageService.TAG, "AI chose to skip proactive message")
-                    removeProactiveRunMessages(
-                        conversationId = conversationId,
-                        messageIds = runAssistantMessageIds + aiMessage.id,
-                        protectedMessageIds = protectedMessageIds,
-                        trace = trace,
-                        label = "skip",
-                    )
-                } else {
-                    // Commit only a completed SEND. WAIT/STOP/NOTE and partial streams stay out of chat.
-                    (finalMessages.filter { it.id in runAssistantMessageIds && it.id != aiMessage.id } +
-                        cleanedAiMessage).associateBy { it.id }.values.forEach { completed ->
-                        val committed = completed.copy(
-                            parts = completed.parts.map { part ->
-                                if (part is UIMessagePart.Text) part.copy(text = stripProactiveNotes(part.text)) else part
-                            },
-                            finishedAt = kotlin.time.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()),
-                        )
-                        if (completed.id == aiMessage.id) reactionTurn.onGenerationSucceeded(committed)
-                        updateOrAppendAiMessage(
-                            conversationId, committed, trace, runAssistantMessageIds, protectedMessageIds,
-                            persist = true,
-                            reactionTurn = reactionTurn.takeIf { completed.id == aiMessage.id },
-                        )
-                    }
-                    // 有效回复：session 里已有 aiMessage（流式过程已追加），持久化并发通知
-                    saveProactiveMessage(
-                        assistant, conversationId, conversation, trace
-                    )
-                    appointmentMessageSaved = true
-                    outcome = "sent"
-                    val persistedRunIds = chatService.getConversationFlow(conversationId).value.currentMessages
-                        .asSequence()
-                        .filter { it.id in runAssistantMessageIds }
-                        .map { it.id.toString() }
-                        .toSet()
-                    stateStore.recordSent(
-                        state = proactiveState,
-                        messageIds = persistedRunIds.ifEmpty { setOf(aiMessage.id.toString()) },
-                        text = replyText,
-                    )
-                    runCatching {
-                        showProactiveNotification(conversationId, assistant.name.ifBlank { "AI" }, replyText)
-                    }.onFailure {
-                        trace.event("notification", "delivered=false messagePersisted=true")
-                        Log.w(TAG, "Notification failed; proactive message remains in conversation", it)
-                    }
-                    // 强制跳转屏幕到聊天界面（方案 A：普通拉起前台）
-                    if (shouldJump) {
-                        try {
-                            val jumpIntent = Intent(this@ProactiveMessageTriggerService, RouteActivity::class.java).apply {
-                                addFlags(
-                                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                val latestUserMessage = conversation?.currentMessages
+                                    ?.lastOrNull { it.role == MessageRole.USER }
+                                if (latestUserMessage == null) {
+                                    appointment?.let { consumeAppointment(it) }
+                                    outcome = "no_user_message"
+                                    Log.d(TAG, "No real user message found; skipping proactive generation")
+                                    check(ProactiveMessageService.persistDurableNextSlot(
+                                        this@ProactiveMessageTriggerService, System.currentTimeMillis(), proactiveNoGenerationSlotMinutes(),
+                                    )) { "Could not persist no-user proactive slot" }
+                                    nextDelayOverride.set(240)
+                                    return@launch
+                                }
+                                if (latestUserMessage.id.toString() != task.anchorUserMessageId) return@launch
+                                val loadedConversation = requireNotNull(conversation)
+                                // 跳过的唤醒只做只读检查，不为旧会话无谓冻结默认值。
+                                if (baseSettings.getChatModelOf(loadedConversation) == null) {
+                                    outcome = "no_model"
+                                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
+                                    return@launch
+                                }
+                                // Cleanup must never be allowed to delete anything that existed before this run.
+                                // Protect every branch alternative, not only currentMessages.
+                                loadedConversation.messageNodes
+                                    .flatMapTo(protectedMessageIds) { node -> node.messages.map { it.id } }
+                                val stateStore = ProactiveMessageStateStore(
+                                    this@ProactiveMessageTriggerService, "${targetAssistant.id}_${loadedConversation.id}",
                                 )
-                                putExtra("conversationId", conversationId.toString())
+                                val activityStore = ProactiveActivityStore(
+                                    this@ProactiveMessageTriggerService, targetAssistant.id.toString(), loadedConversation.id.toString(),
+                                )
+                                fun recordActivity(outcome: String, note: String = "", tools: List<String> = emptyList()) {
+                                    runCatching {
+                                        activityStore.append(ProactiveActivity(
+                                            id = "run:${task.taskId}:${outcome.hashCode()}:${System.currentTimeMillis()}",
+                                            timestamp = System.currentTimeMillis(),
+                                            outcome = outcome,
+                                            note = note.take(240),
+                                            toolNames = tools.take(12),
+                                        ))
+                                    }.onFailure { Log.w(TAG, "Could not persist proactive activity", it) }
+                                }
+                                val proactiveState = stateStore.synchronizeWithUser(latestUserMessage.id.toString())
+                                val maxFollowUps = proactiveSetting.maxFollowUpMessages.coerceIn(1, 8)
+                                if (proactiveState.stopUntilUserReturns ||
+                                    proactiveState.followUpCount >= maxFollowUps
+                                ) {
+                                    outcome = "follow_up_limit"
+                                    appointment?.let { consumeAppointment(it) }
+                                    Log.d(TAG, "No proactive generation: waiting for a new real user message")
+                                    recordActivity(
+                                        outcome = "等待对方再次开口",
+                                        note = "已到连续追问上限或上一轮已停止，本轮不生成；等你回复后恢复。",
+                                    )
+                                    check(ProactiveMessageService.persistDurableNextSlot(
+                                        this@ProactiveMessageTriggerService,
+                                        System.currentTimeMillis(),
+                                        proactiveNoGenerationSlotMinutes(),
+                                    )) { "Could not persist follow-up-limit proactive slot" }
+                                    nextDelayOverride.set(240)
+                                    return@launch
+                                }
+
+                                conversationId = conversation?.id ?: kotlin.uuid.Uuid.random()
+                                val conversationId = conversationId!!
+
+                                // 持有会话引用，防止生成期间 session 被 idle 清除（finally 块会对应 release）。
+                                // 放在 claim 之前：即使 claim 失败提前返回，引用也能在 finally 里被正确释放，保持计数平衡。
+                                // 同时把数据库里的完整对话同步到 session，防止流式更新时 conv 是空状态导致覆盖历史。
+                                chatService.addConversationReference(conversationId)
+
+                                // 抢占生成权：尝试把当前协程的 Job 注册进 ConversationSession。
+                                // 这一步对所有触发源（含 isForceTrigger / 激进模式设备事件）一视同仁，是并发安全的核心。
+                                // 如果当前已有生成在跑（正常聊天或另一路主动消息），直接放弃本次触发，不排队等待、不重试。
+                                // 理由：等对方生成结束后，上下文（用户可能已在聊别的话题）大概率已过时，硬等没有意义。
+                                val myJob = coroutineContext[Job]
+                                if (myJob == null || !chatService.getOrCreateSession(conversationId).tryClaimGeneration(myJob)) {
+                                    outcome = "generation_busy"
+                                    trace.event("generation_claim", "success=false")
+                                    Log.d(
+                                        TAG,
+                                        "Skip proactive trigger: session $conversationId already generating " +
+                                            "(normal chat or another proactive trigger in progress)"
+                                    )
+                                    // 必须走到 finally 块的"安排下一次触发"逻辑，不能绕过定时链收尾。
+                                    // 用 stopSelf + return@launch 退出主流程，finally 会正常执行（scheduleNext 已用 NonCancellable 保护）。
+                                    return@launch
+                                }
+                                trace.event("generation_claim", "success=true")
+                                val session = chatService.getOrCreateSession(conversationId)
+                                val sessionMatches = session.withStateLock {
+                                    coroutineContext.ensureActive()
+                                    val current = chatService.getConversationFlow(conversationId).value
+                                    if (current.messageNodes.isEmpty()) {
+                                        chatService.updateConversation(conversationId, loadedConversation)
+                                        true
+                                    } else {
+                                        current.currentMessages.lastOrNull { it.role == MessageRole.USER }?.id == latestUserMessage.id
+                                    }
+                                }
+                                if (!sessionMatches) {
+                                    outcome = "user_returned"
+                                    return@launch
+                                }
+
+                                // 构建上下文
+                                val idleMinutes = latestUserMessage.createdAt
+                                    .toInstant(TimeZone.currentSystemDefault())
+                                    .let { ((kotlin.time.Clock.System.now() - it).inWholeMinutes).toInt().coerceAtLeast(0) }
+                                if (!isForceTrigger && appointment == null && idleMinutes < proactiveSetting.minIntervalMinutes.coerceAtLeast(1)) {
+                                    outcome = "user_not_idle"
+                                    trace.event(
+                                        "idle_guard",
+                                        "passed=false idleMinutes=$idleMinutes minimum=${proactiveSetting.minIntervalMinutes}",
+                                    )
+                                    return@launch
+                                }
+                                trace.event("idle_guard", "passed=true idleMinutes=$idleMinutes")
+                                // 只有真正取得生成权并通过跳过条件后才绑定；绑定自行持锁，不能嵌套在上面的锁中。
+                                if (settingsStore.settingsFlow.first().getChatModelOf(session.state.value) == null) {
+                                    outcome = "no_model"
+                                    recordActivity(outcome = "未触发：未选择模型")
+                                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
+                                    return@launch
+                                }
+                                // Consume after generation ownership is acquired; a newer replacement wins.
+                                if (appointment != null && !consumeAppointment(appointment)) {
+                                    outcome = "appointment_changed"
+                                    return@launch
+                                }
+                                val activeConversation = chatService.bindConversationConfig(conversationId)
+                                // 后续历史、工具和参数共享这一份快照，不将覆盖写回全局设置。
+                                val settings = settingsStore.settingsFlow.first().withConversationConfig(activeConversation)
+                                val assistant = settings.getAssistantOf(activeConversation)
+                                val model = settings.getChatModelOf(activeConversation)
+                                if (model == null) {
+                                    outcome = "no_model"
+                                    Log.e(ProactiveMessageService.TAG, "No model found for proactive message")
+                                    return@launch
+                                }
+                                val priorActivities = activityStore.snapshot().takeLast(8)
+                                val contextStr = proactiveMessageService.buildProactiveContext(settings, idleMinutes) +
+                                    "\n" + proactiveActivityText(priorActivities)
+                                val extraContext = extraInfoCollector.collect(
+                                    settings = settings.forProactiveExtraInfo(),
+                                    assistantId = assistant.id.toString(),
+                                    queryText = latestUserMessage.visibleTextForProactiveContext(),
+                                    proactive = true,
+                                    onItem = { name, status, chars ->
+                                        trace.event("extra_info_item", "item=$name status=$status chars=$chars")
+                                    },
+                                )
+                                trace.event(
+                                    "proactive_context",
+                                    "idleIncluded=true currentTimeIncluded=${settings.systemToolsSetting.shouldInjectTimeContext(proactive = true)}",
+                                )
+
+                                val rawHistoryMessages = activeConversation.messagesForGeneration().let {
+                                    val configuredSize = assistant.contextMessageSize
+                                        .takeIf { size -> size > 0 }
+                                        ?: MAX_PROACTIVE_CONTEXT_MESSAGES
+                                    it.takeLast(configuredSize.coerceAtMost(MAX_PROACTIVE_CONTEXT_MESSAGES))
+                                }
+                                val latestUserText = latestUserMessage.visibleTextForProactiveContext()
+                                val latestRegularAssistantText = rawHistoryMessages.lastOrNull { message ->
+                                    message.role == MessageRole.ASSISTANT &&
+                                        message.id.toString() !in proactiveState.recentProactiveMessageIds
+                                }?.visibleTextForProactiveContext().orEmpty()
+
+                                val providerSetting = model.findProvider(settings.providers)
+                                if (providerSetting == null) {
+                                    outcome = "no_provider"
+                                    recordActivity(outcome = "未触发：模型没有可用的服务商")
+                                    Log.e(ProactiveMessageService.TAG, "No provider found for proactive message")
+                                    return@launch
+                                }
+
+                                // 完整轮次复用聊天工具，轻量轮次只带记忆检索。AppUsage 需要额外授权；
+                                // 未授权时连它的 schema 都不暴露，更不会预先读取或注入任何手机使用数据。
+                                val appUsageToolAllowed = proactiveSetting.allowProactiveAppUsage &&
+                                    me.rerere.rikkahub.data.ai.tools.SystemToolOption.AppUsage in
+                                    settings.systemToolsSetting.getEnabledOptions()
+                                val fullTools = useFullProactiveTools(proactiveSetting, Random.nextInt(100)) &&
+                                    me.rerere.ai.provider.ModelAbility.TOOL in model.abilities
+                                val candidateTools = if (fullTools) chatService.buildAvailableTools(
+                                    settings = settings,
+                                    assistant = assistant,
+                                    conversationId = conversationId,
+                                    conversation = activeConversation,
+                                    allowAppUsage = appUsageToolAllowed,
+                                    allowImageGeneration = false,
+                                    headless = true,
+                                ) else if (me.rerere.ai.provider.ModelAbility.TOOL in model.abilities) {
+                                    chatService.buildProactiveMemoryTools(assistant) +
+                                        chatService.buildProactiveWakeupTools(settings, assistant, activeConversation)
+                                } else emptyList()
+                                // Plugin/MCP tools may invoke arbitrary paid models or external APIs, which
+                                // cannot participate in this task's network-turn budget. Keep them foreground-only.
+                                val tools = candidateTools.filterNot {
+                                    it.name == "generate_image" || it.name == "text_to_speech" ||
+                                        it.name.startsWith("plg_") || it.name.startsWith("mcp_")
+                                }
+                                val timeline = if (appUsageToolAllowed && proactiveSetting.includeAppTimeline) {
+                                    AppUsageService(this@ProactiveMessageTriggerService).getRecentProactiveTimeline()
+                                } else ""
+                                trace.event("activity_mode", "fullTools=$fullTools timelineIncluded=${timeline.isNotBlank()}")
+                                val deepSeekThinkingWithTools = isDeepSeekCompatible(providerSetting, model) &&
+                                    assistant.reasoningLevel.isEnabled && tools.isNotEmpty()
+                                val missingReasoningHistory = deepSeekThinkingWithTools && rawHistoryMessages.any { message ->
+                                    message.role == MessageRole.ASSISTANT &&
+                                        message.getTools().isNotEmpty() &&
+                                        message.parts.none { it is UIMessagePart.Reasoning && it.reasoning.isNotBlank() }
+                                }
+                                val providerSafeHistory = if (missingReasoningHistory) {
+                                    // Keep current tools available. Only remove an old, incomplete tool protocol
+                                    // from historical turns that cannot satisfy DeepSeek's reasoning_content rule.
+                                    trace.event("provider_compat", "deepseek_missing_reasoning=true old_tool_parts_removed=true")
+                                    rawHistoryMessages.mapNotNull { message ->
+                                        val incompleteToolTurn = message.role == MessageRole.ASSISTANT &&
+                                            message.getTools().isNotEmpty() &&
+                                            message.parts.none {
+                                                it is UIMessagePart.Reasoning && it.reasoning.isNotBlank()
+                                            }
+                                        if (!incompleteToolTurn) {
+                                            message
+                                        } else {
+                                            message.copy(parts = message.parts.filterNot { it is UIMessagePart.Tool })
+                                                .takeIf { it.parts.isNotEmpty() }
+                                        }
+                                    }
+                                } else {
+                                    rawHistoryMessages
+                                }
+
+                                // DeepSeek 带工具时必须保留历史 reasoning_content；其他场景仍精简旧主动消息。
+                                // 后台唤醒没有摄像头授权，历史里的视频通话画面一律不重放。
+                                val historyMessages = filterInvalidToolMessages(
+                                    sanitizeProactiveHistory(
+                                        messages = providerSafeHistory,
+                                        proactiveMessageIds = proactiveState.recentProactiveMessageIds,
+                                        preserveReasoning = isDeepSeekCompatible(providerSetting, model) && tools.isNotEmpty(),
+                                    ),
+                                ).let { messages ->
+                                    if (tools.isEmpty()) stripHistoricalToolParts(messages) else messages
+                                }.withoutHistoricalCameraImages()
+                                trace.messages("history", historyMessages)
+                                trace.event(
+                                    "tools_exposed",
+                                    "count=${tools.size} appUsage=$appUsageToolAllowed " +
+                                        "sample=${tools.take(8).joinToString(",") { it.name }} " +
+                                        "remaining=${(tools.size - 8).coerceAtLeast(0)}",
+                                )
+
+                                // 世界书只按真实聊天历史匹配，并作为 system 背景设定注入。
+                                // 合成的主动判定消息既不能触发世界书，也不能让世界书伪装成用户新消息。
+                                val proactiveInjections = collectInjections(
+                                    messages = rawHistoryMessages,
+                                    assistant = assistant,
+                                    modeInjections = settings.modeInjections,
+                                    lorebooks = settings.lorebooks,
+                                ).map { it.content }
+                                trace.event("background_injections", "count=${proactiveInjections.size}")
+
+                                // 构建系统提示词（包含记忆 + 上下文，都放在最后面避免被网关淹没）
+                                val systemPrompt = buildSystemPrompt(
+                                    assistant = assistant,
+                                    context = contextStr + "\n" + task.admittedConfig?.effectivePromptOverride.orEmpty() + "\n" + timeline + (appointment?.let {
+                                        "\n## 本次约定唤醒\n你此前为这个会话约定了联系时间：" +
+                                            java.time.Instant.ofEpochMilli(it.timeMillis).atZone(java.time.ZoneId.systemDefault()) +
+                                            "\n约定缘由：${it.reason}\n请先依据最新聊天判断缘由是否仍适用，再决定如何联系；" +
+                                            "这不是用户的新消息，也不是预写的待发送正文。\n"
+                                    } ?: "") + if (fullTools) {
+                                        "\n这次可按需使用已配置的工具。"
+                                    } else {
+                                        "\n这次是轻量判断，可使用列出的记忆搜索与联系时间约定工具；若没有工具，就依据现有上下文判断。" +
+                                            "不能声称完成未实际执行的外部行动。"
+                                    },
+                                    state = proactiveState,
+                                    maxFollowUps = maxFollowUps,
+                                    allowAppUsage = appUsageToolAllowed && tools.any { it.name == "get_app_usage" },
+                                    proactiveInjections = proactiveInjections,
+                                    latestUserText = latestUserText,
+                                    latestAssistantText = latestRegularAssistantText,
+                                    alwaysRespond = proactiveSetting.alwaysRespond,
+                                )
+
+                                // Keep the wake-up user turn request-only. Claude/Gemini cannot start from
+                                // an assistant prefill; tool continuations below retain their result pairing.
+                                // History is camera-free here and each transformer pass is cleaned again so
+                                // no video-call frame/snapshot can be re-encoded into this request.
+                                val messages = filesManager.validAttachments(
+                                    buildProactiveRequestMessages(
+                                        systemPrompt = systemPrompt,
+                                        historyMessages = historyMessages,
+                                        summary = activeConversation.summaryForGeneration(),
+                                        context = extraContext.orEmpty(),
+                                    ),
+                                    forSending = true,
+                                ).transforms(
+                                    transformers = me.rerere.rikkahub.data.ai.transformers.historyMediaTransformers,
+                                    context = this@ProactiveMessageTriggerService,
+                                    model = model,
+                                    assistant = assistant,
+                                    settings = settings,
+                                ).withoutHistoricalCameraImages().filterNot { it.parts.isEmpty() }
+                                trace.messages("request", messages)
+
+                                val providerImpl = usageRecorder.wrap(
+                                    providerManager.getProviderByType(providerSetting),
+                                    UsageTag(UsageSource.PROACTIVE, assistant.id, conversationId),
+                                ).cameraFreeRequests()
+
+                                // 主动消息场景：支持工具调用，但限制最大步数
+                                // temperature 不强制默认 0.8f，保持与 GenerationHandler 一致（assistant.temperature 为 null 时不传），
+                                // 否则对智谱 GLM 等 thinking 模型会同时下发 temperature + thinking，触发 "Invalid request body" 400。
+                                val params = buildAssistantGenerationParams(
+                                    assistant = assistant,
+                                    model = model,
+                                    provider = providerSetting,
+                                    conversationId = conversationId.toString(),
+                                    tools = tools,
+                                )
+
+                                Log.d(TAG, "Calling AI API for proactive message with ${historyMessages.size} history messages, ${tools.size} tools (reasoning=${assistant.reasoningLevel}, model=${model.modelId}, provider=${providerSetting::class.simpleName})...")
+                                // 诊断: 列出工具及其 parameters 是否为 null, 便于定位 "Invalid request body"
+                                tools.forEach { t ->
+                                    val hasSchema = t.parameters() != null
+                                    if (!hasSchema) Log.w(TAG, "Tool '${t.name}' has NULL parameters schema — may cause API rejection")
+                                }
+
+                                // 执行生成，支持工具调用
+                                val reactionTurn = chatInteractionRepository.prepareContext(
+                                    activeConversation.currentMessages, conversationId.toString(), assistant, messages,
+                                )
+                                var (finalMessages, hasToolCalls, hasJumpFlag) = generateWithTools(
+                                    conversationId = conversationId,
+                                    providerImpl = providerImpl,
+                                    providerSetting = providerSetting,
+                                    initialMessages = messages,
+                                    params = params,
+                                    tools = tools,
+                                    model = model,
+                                    assistant = assistant,
+                                    settings = settings,
+                                    trace = trace,
+                                    runAssistantMessageIds = runAssistantMessageIds,
+                                    protectedMessageIds = protectedMessageIds,
+                                    activityStore = activityStore,
+                                    reactionTurn = reactionTurn,
+                                    task = task,
+                                )
+
+                                // 部分 thinking 模型会结束在 Reasoning/Tool 上而没有 Text 正文。
+                                // 追加一次禁用工具和推理的收尾生成，确保得到真正可发送的最终消息，
+                                // 同时不把内部思考内容直接暴露给用户。
+                                val generatedAssistant = finalMessages.lastOrNull { it.role == MessageRole.ASSISTANT }
+                                val generatedText = generatedAssistant?.parts
+                                    ?.filterIsInstance<UIMessagePart.Text>()
+                                    ?.joinToString("\n") { it.text }
+                                    ?.trim().orEmpty()
+                                val hasReasoning = generatedAssistant?.parts
+                                    ?.filterIsInstance<UIMessagePart.Reasoning>()
+                                    ?.any { it.reasoning.isNotBlank() } == true
+                                if (generatedText.isBlank() && hasReasoning) {
+                                    Log.w(TAG, "Thinking response has no final text; requesting a final user-visible message")
+                                    val finalizePrompt = UIMessage(
+                                        role = MessageRole.USER,
+                                        parts = listOf(UIMessagePart.Text(
+                                            "根据刚才的想法给出最终结果。只输出 [PASS]、[WAIT:分钟]、[STOP]，" +
+                                                "或者真正想说的一句话；不要再次解释过程。"
+                                        )),
+                                    )
+                                    var finalized = filesManager.validAttachments(
+                                        mergeAdjacentSameRoleMessages(finalMessages + finalizePrompt), forSending = true,
+                                    ).withoutHistoricalCameraImages().filterNot { it.parts.isEmpty() }
+                                    executor.networkTurn(task) {
+                                        providerImpl.streamText(
+                                            providerSetting = providerSetting,
+                                            messages = finalized,
+                                            params = params.copy(tools = emptyList(), reasoningLevel = ReasoningLevel.OFF),
+                                        ).collect { chunk ->
+                                            finalized = finalized.handleMessageChunk(chunk = chunk, model = model)
+                                        }
+                                    }
+                                    finalized.lastOrNull { it.role == MessageRole.ASSISTANT }?.let { message ->
+                                        val now = kotlin.time.Clock.System.now()
+                                        // Keep the complete visible thinking chain. The old finalizer retained only
+                                        // Reasoning and silently dropped Tool parts, so proactive tool calls were
+                                        // executed but disappeared from the normal ChatMessage tool UI.
+                                        val originalThinkingTrace = generatedAssistant?.parts
+                                            ?.filter { it is UIMessagePart.Reasoning || it is UIMessagePart.Tool }
+                                            ?.map { part ->
+                                                if (part is UIMessagePart.Reasoning && part.finishedAt == null) {
+                                                    part.copy(finishedAt = now)
+                                                } else {
+                                                    part
+                                                }
+                                            }
+                                            .orEmpty()
+                                        val finalVisibleParts = message.parts.filterNot { it is UIMessagePart.Reasoning }
+                                        // 沿用原 thinking 消息的 id，把思考链与最终正文合在同一条气泡中。
+                                        val completed = message.copy(
+                                            id = generatedAssistant?.id ?: message.id,
+                                            parts = originalThinkingTrace + finalVisibleParts,
+                                        )
+                                        trace.event(
+                                            "finalizer",
+                                            "preservedTools=${originalThinkingTrace.count { it is UIMessagePart.Tool }} " +
+                                                "shape=${ProactiveMessageTrace.messageShape(completed)}",
+                                        )
+                                        updateOrAppendAiMessage(
+                                            conversationId,
+                                            completed,
+                                            trace,
+                                            runAssistantMessageIds,
+                                            protectedMessageIds,
+                                        )
+                                        finalMessages = finalized.dropLast(1) + completed
+                                    }
+                                }
+
+                                // 提取AI消息
+                                val aiMessage = finalMessages.lastOrNull { it.role == MessageRole.ASSISTANT } ?: UIMessage(
+                                    role = MessageRole.ASSISTANT,
+                                    parts = emptyList()
+                                )
+                                if (hasToolCalls && aiMessage.getTools().isEmpty()) {
+                                    trace.event("warning", "tool_called_but_missing_from_final_message=true")
+                                }
+
+                                // 用户可能在主动生成期间回来了。即使厂商 ROM/Provider 没及时传播取消，
+                                // 保存前也必须重新读取真实会话并核对锚点，绝不把过期主动回复插入正常聊天。
+                                trace.event("anchor_recheck_start")
+                                val latestPersistedUserId = conversationRepository.getConversationById(conversationId)
+                                    ?.currentMessages
+                                    ?.lastOrNull { it.role == MessageRole.USER }
+                                    ?.id
+                                    ?.toString()
+                                val anchorUnchanged = latestPersistedUserId == latestUserMessage.id.toString()
+                                trace.event("anchor_recheck_end", "unchanged=$anchorUnchanged")
+                                val latestProactiveSetting = settingsStore.settingsFlow.first().proactiveMessageSetting
+                                val stillAllowed = canRunProactiveWakeup(
+                                    appointment, latestProactiveSetting, System.currentTimeMillis(), java.time.ZoneId.systemDefault(),
+                                    manual = triggerSource == "manual",
+                                )
+                                if (!anchorUnchanged || !stillAllowed) {
+                                    outcome = if (!anchorUnchanged) "user_returned" else "disabled_or_quiet_hours"
+                                    removeProactiveRunMessages(
+                                        conversationId = conversationId,
+                                        messageIds = runAssistantMessageIds + aiMessage.id,
+                                        protectedMessageIds = protectedMessageIds,
+                                        trace = trace,
+                                        label = "user_returned",
+                                    )
+                                    return@launch
+                                }
+
+                                val rawText = aiMessage.parts.filterIsInstance<UIMessagePart.Text>()
+                                    .joinToString("\n") { it.text }.trim()
+                                val reasoningText = aiMessage.parts.filterIsInstance<UIMessagePart.Reasoning>()
+                                    .joinToString("\n") { it.reasoning }
+                                val decision = parseProactiveDecision(
+                                    rawText,
+                                    reasoningText,
+                                    hasJumpFlag,
+                                    alwaysRespond = proactiveSetting.alwaysRespond,
+                                )
+                                val replyText = decision.message
+                                val shouldJump = decision.shouldJump
+                                nextDelayOverride.set(decision.waitMinutes)
+                                val decisionSlotMinutes = when {
+                                    decision.stopUntilUserReturns -> 240
+                                    decision.waitMinutes != null -> decision.waitMinutes
+                                    !decision.shouldSend -> 30
+                                    else -> null
+                                }
+                                if (!decision.shouldSend && !decision.stopUntilUserReturns && decision.waitMinutes == null) {
+                                    nextDelayOverride.set(decisionSlotMinutes)
+                                }
+                                if (decisionSlotMinutes != null && !ProactiveMessageService.persistDurableNextSlot(
+                                        this@ProactiveMessageTriggerService,
+                                        System.currentTimeMillis(),
+                                        decisionSlotMinutes,
+                                    )
+                                ) error("Could not persist proactive decision slot")
+                                if (decision.stopUntilUserReturns) {
+                                    wakeupStore.cancel(conversationId.toString())
+                                    stateStore.stopUntilUserReturns(proactiveState)
+                                    nextDelayOverride.set(240)
+                                }
+
+                                // 若移除了标记，同步更新 session 里 aiMessage 的文本 parts
+                                val cleanedAiMessage = if (rawText != replyText) {
+                                    var visibleTextWritten = false
+                                    aiMessage.copy(
+                                        parts = aiMessage.parts.map { part ->
+                                            if (part is UIMessagePart.Text) {
+                                                if (!visibleTextWritten) {
+                                                    visibleTextWritten = true
+                                                    UIMessagePart.Text(replyText)
+                                                } else {
+                                                    UIMessagePart.Text("")
+                                                }
+                                            } else {
+                                                part
+                                            }
+                                        }
+                                    )
+                                } else aiMessage
+                                trace.event(
+                                    "decision",
+                                    "send=${decision.shouldSend} wait=${decision.waitMinutes ?: 0} " +
+                                        "stop=${decision.stopUntilUserReturns} jump=${decision.shouldJump} " +
+                                        "shape=${ProactiveMessageTrace.messageShape(aiMessage)}",
+                                )
+
+                                Log.d(
+                                    TAG,
+                                    "Proactive message generated: length=${replyText.length}, " +
+                                        "hasToolCalls=$hasToolCalls, shouldJump=$shouldJump",
+                                )
+
+                                // Record every decision before publishing/removing anything. The
+                                // previous placement after the publish branch made SKIP and a
+                                // revoked publication invisible in the background activity list.
+                                recordActivity(
+                                    outcome = when {
+                                        decision.shouldSend -> "已发送主动消息"
+                                        decision.stopUntilUserReturns -> "等待对方再次开口"
+                                        decision.waitMinutes != null -> "决定再等${decision.waitMinutes}分钟"
+                                        else -> "这轮没有发消息"
+                                    },
+                                    note = decision.activityNote,
+                                    tools = finalMessages.filter { it.id in runAssistantMessageIds }
+                                        .flatMap { it.getTools() }.filter { it.isExecuted }
+                                        .map { it.toolName.take(80) }.distinct(),
+                                )
+
+                                if (!decision.shouldSend) {
+                                    outcome = when {
+                                        decision.stopUntilUserReturns -> "stop"
+                                        decision.waitMinutes != null -> "wait"
+                                        else -> "pass"
+                                    }
+                                    // AI 选择跳过，移除本次生成的 aiMessage node（基于 id 匹配，不误删历史）
+                                    Log.d(ProactiveMessageService.TAG, "AI chose to skip proactive message")
+                                    removeProactiveRunMessages(
+                                        conversationId = conversationId,
+                                        messageIds = runAssistantMessageIds + aiMessage.id,
+                                        protectedMessageIds = protectedMessageIds,
+                                        trace = trace,
+                                        label = "skip",
+                                    )
+                                } else {
+                                    val completedMessages = (finalMessages.filter {
+                                        it.id in runAssistantMessageIds && it.id != aiMessage.id
+                                    } + cleanedAiMessage).associateBy { it.id }.values.map { completed ->
+                                        completed.copy(
+                                            parts = completed.parts.map { part ->
+                                                if (part is UIMessagePart.Text) part.copy(text = stripProactiveNotes(part.text)) else part
+                                            },
+                                            finishedAt = kotlin.time.Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()),
+                                        )
+                                    }
+                                    currentCoroutineContext().ensureActive()
+                                    val published = chatService.publishProactiveMessages(
+                        conversationId, assistant.id, latestUserMessage.id, task, completedMessages, executor,
+                    )
+                    if (!published) {
+                                        outcome = "revoked_before_publication"
+                                        recordActivity(
+                                            outcome = "发布前被取消",
+                                            note = "插件任务或授权在写入前被停止，本轮没有保存消息。",
+                                        )
+                                        return@launch
+                                    }
+                                    reactionTurn.onGenerationSucceeded(completedMessages.last())
+                                    appointmentMessageSaved = true
+                                    outcome = "sent"
+                                    val persistedRunIds = chatService.getConversationFlow(conversationId).value.currentMessages
+                                        .asSequence()
+                                        .filter { it.id in runAssistantMessageIds }
+                                        .map { it.id.toString() }
+                                        .toSet()
+                                    stateStore.recordSent(
+                                        state = proactiveState,
+                                        messageIds = persistedRunIds.ifEmpty { setOf(aiMessage.id.toString()) },
+                                        text = replyText,
+                                    )
+                                    runCatching {
+                                        showProactiveNotification(conversationId, assistant.name.ifBlank { "AI" }, replyText)
+                                    }.onFailure {
+                                        trace.event("notification", "delivered=false messagePersisted=true")
+                                        Log.w(TAG, "Notification failed; proactive message remains in conversation", it)
+                                    }
+                                    // 强制跳转屏幕到聊天界面（方案 A：普通拉起前台）
+                                    if (shouldJump && settingsStore.settingsFlow.value.proactiveMessageSetting.allowForceJump) {
+                                        try {
+                                            val jumpIntent = Intent(this@ProactiveMessageTriggerService, RouteActivity::class.java).apply {
+                                                addFlags(
+                                                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                                        Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                                )
+                                                putExtra("conversationId", conversationId.toString())
+                                            }
+                                            startActivity(jumpIntent)
+                                            Log.d(TAG, "Force jump to conversation $conversationId")
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Force jump failed", e)
+                                        }
+                                    }
+                                }
+                            } catch (e: CancellationException) {
+                                outcome = "cancelled"
+                                failure = e
+                                // 协程被取消（通常是用户发了新消息，sendMessage 里 session.getJob()?.cancel() 触发），
+                                // 这是正常情况，不应当成错误。打印 debug 日志并重新抛出，遵循 Kotlin 协程取消传播语义。
+                                // 注意 catch 顺序：CancellationException 必须在 Exception 之前，否则被泛化分支提前吃掉。
+                                // 重新抛出后 finally 块仍会正常执行（scheduleNext 已用 NonCancellable 保护）。
+                                Log.d(
+                                    ProactiveMessageService.TAG,
+                                    "Proactive generation cancelled (likely user started a new message), " +
+                                        "conversationId=$conversationId"
+                                )
+                                throw e
+                            } catch (e: Exception) {
+                                outcome = "failed"
+                                failure = e
+                                Log.e(ProactiveMessageService.TAG, "Failed to trigger proactive message", e)
+                                // 如果是 API 返回的 HTTP 错误, 把原始错误体也打出来便于定位
+                                val cause = e.cause
+                                if (cause != null) {
+                                    Log.e(ProactiveMessageService.TAG, "Underlying cause: ${cause::class.simpleName}: ${cause.message}", cause)
+                                }
+                            } finally {
+                                // 确保无论成功/失败/取消都安排下一次，避免一次 API 错误或用户打断永久中断定时链。
+                                // 激进模式设备事件触发时不需要安排下一次定时主动消息（由 DeviceEventAiTriggerService 自己驱动）。
+                                // 用 NonCancellable 包裹：协程被取消后处于已取消状态，finally 里的挂起点
+                                // (settingsFlow.first()) 会立刻抛 CancellationException，导致 scheduleNext 被跳过、
+                                // 定时链断裂。NonCancellable 保证这段收尾逻辑跑完。
+                                withContext(NonCancellable) {
+                                    selectedAppointment?.let { appointment ->
+                                        runCatching {
+                                            withContext(Dispatchers.IO) {
+                                                ProactiveWakeupStore(this@ProactiveMessageTriggerService).finish(
+                                                    appointment, if (appointmentMessageSaved) "sent" else outcome,
+                                                )
+                                            }
+                                        }.onFailure { Log.w(TAG, "Failed to record appointment outcome", it) }
+                                    }
+                                    if ((outcome == "failed" || outcome == "cancelled") &&
+                                        conversationId != null && runAssistantMessageIds.isNotEmpty()
+                                    ) {
+                                        runCatching {
+                                            removeProactiveRunMessages(
+                                                conversationId = conversationId!!,
+                                                messageIds = runAssistantMessageIds,
+                                                protectedMessageIds = protectedMessageIds,
+                                                trace = trace,
+                                                label = outcome,
+                                            )
+                                        }.onFailure { cleanupError ->
+                                            Log.w(
+                                                ProactiveMessageService.TAG,
+                                                "Failed to clean exact proactive run messages",
+                                                cleanupError,
+                                            )
+                                        }
+                                    }
+
+                                }
+                                conversationId?.let { chatService.removeConversationReference(it) }
+                                trace.finish(outcome, failure)
                             }
-                            startActivity(jumpIntent)
-                            Log.d(TAG, "Force jump to conversation $conversationId")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Force jump failed", e)
-                        }
+                        }.join()
                     }
-                }
-                runCatching { activityStore.append(ProactiveActivity(
-                    id = aiMessage.id.toString(),
-                    timestamp = System.currentTimeMillis(),
-                    outcome = when {
-                        decision.shouldSend -> "已发送主动消息"
-                        decision.stopUntilUserReturns -> "等待对方再次开口"
-                        decision.waitMinutes != null -> "决定再等${decision.waitMinutes}分钟"
-                        else -> "这轮没有发消息"
-                    },
-                    note = decision.activityNote,
-                    toolNames = finalMessages.filter { it.id in runAssistantMessageIds }
-                        .flatMap { it.getTools() }.filter { it.isExecuted }
-                        .map { it.toolName.take(80) }.distinct().take(12),
-                )) }.onFailure { Log.w(TAG, "Could not persist proactive activity summary", it) }
-            } catch (e: CancellationException) {
-                outcome = "cancelled"
-                failure = e
-                // 协程被取消（通常是用户发了新消息，sendMessage 里 session.getJob()?.cancel() 触发），
-                // 这是正常情况，不应当成错误。打印 debug 日志并重新抛出，遵循 Kotlin 协程取消传播语义。
-                // 注意 catch 顺序：CancellationException 必须在 Exception 之前，否则被泛化分支提前吃掉。
-                // 重新抛出后 finally 块仍会正常执行（scheduleNext 已用 NonCancellable 保护）。
-                Log.d(
-                    ProactiveMessageService.TAG,
-                    "Proactive generation cancelled (likely user started a new message), " +
-                        "conversationId=$conversationId"
-                )
-                throw e
-            } catch (e: Exception) {
-                outcome = "failed"
-                failure = e
-                Log.e(ProactiveMessageService.TAG, "Failed to trigger proactive message", e)
-                // 如果是 API 返回的 HTTP 错误, 把原始错误体也打出来便于定位
-                val cause = e.cause
-                if (cause != null) {
-                    Log.e(ProactiveMessageService.TAG, "Underlying cause: ${cause::class.simpleName}: ${cause.message}", cause)
                 }
             } finally {
-                // 确保无论成功/失败/取消都安排下一次，避免一次 API 错误或用户打断永久中断定时链。
-                // 激进模式设备事件触发时不需要安排下一次定时主动消息（由 DeviceEventAiTriggerService 自己驱动）。
-                // 用 NonCancellable 包裹：协程被取消后处于已取消状态，finally 里的挂起点
-                // (settingsFlow.first()) 会立刻抛 CancellationException，导致 scheduleNext 被跳过、
-                // 定时链断裂。NonCancellable 保证这段收尾逻辑跑完。
                 withContext(NonCancellable) {
-                    selectedAppointment?.let { appointment ->
-                        runCatching {
-                            withContext(Dispatchers.IO) {
-                                ProactiveWakeupStore(this@ProactiveMessageTriggerService).finish(
-                                    appointment, if (appointmentMessageSaved) "sent" else outcome,
-                                )
-                            }
-                        }.onFailure { Log.w(TAG, "Failed to record appointment outcome", it) }
-                    }
-                    if ((outcome == "failed" || outcome == "cancelled") &&
-                        conversationId != null && runAssistantMessageIds.isNotEmpty()
-                    ) {
-                        runCatching {
-                            removeProactiveRunMessages(
-                                conversationId = conversationId!!,
-                                messageIds = runAssistantMessageIds,
-                                protectedMessageIds = protectedMessageIds,
-                                trace = trace,
-                                label = outcome,
-                            )
-                        }.onFailure { cleanupError ->
-                            Log.w(
-                                ProactiveMessageService.TAG,
-                                "Failed to clean exact proactive run messages",
-                                cleanupError,
-                            )
-                        }
-                    }
-                    val normalConversationOwnsTimer = (outcome == "cancelled" && serviceJob.isActive) || outcome in setOf(
-                        "user_returned",
-                        "generation_busy",
-                        "user_not_idle",
+                    ProactiveMessageService.scheduleNext(
+                        this@ProactiveMessageTriggerService,
+                        settingsStore.settingsFlow.value.proactiveMessageSetting,
+                        nextDelayOverride.get() ?: ProactiveMessageService.durableNextSlot(this@ProactiveMessageTriggerService)
+                            ?.let { dueAt -> durableSlotRemainingMinutes(dueAt, System.currentTimeMillis()) },
                     )
-                    val hasPendingAppointment = ProactiveWakeupStore(this@ProactiveMessageTriggerService).all().isNotEmpty()
-                    if (!normalConversationOwnsTimer || hasPendingAppointment) {
-                        try {
-                            val currentSettings = settingsStore.settingsFlow.first()
-                            ProactiveMessageService.scheduleNext(
-                                this@ProactiveMessageTriggerService,
-                                currentSettings.proactiveMessageSetting,
-                                nextDelayOverrideMinutes,
-                            )
-                        } catch (e: Exception) {
-                            Log.e(ProactiveMessageService.TAG, "Failed to reschedule after completion/error", e)
-                        }
-                    } else {
-                        trace.event("reschedule", "skipped=true owner=normal_conversation")
-                    }
                 }
-                conversationId?.let { chatService.removeConversationReference(it) }
                 releaseGenerationWakeLock(startId)
-                trace.event("wake_lock", "acquired=false")
-                trace.finish(outcome, failure)
-                val remainingRuns = activeRunCount.updateAndGet { count ->
-                    (count - 1).coerceAtLeast(0)
-                }
-                if (remainingRuns == 0) {
-                    stopSelf()
-                }
+                if (activeRunCount.decrementAndGet() == 0) stopSelf()
             }
         }
 
@@ -1330,48 +1369,6 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
         }
     }
 
-    /** 保存主动消息到对话历史；控制上下文不会持久化。 */
-    private suspend fun saveProactiveMessage(
-        assistant: Assistant,
-        conversationId: Uuid,
-        existingConversation: Conversation?,
-        trace: ProactiveMessageTrace,
-    ) {
-        val assistantUuid = assistant.id
-
-        // 确保对话存在于数据库（新建时 insert）。
-        // 若 session 为空且没有已存对话，先 insert 一条空对话占位，避免后续 saveConversation 跳过。
-        if (existingConversation == null) {
-            val session = chatService.getOrCreateSession(conversationId)
-            session.withStateLock {
-                val exists = conversationRepository.existsConversationById(conversationId)
-                if (!exists) {
-                    val newConversation = Conversation(
-                        id = conversationId,
-                        assistantId = assistantUuid,
-                        title = "",
-                        messageNodes = emptyList()
-                    )
-                    conversationRepository.insertConversation(newConversation)
-                }
-            }
-        }
-
-        // 流式过程中已实时追加 aiMessage 到 session，这里直接持久化当前 session 状态。
-        // 加 saveMutex 防止与用户发送消息/其他主动消息并发覆盖。
-        val session = chatService.getOrCreateSession(conversationId)
-        session.withStateLock {
-            trace.conversation("save_before", chatService.getConversationFlow(conversationId).value)
-            chatService.saveConversationLocked(
-                conversationId,
-                chatService.getConversationFlow(conversationId).value
-            )
-            trace.conversation("save_after", chatService.getConversationFlow(conversationId).value)
-        }
-
-        Log.d(TAG, "Saved proactive message to conversation $conversationId")
-    }
-
     private fun showProactiveNotification(
         conversationId: kotlin.uuid.Uuid,
         senderName: String,
@@ -1390,7 +1387,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
 
         sendNotification(
             channelId = CHAT_COMPLETED_NOTIFICATION_CHANNEL_ID,
-            notificationId = 20002
+            notificationId = conversationId.hashCode()
         ) {
             title = senderName
             content = message.take(100)
@@ -1467,46 +1464,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
             )
             error("Proactive generation attempted to overwrite a pre-existing message")
         }
-        if (!persist) return
-        val session = chatService.getOrCreateSession(conversationId)
-        session.withStateLock {
-            kotlinx.coroutines.currentCoroutineContext().ensureActive()
-            val conv = chatService.getConversationFlow(conversationId).value
-            val existingNodeIndex = conv.messageNodes.indexOfFirst { node ->
-                node.messages.any { it.id == aiMessage.id }
-            }
-            val anchorChanged = conv.currentMessages.lastOrNull { it.role == MessageRole.USER }?.id !in protectedMessageIds
-            val committedMessage = if (anchorChanged) {
-                val existing = conv.messageNodes.getOrNull(existingNodeIndex)?.messages?.find { it.id == aiMessage.id }
-                if (!allowToolCompletionAfterUserReturn || existing == null) {
-                    throw CancellationException("User turn changed before proactive message commit")
-                }
-                mergeProactiveToolCompletion(existing, aiMessage)
-                    ?: throw CancellationException("No owned started tool remains after user return")
-            } else reactionTurn?.finish(
-                aiMessage, conv.currentMessages, conv.id.toString(), conv.assistantId.toString(),
-            ) ?: aiMessage
-            val toolCount = aiMessage.getTools().size
-            if (toolCount > 0) {
-                trace.event(
-                    "tool_persist",
-                    "message=${ProactiveMessageTrace.safeId(aiMessage.id)} tools=$toolCount " +
-                        "executed=${aiMessage.getTools().count { it.isExecuted }} existingNode=${existingNodeIndex >= 0}",
-                )
-            }
-            val mutation = conv.generationMessageMutation(listOf(committedMessage))
-            chatService.applyMessageMutationLocked(conversationId, mutation)
-            try {
-                chatService.saveConversationLocked(conversationId, session.state.value)
-            } catch (error: Exception) {
-                if (reactionTurn != null && committedMessage != aiMessage) {
-                    chatService.applyMessageMutationLocked(
-                        conversationId, session.state.value.generationMessageMutation(listOf(aiMessage)),
-                    )
-                }
-                throw error
-            }
-        }
+        // Intermediate provider chunks and tool checkpoints stay request-local.
     }
 
     /** Remove only assistant nodes created by this exact proactive run. */
@@ -1517,39 +1475,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
         trace: ProactiveMessageTrace,
         label: String,
     ) {
-        if (messageIds.isEmpty()) return
-        val requestedIds = messageIds.toSet()
-        val ids = ownedProactiveCleanupIds(requestedIds, protectedMessageIds)
-        if (ids.isEmpty()) {
-            trace.event(
-                "run_cleanup",
-                "label=$label requested=${requestedIds.size} removed=0 protected=${requestedIds.size}",
-            )
-            return
-        }
-        val session = chatService.getOrCreateSession(conversationId)
-        session.withStateLock {
-            val conversation = chatService.getConversationFlow(conversationId).value
-            trace.conversation("${label}_before", conversation)
-            val updated = conversation.copy(
-                messageNodes = conversation.messageNodes.filterNot { node ->
-                    node.messages.any { it.id in ids } &&
-                        node.messages.none { message -> message.getTools().any {
-                            it.executionCheckpointState in setOf("started", "completed", "failed", "unknown")
-                        } }
-                },
-            )
-            if (updated.messageNodes.size != conversation.messageNodes.size) {
-                chatService.updateConversation(conversationId, updated)
-                chatService.saveConversationLocked(conversationId, updated)
-            }
-            trace.event(
-                "run_cleanup",
-                "label=$label requested=${requestedIds.size} protected=${requestedIds.size - ids.size} " +
-                    "removed=${conversation.messageNodes.size - updated.messageNodes.size}",
-            )
-            trace.conversation("${label}_after", updated)
-        }
+        // There are no speculative messages in the host conversation to remove.
     }
 
     /**
@@ -1609,6 +1535,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
         protectedMessageIds: Set<Uuid>,
         activityStore: ProactiveActivityStore,
         reactionTurn: ReactionContextTurn,
+        task: ProactiveTask,
     ): Triple<List<UIMessage>, Boolean, Boolean> {
         var messages = initialMessages
         var hasToolCalls = false
@@ -1622,7 +1549,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                 trace,
                 runAssistantMessageIds,
                 protectedMessageIds,
-                persist = true,
+                persist = false,
                 allowToolCompletionAfterUserReturn = call.isExecuted,
             )
             messages = checkpointed
@@ -1656,21 +1583,23 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
             maxSteps = MAX_TOOL_STEPS,
             reserveFinalModelTurn = true,
             toolLimitError = "Proactive tool limit reached before a final reply",
-            toolsForStep = { tools },
+            toolsForStep = { step -> if (step == MAX_TOOL_STEPS) emptyList() else tools },
             onStep = { step, finalTurn ->
                 Log.d(TAG, "generateWithTools: step $step/$MAX_TOOL_STEPS final=$finalTurn")
                 trace.event("generation_step", "step=$step final=$finalTurn")
             },
-            generateTurn = { turnMessages, _, step ->
+            generateTurn = { turnMessages, turnTools, step ->
                 val sourceMessages = chatService.getConversationFlow(conversationId).value.currentMessages.let { source ->
                     val requestedIds = turnMessages.mapTo(hashSetOf()) { it.id }
                     source.take(source.indexOfLast { it.id in requestedIds } + 1)
                 }
+                // No camera capability in a background run: each tool round is rebuilt from
+                // durable history, so clean it before decorating/encoding and again after transforms.
                 val requestMessages = filesManager.validAttachments(
                     mergeAdjacentSameRoleMessages(
                         prepareProactiveToolContinuation(
                             chatInteractionRepository.decorate(
-                                turnMessages,
+                                turnMessages.withoutHistoricalCameraImages(),
                                 conversationId.toString(),
                                 assistant,
                                 sourceMessages = sourceMessages,
@@ -1685,18 +1614,18 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                     model = model,
                     assistant = assistant,
                     settings = settings,
-                )
+                ).withoutHistoricalCameraImages()
                 var streamMessages = beginProactiveAssistantTurn(turnMessages, model.id)
                 trace.event(
                     "assistant_turn",
                     "step=$step message=${ProactiveMessageTrace.safeId(streamMessages.last().id)} fresh=true",
                 )
-                streamMessages = generateModelTurn(
+                streamMessages = executor.networkTurn(task) { generateModelTurn(
                     providerImpl = providerImpl,
                     providerSetting = providerSetting,
                     requestMessages = requestMessages,
                     initialMessages = streamMessages,
-                    params = params,
+                    params = params.copy(tools = turnTools),
                     model = model,
                     stream = true,
                     mergeUsage = false,
@@ -1712,6 +1641,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                         }
                     },
                 )
+                }
                 val aiMessage = streamMessages.lastOrNull() ?: run {
                     Log.w(TAG, "No message in AI response")
                     return@runGenerationToolLoop turnMessages
@@ -1729,7 +1659,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                     assistant = assistant,
                     settings = settings,
                 ).first()
-                messages = reactionTurn.markPending(turnMessages.dropLast(1) + processedMessage)
+                messages = reactionTurn.markPending(turnMessages + processedMessage)
                 val toolCalls = processedMessage.getTools().filter { !it.isExecuted }
                 trace.event(
                     "model_result",
@@ -1760,12 +1690,21 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                 messages
             },
             executeTool = { toolCall, toolDef, step ->
+                executor.requireAllowed(task)
                 trace.event(
                     "tool_call",
                     "step=$step name=${toolCall.toolName} id=${ProactiveMessageTrace.safeId(toolCall.toolCallId)} " +
                         "definitionFound=${toolDef != null}",
                 )
-                if (!toolCall.hasDurableToolEvidence && toolDef != null && !canExecuteProactiveTool(
+                if (!toolCall.hasDurableToolEvidence && me.rerere.rikkahub.data.ai.tools.ToolNaming.toDisplayName(
+                        toolDef?.name.orEmpty(),
+                    ) in PROACTIVE_DISALLOWED_PAID_TOOLS) {
+                    val rejected = toolCall.copy(output = listOf(UIMessagePart.Text(
+                        "This paid tool is not available in proactive background runs.",
+                    ))).withExecutionCheckpoint("denied")
+                    withContext(NonCancellable) { persistToolCheckpoint(rejected) }
+                    rejected
+                } else if (!toolCall.hasDurableToolEvidence && toolDef != null && !canExecuteProactiveTool(
                         toolDef.needsApproval,
                         settings.forceConfirmToolCalls,
                         settings.autoApproveAllTools,

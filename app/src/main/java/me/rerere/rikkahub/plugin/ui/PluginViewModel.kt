@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -15,17 +15,26 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
+import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.plugin.manager.PluginManager
+import me.rerere.rikkahub.plugin.manager.PluginUninstallDataPolicy
+import me.rerere.rikkahub.plugin.manager.PluginUninstallPolicyRelay
+import me.rerere.rikkahub.plugin.manager.PluginUninstallResult
 import me.rerere.rikkahub.plugin.model.PluginFolder
 import me.rerere.rikkahub.plugin.model.PluginInfo
 import me.rerere.rikkahub.plugin.model.PluginManifest
+import me.rerere.rikkahub.theme.packageio.ValidatedThemePackage
+import me.rerere.rikkahub.ui.pages.setting.loadThemePackageFromUri
+import me.rerere.rikkahub.ui.theme.CustomTheme
 import java.io.File
 
 /**
  * 插件ViewModel
  */
 class PluginViewModel(
-    private val pluginManager: PluginManager
+    private val pluginManager: PluginManager,
+    private val settingsStore: SettingsStore,
+    private val context: android.content.Context,
 ) : ViewModel() {
 
     // 插件列表
@@ -43,6 +52,11 @@ class PluginViewModel(
     // 预览导入状态（用于权限确认对话框）
     private val _pendingImport = MutableStateFlow<PendingImport?>(null)
     val pendingImport: StateFlow<PendingImport?> = _pendingImport.asStateFlow()
+
+    // A ZIP that is actually a declarative theme package. The plugin page can apply it instead
+    // of surfacing a misleading PluginManifest deserialization error.
+    private val _pendingTheme = MutableStateFlow<ValidatedThemePackage?>(null)
+    val pendingTheme: StateFlow<ValidatedThemePackage?> = _pendingTheme.asStateFlow()
 
     // 操作状态
     private val _operationState = MutableStateFlow<OperationState>(OperationState.Idle)
@@ -69,6 +83,7 @@ class PluginViewModel(
         viewModelScope.launch {
             _importState.value = ImportState.Loading
             try {
+                if (tryPreviewTheme(uri)) return@launch
                 val result = pluginManager.previewPlugin(uri)
                 if (result.isSuccess) {
                     val pair = result.getOrThrow()
@@ -123,6 +138,7 @@ class PluginViewModel(
         viewModelScope.launch {
             _importState.value = ImportState.Loading
             try {
+                if (tryPreviewTheme(uri)) return@launch
                 val result = pluginManager.importPlugin(uri)
                 _importState.value = if (result.isSuccess) {
                     ImportState.Success(result.getOrThrow())
@@ -144,20 +160,55 @@ class PluginViewModel(
 
     /**
      * 删除插件
+     *
+     * 默认保留 localdata（重新安装可恢复）；只有用户在原生卸载对话框里显式选择
+     * [PluginUninstallDataPolicy.DELETE_LOCAL_DATA] 时才删除独立数据库与媒体目录。
      */
-    fun deletePlugin(pluginId: String) {
+    fun deletePlugin(
+        pluginId: String,
+        dataPolicy: PluginUninstallDataPolicy =
+            PluginUninstallPolicyRelay.consume(pluginId)
+                ?: PluginUninstallDataPolicy.PRESERVE_LOCAL_DATA,
+    ) {
+        // The default argument above already consumed a staged folder-page choice; this also drops
+        // any stale choice when a caller passes an explicit policy.
+        PluginUninstallPolicyRelay.consume(pluginId)
         viewModelScope.launch {
             _operationState.value = OperationState.Loading
             try {
-                val result = pluginManager.deletePlugin(pluginId)
+                val result = pluginManager.deletePlugin(pluginId, dataPolicy)
                 _operationState.value = result.fold(
-                    onSuccess = { OperationState.Success("插件已删除") },
+                    onSuccess = { OperationState.Success(uninstallMessage(it)) },
                     onFailure = { OperationState.Error(it.message ?: "删除插件失败") }
                 )
             } catch (e: Exception) {
                 _operationState.value = OperationState.Error(e.message ?: "Unknown error")
             }
         }
+    }
+
+    /**
+     * 通过系统 SAF 导出该插件的 localdata 备份（卸载前恢复入口）。
+     */
+    fun exportLocalDataBackup(pluginId: String, destination: android.net.Uri) {
+        viewModelScope.launch {
+            _operationState.value = OperationState.Loading
+            try {
+                val result = pluginManager.exportLocalDataBackup(pluginId, destination)
+                _operationState.value = result.fold(
+                    onSuccess = { OperationState.Success("备份已导出，可继续卸载或保留数据") },
+                    onFailure = { OperationState.Error("导出备份失败：${it.message ?: "未知错误"}") }
+                )
+            } catch (e: Exception) {
+                _operationState.value = OperationState.Error(e.message ?: "Unknown error")
+            }
+        }
+    }
+
+    private fun uninstallMessage(result: PluginUninstallResult): String = when {
+        result.localDataDeletionIncomplete -> "插件已卸载，但部分本地数据未能删除"
+        result.dataPolicy.removesLocalData -> "插件已卸载，本地数据已删除"
+        else -> "插件已卸载，本地数据已保留（重新安装可恢复）"
     }
 
     /**
@@ -195,6 +246,51 @@ class PluginViewModel(
      * 获取插件目录
      */
     fun getPluginsDirectory() = pluginManager.getPluginsDirectory()
+
+    /**
+     * Recognises a declarative theme ZIP before the plugin scanner tries to decode it as a
+     * PluginManifest. Returns true when the URI was a valid theme package.
+     */
+    private suspend fun tryPreviewTheme(uri: android.net.Uri): Boolean {
+        val theme = runCatching { loadThemePackageFromUri(context, uri) }.getOrNull() ?: return false
+        _pendingTheme.value = theme
+        _importState.value = ImportState.Idle
+        return true
+    }
+
+    fun cancelThemePreview() {
+        _pendingTheme.value = null
+    }
+
+    fun applyPendingTheme(themeId: String) {
+        val pack = _pendingTheme.value ?: return
+        val selected = pack.themes[themeId] ?: return
+        viewModelScope.launch {
+            val installed = pack.themes.values.map { tokens ->
+                CustomTheme(
+                    id = "package:${pack.manifest.id}:${tokens.id}",
+                    name = tokens.name,
+                    packageTokens = tokens,
+                )
+            }
+            val current = settingsStore.settingsFlow.value
+            context.getSharedPreferences("theme_package_restore", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString("themeId", current.themeId)
+                .putBoolean("dynamicColor", current.dynamicColor)
+                .apply()
+            settingsStore.update { latest ->
+                val ids = installed.map { it.id }.toSet()
+                latest.copy(
+                    customThemes = latest.customThemes.filterNot { it.id in ids } + installed,
+                    themeId = "package:${pack.manifest.id}:${selected.id}",
+                    dynamicColor = false,
+                )
+            }
+            _pendingTheme.value = null
+            _importState.value = ImportState.ThemeInstalled(selected.name)
+        }
+    }
 
     /**
      * 重置导入状态
@@ -256,6 +352,7 @@ class PluginViewModel(
         viewModelScope.launch {
             _importState.value = ImportState.Loading
             try {
+                if (tryPreviewTheme(uri)) return@launch
                 val result = pluginManager.importPlugin(uri, folderId)
                 _importState.value = if (result.isSuccess) {
                     ImportState.Success(result.getOrThrow())
@@ -279,6 +376,7 @@ class PluginViewModel(
         data object Idle : ImportState()
         data object Loading : ImportState()
         data class Success(val plugin: PluginInfo) : ImportState()
+        data class ThemeInstalled(val themeName: String) : ImportState()
         data class Error(val message: String) : ImportState()
     }
 

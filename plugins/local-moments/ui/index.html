@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://localdata.invalid data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src bridge:; base-uri 'none'; form-action 'none';">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>本机朋友圈</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="oc-skip" id="skipLink" href="#main">跳到主要内容</a>
+
+  <div class="oc-shell">
+    <header class="oc-header">
+      <div class="oc-brand">
+        <span class="oc-mark" aria-hidden="true">◎</span>
+        <div>
+          <p class="oc-eyebrow">LOCAL MOMENTS</p>
+          <h1>本机朋友圈</h1>
+        </div>
+      </div>
+      <div class="oc-header-actions">
+        <button id="btnRefresh" type="button" class="oc-icon-btn" aria-label="刷新动态" title="刷新动态">↻</button>
+        <button id="btnCompose" type="button" class="oc-btn oc-btn-primary">发布</button>
+      </div>
+    </header>
+
+    <nav class="oc-tabs" aria-label="主导航">
+      <button type="button" class="oc-tab is-active" data-nav="list">动态</button>
+      <button type="button" class="oc-tab" data-nav="drafts">草稿</button>
+      <button type="button" class="oc-tab" data-nav="settings">设置</button>
+    </nav>
+
+    <div id="hostNotice" class="oc-notice" role="status" hidden></div>
+
+    <main id="main" tabindex="-1">
+      <section id="view-list" class="oc-view" aria-labelledby="listTitle">
+        <div class="oc-section-head">
+          <div>
+            <p class="oc-eyebrow">READS LOCAL ONLY</p>
+            <h2 id="listTitle">本机动态</h2>
+          </div>
+          <span id="listMeta" class="oc-meta"></span>
+        </div>
+
+        <details id="filterPanel" class="oc-card oc-filter" open>
+          <summary>
+            <span>搜索与筛选</span>
+            <span id="filterSummary" class="oc-meta">全部动态</span>
+          </summary>
+          <div class="oc-filter-body">
+            <label class="oc-field" for="filterQuery">关键词
+              <input id="filterQuery" type="search" maxlength="100" autocomplete="off" placeholder="搜索正文或作者名（1–100 字）">
+            </label>
+            <div class="oc-grid2">
+              <label class="oc-field" for="filterAuthor">作者
+                <select id="filterAuthor"><option value="">全部作者</option></select>
+              </label>
+              <label class="oc-field" for="filterType">内容类型
+                <select id="filterType">
+                  <option value="">全部类型</option>
+                  <option value="text">文字</option>
+                  <option value="image">图片</option>
+                  <option value="chat_snapshot">聊天记录</option>
+                </select>
+              </label>
+            </div>
+            <div class="oc-grid2">
+              <label class="oc-field" for="filterFrom">起始日期
+                <input id="filterFrom" type="date">
+              </label>
+              <label class="oc-field" for="filterTo">结束日期
+                <input id="filterTo" type="date">
+              </label>
+            </div>
+            <div class="oc-actions">
+              <button id="applyFilters" type="button" class="oc-btn oc-btn-primary">应用</button>
+              <button id="resetFilters" type="button" class="oc-btn oc-btn-soft">重置</button>
+            </div>
+            <p class="oc-note">搜索在宿主本地 store 执行；打开、翻页、筛选都不会触发模型。</p>
+          </div>
+        </details>
+
+        <div id="listStatus" class="oc-status" role="status"></div>
+        <div id="postList" class="oc-feed"></div>
+        <div class="oc-load-row">
+          <button id="loadMore" type="button" class="oc-btn oc-btn-soft" hidden>加载更多</button>
+          <button id="restartList" type="button" class="oc-btn oc-btn-soft" hidden>重新开始浏览</button>
+        </div>
+        <p class="oc-note">默认每页 3 条，游标来自宿主；页面最多保留有限卡片节点，到上限后请用搜索或重置。</p>
+      </section>
+
+      <section id="view-detail" class="oc-view" aria-labelledby="detailTitle" hidden>
+        <button id="detailBack" type="button" class="oc-back">← 返回动态</button>
+        <h2 id="detailTitle" class="oc-sr-only">动态详情</h2>
+        <div id="detailPost"></div>
+
+        <div class="oc-card">
+          <div class="oc-section-head">
+            <h3>评论 <span id="detailCommentCount" class="oc-count"></span></h3>
+            <span class="oc-meta">按宿主游标加载</span>
+          </div>
+          <div id="detailComments" class="oc-comments"></div>
+          <button id="detailLoadComments" type="button" class="oc-btn oc-btn-soft" hidden>加载更多评论</button>
+        </div>
+
+        <div class="oc-card">
+          <label class="oc-field" for="commentBody">写评论
+            <textarea id="commentBody" maxlength="2000" rows="3" placeholder="只写入宿主本地 store；不会调用模型。"></textarea>
+          </label>
+          <div id="commentReply" class="oc-reply" hidden>
+            <span id="commentReplyText"></span>
+            <button id="commentReplyClear" type="button" class="oc-link-btn">取消回复</button>
+          </div>
+          <div class="oc-actions">
+            <span id="commentCount" class="oc-meta">0 / 2000</span>
+            <button id="commentSubmit" type="button" class="oc-btn oc-btn-primary">发表评论</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-editor" class="oc-view" aria-labelledby="editorTitle" hidden>
+        <button id="editorBack" type="button" class="oc-back">← 返回</button>
+        <div class="oc-section-head">
+          <div>
+            <p class="oc-eyebrow">COMPOSE</p>
+            <h2 id="editorTitle">发布动态</h2>
+          </div>
+          <span id="editorMode" class="oc-meta">新动态</span>
+        </div>
+
+        <div class="oc-card">
+          <label class="oc-field" for="editorBody">正文
+            <textarea id="editorBody" maxlength="20000" rows="6" placeholder="写点什么。正文只保存在宿主本地 store，不会解析 HTML。"></textarea>
+          </label>
+          <div class="oc-row-between">
+            <span class="oc-meta">纯文本编辑；图片通过宿主选择器导入。</span>
+            <span id="editorBodyCount" class="oc-meta">0 / 20000</span>
+          </div>
+
+          <div class="oc-section-head">
+            <h3>图片</h3>
+            <button id="editorAddImages" type="button" class="oc-btn oc-btn-soft">从相册添加</button>
+          </div>
+          <div id="editorMedia" class="oc-media-grid"></div>
+          <p id="editorMediaNote" class="oc-note">最多 9 张。列表只加载缩略图；点开才请求原图。移除只影响本次编辑，不删除宿主原图。</p>
+
+          <div class="oc-actions">
+            <button id="editorImportGenerated" type="button" class="oc-btn oc-btn-soft">导入已生成图片</button>
+            <span class="oc-note">从宿主已持久化的生图产物复制；不会重新生成图片，也不会消耗生图额度。</span>
+          </div>
+          <div id="editorGeneratedPicker" class="oc-card oc-generated-picker" hidden>
+            <div class="oc-section-head">
+              <h3>宿主已生成图片</h3>
+              <button id="editorGeneratedClose" type="button" class="oc-btn oc-btn-soft">关闭</button>
+            </div>
+            <p id="editorGeneratedStatus" class="oc-note"></p>
+            <div id="editorGeneratedList" class="oc-generated-list" role="list"></div>
+          </div>
+
+          <fieldset class="oc-fieldset">
+            <legend>可见范围</legend>
+            <div id="editorVisibility" class="oc-radio-list"></div>
+            <div id="editorAssistants" class="oc-check-list" hidden></div>
+            <p class="oc-note">可见范围与 ACL 由宿主执行；页面只提交枚举值，不提交身份。</p>
+          </fieldset>
+
+          <div id="editorChatSnapshot"></div>
+        </div>
+
+        <div class="oc-card">
+          <div class="oc-section-head">
+            <h3>发布前预览</h3>
+            <span class="oc-meta">仅本机渲染，不写入</span>
+          </div>
+          <div id="editorPreview"></div>
+        </div>
+
+        <div class="oc-actions oc-actions-sticky">
+          <button id="editorSaveDraft" type="button" class="oc-btn oc-btn-soft">保存草稿</button>
+          <button id="editorPublish" type="button" class="oc-btn oc-btn-primary">发布</button>
+        </div>
+        <p class="oc-note">发布权限、助手互动、自动发布和图片/聊天卡片权限属于宿主。助手互动设置请用页面右上角原生“互动”；本页不提交 actor，不能自证助手身份，也不会自动批准审核。</p>
+      </section>
+
+      <section id="view-drafts" class="oc-view" aria-labelledby="draftsTitle" hidden>
+        <div class="oc-section-head">
+          <div>
+            <p class="oc-eyebrow">PRIVATE DRAFTS</p>
+            <h2 id="draftsTitle">草稿箱</h2>
+          </div>
+          <span id="draftMeta" class="oc-meta"></span>
+        </div>
+        <div id="draftList" class="oc-feed"></div>
+        <div class="oc-load-row">
+          <button id="draftLoadMore" type="button" class="oc-btn oc-btn-soft" hidden>加载更多草稿</button>
+        </div>
+        <p class="oc-note">草稿按宿主身份隔离，只出现在草稿箱，不进入动态流或搜索。</p>
+      </section>
+
+      <section id="view-author" class="oc-view" aria-labelledby="authorTitle" hidden>
+        <button id="authorBack" type="button" class="oc-back">← 返回</button>
+        <div id="authorHeader" class="oc-card"></div>
+        <h2 id="authorTitle" class="oc-sr-only">作者主页</h2>
+        <div id="authorMeta" class="oc-status" role="status"></div>
+        <div id="authorPosts" class="oc-feed"></div>
+        <div class="oc-load-row">
+          <button id="authorLoadMore" type="button" class="oc-btn oc-btn-soft" hidden>加载更多</button>
+        </div>
+        <p class="oc-note">作者快照来自宿主写入时的名称/头像；助手被删除后历史仍可显示，但不会再获得新的调用权限。</p>
+      </section>
+
+      <section id="view-settings" class="oc-view" aria-labelledby="settingsTitle" hidden>
+        <div class="oc-section-head">
+          <div>
+            <p class="oc-eyebrow">HOST-OWNED RULES</p>
+            <h2 id="settingsTitle">朋友圈设置</h2>
+          </div>
+          <span id="settingsMeta" class="oc-meta"></span>
+        </div>
+
+        <div class="oc-card">
+          <h3>宿主身份</h3>
+          <div id="settingsIdentity"></div>
+        </div>
+
+        <div class="oc-card">
+          <h3>主题来源</h3>
+          <div id="settingsTheme"></div>
+        </div>
+
+        <div class="oc-card">
+          <h3>阅读</h3>
+          <label class="oc-field" for="settingPageSize">每页条数
+            <select id="settingPageSize">
+              <option value="3">3 条（默认）</option>
+              <option value="5">5 条</option>
+              <option value="10">10 条</option>
+            </select>
+          </label>
+          <p class="oc-note">只影响本次页面打开；不写入 localStorage。动态、草稿和媒体始终只在宿主 store。</p>
+          <button id="settingRefresh" type="button" class="oc-btn oc-btn-soft">重新读取动态</button>
+        </div>
+
+        <div class="oc-card">
+          <h3>助手互动（宿主原生设置）</h3>
+          <p class="oc-note"><strong>设置入口：</strong>宿主页面右上角的原生“互动”按钮（旁边是“停止”）。参与助手、轮数、预算、间隔、审核和全局停止只能在那里修改；本页只读，不能扩权。</p>
+          <div id="taskSettingsSummary"></div>
+          <div class="oc-actions">
+            <button id="taskSettingsRefresh" type="button" class="oc-btn oc-btn-soft">刷新设置（只读）</button>
+          </div>
+          <div class="oc-actions">
+            <button id="taskStatusRefresh" type="button" class="oc-btn oc-btn-soft">查询任务状态</button>
+            <button id="taskCancelAll" type="button" class="oc-btn oc-btn-soft is-danger">取消任务</button>
+          </div>
+          <div id="taskStatusList"></div>
+          <p id="taskStatusText" class="oc-status" role="status">宿主原生“互动”设置决定参与助手、预算与审核；本页只读，浏览不会触发模型。</p>
+        </div>
+
+        <div class="oc-card">
+          <h3>待审核（宿主原生确认）</h3>
+          <p class="oc-note">这里只读取宿主 <code>task.review.list</code>。点“通过”或“拒绝”后，宿主 WebView 还会弹出自己的原生确认框；页面不会自动批准，也不会直接写入评论。</p>
+          <div id="taskReviews"></div>
+          <div class="oc-actions">
+            <button id="taskReviewRefresh" type="button" class="oc-btn oc-btn-soft">刷新待审核</button>
+          </div>
+        </div>
+
+        <div class="oc-card">
+          <h3>助手发帖（宿主原生）</h3>
+          <p class="oc-note">宿主当前没有向插件页公开 <code>startPublish</code> 的 JS 接口。本页不会伪造“助手发帖”按钮或发布结果；用户任务需要的助手发帖入口应由 lead 在宿主原生按钮中接线。</p>
+          <p class="oc-note oc-note-warn">此入口待宿主 lead 接原生按钮；本页没有可调用的 JS API。</p>
+        </div>
+
+        <div class="oc-card">
+          <h3>能力与数据</h3>
+          <div id="settingsCaps"></div>
+          <div id="settingsData"></div>
+        </div>
+
+        <div class="oc-card">
+          <h3>关于</h3>
+          <div id="settingsAbout"></div>
+          <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="viewer" class="oc-viewer" role="dialog" aria-modal="true" aria-label="图片查看" hidden>
+    <div class="oc-viewer-bar">
+      <span id="viewerTitle">图片</span>
+      <button id="viewerClose" type="button" class="oc-btn oc-btn-soft">关闭</button>
+    </div>
+    <div class="oc-viewer-body">
+      <img id="viewerImage" alt="动态原图">
+    </div>
+    <p id="viewerNote" class="oc-note"></p>
+  </div>
+
+  <div id="toast" class="oc-toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="core.js"></script>
+  <script src="bridge.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

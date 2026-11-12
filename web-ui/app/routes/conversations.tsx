@@ -16,6 +16,7 @@ import {
 import { ChatInput } from "~/components/input/chat-input";
 import { ChatMessage } from "~/components/message/chat-message";
 import { Button } from "~/components/ui/button";
+import { Checkbox } from "~/components/ui/checkbox";
 import { Drawer, DrawerContent } from "~/components/ui/drawer";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "~/components/ui/resizable";
 import { TypingIndicator } from "~/components/ui/typing-indicator";
@@ -25,7 +26,11 @@ import { toConversationSummaryUpdate, useConversationList } from "~/hooks/use-co
 import { useCurrentAssistant } from "~/hooks/use-current-assistant";
 import { useCurrentModel } from "~/hooks/use-current-model";
 import { getAssistantDisplayName, getModelDisplayName } from "~/lib/display";
-import { convertConversationToMarkdown, downloadMarkdown } from "~/lib/export-markdown";
+import {
+  downloadMarkdown,
+  exportConversationMarkdown,
+  sanitizeExportFilename,
+} from "~/lib/export-markdown";
 import { cn } from "~/lib/utils";
 import api, { sse } from "~/services/api";
 import { useChatInputStore, useAppStore } from "~/stores";
@@ -540,6 +545,9 @@ const ConversationTimeline = React.memo(({
   onRegenerate,
   onSelectBranch,
   onToolApproval,
+  exportSelection,
+  onStartExportSelection,
+  onToggleExportSelection,
 }: {
   activeId: string | null;
   isHomeRoute: boolean;
@@ -556,6 +564,9 @@ const ConversationTimeline = React.memo(({
   onRegenerate: (messageId: string) => Promise<void>;
   onSelectBranch: (nodeId: string, selectIndex: number) => Promise<void>;
   onToolApproval: (toolCallId: string, approved: boolean, reason: string, answer?: string) => Promise<void>;
+  exportSelection: ReadonlySet<string> | null;
+  onStartExportSelection: (messageId: string) => void;
+  onToggleExportSelection: (messageId: string) => void;
 }) => {
   const { t } = useTranslation("page");
   const canQuickJump =
@@ -620,22 +631,34 @@ const ConversationTimeline = React.memo(({
               <div
                 key={message.id}
                 id={getConversationMessageAnchorId(message.id)}
-                className="scroll-mt-24"
+                className={cn("scroll-mt-24", exportSelection && "flex items-start gap-2")}
               >
-                <ChatMessage
-                  node={node}
-                  message={message}
-                  loading={isGenerating && index === selectedNodeMessages.length - 1}
-                  isLastMessage={index === selectedNodeMessages.length - 1}
-                  assistant={assistant}
-                  model={model}
-                  onEdit={onEdit}
-                  onDelete={onDelete}
-                  onFork={onFork}
-                  onRegenerate={onRegenerate}
-                  onSelectBranch={onSelectBranch}
-                  onToolApproval={onToolApproval}
-                />
+                {exportSelection && (
+                  <div className="pt-1">
+                    <Checkbox
+                      aria-label={t("conversations.export_selection.toggle")}
+                      checked={exportSelection.has(message.id)}
+                      onCheckedChange={() => onToggleExportSelection(message.id)}
+                    />
+                  </div>
+                )}
+                <div className={cn(exportSelection && "min-w-0 flex-1")}>
+                  <ChatMessage
+                    node={node}
+                    message={message}
+                    loading={isGenerating && index === selectedNodeMessages.length - 1}
+                    isLastMessage={index === selectedNodeMessages.length - 1}
+                    assistant={assistant}
+                    model={model}
+                    onEdit={onEdit}
+                    onDelete={onDelete}
+                    onFork={onFork}
+                    onRegenerate={onRegenerate}
+                    onSelectBranch={onSelectBranch}
+                    onToolApproval={onToolApproval}
+                    onSelectForExport={onStartExportSelection}
+                  />
+                </div>
               </div>
             );
           })}
@@ -705,9 +728,19 @@ function ConversationsPageInner() {
 
   const [homeDraftId, setHomeDraftId] = React.useState(() => createHomeDraftId());
   const [editingSession, setEditingSession] = React.useState<EditingSession | null>(null);
+  const [exportSelection, setExportSelection] = React.useState<Set<string> | null>(null);
+  const [exportingMarkdown, setExportingMarkdown] = React.useState(false);
+  const exportAbortRef = React.useRef<AbortController | null>(null);
 
   const { detail, detailLoading, detailError, selectedNodeMessages, resetDetail } =
     useConversationDetail(activeId, updateConversationSummary);
+
+  React.useEffect(() => {
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
+    setExportSelection(null);
+    setExportingMarkdown(false);
+  }, [activeId]);
 
   const {
     draftKey,
@@ -956,6 +989,129 @@ function ConversationsPageInner() {
     await api.post<{ status: string }>(`conversations/${activeId}/stop`);
   }, [activeId]);
 
+  const handleStartExportSelection = React.useCallback((messageId: string) => {
+    setExportSelection((previous) => {
+      const next = new Set(previous ?? []);
+      next.add(messageId);
+      return next;
+    });
+  }, []);
+
+  const handleToggleExportSelection = React.useCallback((messageId: string) => {
+    setExportSelection((previous) => {
+      const next = new Set(previous ?? []);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectAllExport = React.useCallback(() => {
+    setExportSelection(new Set(selectedNodeMessages.map(({ message }) => message.id)));
+  }, [selectedNodeMessages]);
+
+  const handleClearExportSelection = React.useCallback(() => {
+    setExportSelection(new Set());
+  }, []);
+
+  const handleCancelExportSelection = React.useCallback(() => {
+    setExportSelection(null);
+  }, []);
+
+  const handleExportMarkdown = React.useCallback(
+    async (includeReasoning: boolean) => {
+      if (!detail || detail.messages.length === 0) return;
+      if (exportingMarkdown) {
+        toast.info(t("conversations.export_selection.exporting"));
+        return;
+      }
+      const selectedIds = exportSelection;
+      const total = selectedIds ? selectedIds.size : selectedNodeMessages.length;
+      if (total === 0) {
+        toast.error(t("conversations.export_selection.empty_selection"));
+        return;
+      }
+
+      const controller = new AbortController();
+      exportAbortRef.current = controller;
+      setExportingMarkdown(true);
+      const progressText = (done: number, all: number) =>
+        t("conversations.export_selection.export_progress", { done, total: all });
+      const loadingId = toast.loading(progressText(0, total), {
+        action: {
+          label: t("conversations.export_selection.cancel"),
+          onClick: () => controller.abort(),
+        },
+      });
+
+      try {
+        const result = await exportConversationMarkdown(detail, {
+          includeReasoning,
+          selectedMessageIds: selectedIds,
+          signal: controller.signal,
+          onProgress: (done, all) => {
+            const step = Math.max(1, Math.ceil(all / 10));
+            if (done === all || done % step === 0) {
+              toast.loading(progressText(done, all), {
+                id: loadingId,
+                action: {
+                  label: t("conversations.export_selection.cancel"),
+                  onClick: () => controller.abort(),
+                },
+              });
+            }
+          },
+        });
+        if (result.messageCount === 0) {
+          throw new Error(t("conversations.export_selection.empty_selection"));
+        }
+        downloadMarkdown(result.content, sanitizeExportFilename(detail.title || "conversation"));
+        toast.success(
+          result.pageCount > 1
+            ? t("conversations.export_selection.export_success_pages", {
+                count: result.messageCount,
+                pages: result.pageCount,
+              })
+            : t("conversations.export_selection.export_success", {
+                count: result.messageCount,
+              }),
+          { id: loadingId },
+        );
+        setExportSelection(null);
+      } catch (error) {
+        const cancelled =
+          typeof DOMException !== "undefined" &&
+          error instanceof DOMException &&
+          error.name === "AbortError";
+        if (cancelled) {
+          toast.info(t("conversations.export_selection.export_cancelled"), { id: loadingId });
+        } else {
+          toast.error(
+            t("conversations.export_selection.export_failed", {
+              message: error instanceof Error ? error.message : "",
+            }),
+            { id: loadingId },
+          );
+        }
+      } finally {
+        if (exportAbortRef.current === controller) {
+          exportAbortRef.current = null;
+        }
+        setExportingMarkdown(false);
+      }
+    },
+    [
+      detail,
+      exportSelection,
+      exportingMarkdown,
+      selectedNodeMessages.length,
+      t,
+    ],
+  );
+
   const hasWorkbenchPanel = Boolean(panel);
   const workbenchPanelRef = React.useRef<PanelImperativeHandle | null>(null);
 
@@ -993,7 +1149,47 @@ function ConversationsPageInner() {
             onRegenerate={handleRegenerate}
             onSelectBranch={handleSelectBranch}
             onToolApproval={handleToolApproval}
+            exportSelection={exportSelection}
+            onStartExportSelection={handleStartExportSelection}
+            onToggleExportSelection={handleToggleExportSelection}
           />
+        </div>
+      )}
+
+      {exportSelection && (
+        <div className="flex flex-wrap items-center gap-2 border-t bg-background/95 px-3 py-2">
+          <span className="text-xs text-muted-foreground">
+            {t("conversations.export_selection.selected", { count: exportSelection.size })}
+          </span>
+          <Button size="sm" variant="outline" onClick={handleSelectAllExport}>
+            {t("conversations.export_selection.select_all")}
+          </Button>
+          <Button size="sm" variant="outline" onClick={handleClearExportSelection}>
+            {t("conversations.export_selection.clear")}
+          </Button>
+          <Button size="sm" variant="outline" onClick={handleCancelExportSelection}>
+            {t("conversations.export_selection.cancel")}
+          </Button>
+          <div className="flex-1" />
+          <Button
+            disabled={exportingMarkdown || exportSelection.size === 0}
+            size="sm"
+            onClick={() => {
+              void handleExportMarkdown(false);
+            }}
+          >
+            {t("conversations.export_selection.export")}
+          </Button>
+          <Button
+            disabled={exportingMarkdown || exportSelection.size === 0}
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              void handleExportMarkdown(true);
+            }}
+          >
+            {t("conversations.export_selection.export_with_reasoning")}
+          </Button>
         </div>
       )}
 
@@ -1024,12 +1220,11 @@ function ConversationsPageInner() {
           onRemovePart={handleRemoveInputPart}
           onSend={handleSend}
           onStop={activeId ? handleStop : undefined}
+          exportSelectionCount={exportSelection?.size ?? 0}
           onExportConversation={
             detail && detail.messages.length > 0
               ? (includeReasoning: boolean) => {
-                  const content = convertConversationToMarkdown(detail, includeReasoning);
-                  const filename = `${detail.title || "conversation"}.md`;
-                  downloadMarkdown(content, filename);
+                  void handleExportMarkdown(includeReasoning);
                 }
               : undefined
           }

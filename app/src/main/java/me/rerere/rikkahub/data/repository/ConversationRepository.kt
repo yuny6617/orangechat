@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -43,6 +43,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.ConversationConfig
 import me.rerere.rikkahub.data.model.MessageNode
+import me.rerere.rikkahub.data.model.toMessageNode
 import me.rerere.rikkahub.data.serein.RawArchive
 import me.rerere.rikkahub.data.serein.RawArchiveRevision
 import me.rerere.rikkahub.data.serein.RawArchiveHead
@@ -342,6 +343,66 @@ class ConversationRepository(
 
     suspend fun existsConversationById(uuid: Uuid): Boolean {
         return conversationDAO.existsById(uuid.toString())
+    }
+
+    /** Idempotently commit the exact prepared assistant messages and verify prior partial commits.
+     * All node rows and conversation metadata share one Room transaction. */
+    suspend fun appendProactiveMessagesIdempotently(
+        conversationId: Uuid,
+        assistantId: Uuid,
+        anchorId: Uuid,
+        messages: List<UIMessage>,
+    ): Conversation? = withContext(Dispatchers.IO) {
+        require(messages.isNotEmpty() && messages.all { it.role == me.rerere.ai.core.MessageRole.ASSISTANT })
+        require(messages.map { it.id }.distinct().size == messages.size)
+        require(messages.none { it.hasBase64Part() })
+        attachmentReferenceGuard.beginWrite().use {
+            database.withTransaction {
+                val entity = conversationDAO.getConversationById(conversationId.toString())
+                    ?: return@withTransaction null
+                if (entity.assistantId != assistantId.toString()) return@withTransaction null
+                val nodes = loadMessageNodes(entity.id)
+                val current = conversationEntityToConversation(entity, nodes)
+                val latestUser = current.currentMessages.lastOrNull {
+                    it.role == me.rerere.ai.core.MessageRole.USER
+                }?.id
+                if (latestUser != anchorId) return@withTransaction null
+                val byMessageId = current.messageNodes.flatMap { it.messages }.associateBy { it.id }
+                // IDs are reserved to this task: an existing ID with different payload is a conflict.
+                val selectedById = current.messageNodes.associate { it.currentMessage.id to it }
+                if (messages.any { candidate -> byMessageId[candidate.id]?.let { stored ->
+                        if (stored == candidate) false else {
+                            val node = selectedById[candidate.id]
+                            // Attachment cleanup may have removed a missing local file since payload prep.
+                            val withoutFiles = filesManager.withoutDeletedAttachments(listOf(candidate)).single()
+                            node?.currentMessage != stored || withoutFiles != stored
+                        }
+                    } == true }) return@withTransaction null
+                val missing = messages.filter { it.id !in byMessageId }
+                if (missing.isEmpty()) return@withTransaction current
+                val normalizedMissing = missing.map { candidate ->
+                    filesManager.withoutDeletedAttachments(listOf(candidate)).single()
+                }
+                val missingNodes = normalizedMissing.map { it.toMessageNode() }
+                val updated = current.copy(messageNodes = current.messageNodes + missingNodes,
+                    updateAt = Instant.now())
+                val previous = current
+                val changes = conversationNodeChanges(previous, updated)
+                val storedConfig = checkNotNull(conversationDAO.getConfig(entity.id))
+                val upserts = changes.upserts.map { (index, node) ->
+                    index to node.copy(messages = filesManager.withoutDeletedAttachments(node.messages))
+                }
+                conversationDAO.update(conversationMetadataToEntity(updated).copy(config = storedConfig))
+                messageNodeDAO.insertAll(upserts.map { (index, node) ->
+                    MessageNodeEntity(node.id.toString(), entity.id, index,
+                        JsonInstant.encodeToString(node.messages), node.selectIndex)
+                })
+                archiveRawChanges(updated, upserts)
+                messageFtsManager.reindexNodes(entity.id, updated.title, updated.updateAt,
+                    changes.changedIds, upserts.map { it.second }, failOnError = true)
+                updated.copy(messageNodes = current.messageNodes + missingNodes)
+            }
+        }
     }
 
     /** Consistent logical snapshot, without attachment repair or filtering during export. */

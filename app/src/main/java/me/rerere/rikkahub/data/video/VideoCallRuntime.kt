@@ -207,6 +207,13 @@ object VideoCallRuntime {
     fun isTurnGranted(conversationId: String?, requestToken: String?): Boolean =
         turns.isGranted(conversationId, requestToken)
 
+    /** Returns only the original camera generation granted to this request, never a renewed one. */
+    @Synchronized
+    fun cameraEpochForTurn(conversationId: String?, requestToken: String?): Long? {
+        if (!cameraEnabled || !isActive(conversationId)) return null
+        return turns.cameraEpochForTurn(conversationId, requestToken)
+    }
+
     fun currentCallEpoch(): Long = turns.currentCallEpoch()
 
     fun currentCameraEpoch(): Long = turns.currentCameraEpoch()

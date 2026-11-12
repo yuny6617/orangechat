@@ -98,7 +98,7 @@ internal fun ProactiveWakeupSettingsCard(
     }
     val items = buildCardGroupItems {
         item(
-            headlineContent = { Text("查看主动唤醒记录") },
+            headlineContent = { Text("查看 AI 约定唤醒记录") },
             supportingContent = { Text("AI 约定唤醒的待执行、执行中及最近 10 条已结束记录；点开记录查看完整内容。") },
             trailingContent = { Text(if (expanded) "收起" else "展开") },
             onClick = { expanded = !expanded },
@@ -168,7 +168,7 @@ internal fun ProactiveWakeupSettingsCard(
         }
     }
     CardGroup(items = items, modifier = Modifier.padding(horizontal = 8.dp),
-        title = { Text("后台活动记录") })
+        title = { Text("AI 约定唤醒记录") })
 }
 
 internal fun proactiveWakeupStatusLabel(status: ProactiveWakeupStatus): String = when (status) {

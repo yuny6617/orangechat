@@ -77,7 +77,11 @@ fun RichChatCard(card: ChatInteraction, conversationId: Uuid?, readOnly: Boolean
     var busy by remember(card.id) { mutableStateOf(false) }
     var error by remember(card.id) { mutableStateOf<String?>(null) }
     val recipient = card.actor == "assistant"
-    val title = when (card.kind) { "red_packet" -> "专属红包"; "transfer" -> "转账"; else -> "语音通话" }
+    val title = when (card.kind) {
+        "red_packet" -> "专属红包"
+        "transfer" -> "转账"
+        else -> if (card.videoCall) "视频通话" else "语音通话"
+    }
     val illustration = when {
         card.kind == "call" && card.theme == "lavender" -> R.drawable.interaction_moon
         card.theme == "sakura" -> R.drawable.interaction_bear

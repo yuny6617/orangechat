@@ -7,6 +7,7 @@
 package me.rerere.rikkahub.service
 
 import android.content.Context
+import android.os.SystemClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +15,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -36,8 +38,13 @@ import me.rerere.rikkahub.data.video.VideoCallPrompts
 import me.rerere.rikkahub.data.video.VideoCallRuntime
 import me.rerere.rikkahub.data.video.VideoCallSetting
 import me.rerere.rikkahub.data.video.VideoFrame
+import me.rerere.rikkahub.data.video.VideoFrameCaptureMode
+import me.rerere.rikkahub.data.video.VideoFrameCollage
 import me.rerere.rikkahub.data.video.VideoFramePolicy
 import me.rerere.rikkahub.data.video.VideoFrameStore
+import me.rerere.rikkahub.data.video.ROLLING_SAMPLE_PERIOD_MILLIS
+import me.rerere.rikkahub.data.video.RollingSampleCadence
+import me.rerere.rikkahub.data.video.RollingVideoFrameBuffer
 import me.rerere.rikkahub.data.video.VideoGiftCustomization
 import me.rerere.rikkahub.data.video.VideoGiftEvent
 import me.rerere.rikkahub.data.video.VideoGiftTally
@@ -97,6 +104,7 @@ internal class VideoCallCoordinator(
     private val callScope = CoroutineScope(scope.coroutineContext + monitorJob)
 
     private val danmaku = DanmakuStream()
+    private val rollingFrames = RollingVideoFrameBuffer()
     private val turnNotes = mutableListOf<String>()
     @Volatile
     private var closed = false
@@ -121,6 +129,65 @@ internal class VideoCallCoordinator(
         callScope.launch {
             VideoCallRuntime.snapshotRequests.collect { request -> onSnapshotRequest(request) }
         }
+        callScope.launch(Dispatchers.IO) {
+            // 1 Hz 滚动画面属于"连续画面（每秒）"；旧的"每轮一帧"设置也保留同一行为，
+            // 已保存的 every_reply 不迁移。OFF 不抓；30/60 秒仍由面板定时器刷新待发送帧——
+            // 不能因为加了滚动缓冲，就让它们偷偷变成每秒抓一帧、每轮都发一张拼图
+            // （那会改掉用户选定的旧语义）。
+            val cadence = RollingSampleCadence()
+            var sampling = false
+            while (isCurrentCall()) {
+                val mode = setting().frameCaptureMode
+                if (!VideoFramePolicy.captureOnTurn(mode)) {
+                    if (sampling) {
+                        // 切到 OFF/30s/60s：上一模式留下的帧不能再混进之后的拼图。
+                        rollingFrames.clear()
+                        sampling = false
+                    }
+                    delay(ROLLING_SAMPLE_PERIOD_MILLIS)
+                    continue
+                }
+                if (!VideoCallRuntime.cameraAvailable() || !visionSupported()) {
+                    if (sampling) {
+                        rollingFrames.clear()
+                        sampling = false
+                    }
+                    delay(ROLLING_SAMPLE_PERIOD_MILLIS)
+                    continue
+                }
+                if (!sampling) {
+                    cadence.reset(SystemClock.elapsedRealtime())
+                    sampling = true
+                }
+                val startedAt = SystemClock.elapsedRealtime()
+                val bufferEpoch = rollingFrames.epoch()
+                val cameraEpoch = VideoCallRuntime.currentCameraEpoch()
+                val frame = try {
+                    VideoCallRuntime.captureFrame()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+                if (frame != null && isAutomaticAttachmentCurrent(mode, cameraEpoch)) {
+                    rollingFrames.accept(
+                        expectedEpoch = bufferEpoch,
+                        capturedCameraEpoch = cameraEpoch,
+                        // 在落进缓冲的这一刻再读一次当前代次：抓帧期间换相机的话，
+                        // 这一帧会被缓冲当作迟到帧拒绝。
+                        currentCameraEpoch = VideoCallRuntime.currentCameraEpoch(),
+                        frame = frame,
+                        sampleAtElapsedMillis = startedAt,
+                        capacity = setting().rollingFrameCount.coerceIn(
+                            RollingVideoFrameBuffer.MIN_FRAMES,
+                            RollingVideoFrameBuffer.MAX_FRAMES,
+                        ),
+                    )
+                }
+                // 用单调时钟扣掉抓帧耗时，让相邻采样的**起点**间隔接近 1 s。
+                delay(cadence.delayAfterSample(startedAt, SystemClock.elapsedRealtime()))
+            }
+        }
         _state.update {
             it.copy(
                 active = true,
@@ -132,6 +199,7 @@ internal class VideoCallCoordinator(
 
     fun close() {
         closed = true
+        rollingFrames.clear()
         monitorJob.cancel()
         // 只有"当前这通通话"才清运行时的待发送帧/相机入口：别的会话的页面销毁
         // 不能把正在进行的通话的画面/特效清掉。
@@ -144,6 +212,8 @@ internal class VideoCallCoordinator(
     }
 
     fun cameraAvailable(): Boolean = VideoCallRuntime.cameraAvailable()
+
+    fun clearRollingFrames() = rollingFrames.clear()
 
     /** 这轮是不是"还在同一次调用"：挂断/换通话/关面板之后一律 false。 */
     fun isCurrentCall(): Boolean =
@@ -205,33 +275,129 @@ internal class VideoCallCoordinator(
     /**
      * 这一轮要附带的画面。
      *
-     * 优先用手动夹住的那一帧（永久保存），否则"每轮一帧"模式现场抓（只作本次请求的临时输入），
-     * 其余模式不带图。模型不识图时不抓图也不附图。
+     * 优先级：手动夹帧（永久保存）> 1 Hz 连续画面拼图（临时）> 30/60 秒定时帧（临时）。
+     * 连续画面拼图同时服务新默认 [VideoFrameCaptureMode.CONTINUOUS_SEQUENCE] 与旧设置
+     * [VideoFrameCaptureMode.EVERY_REPLY]；OFF 不自动附图（手动夹帧除外），
+     * 模型不识图时不抓图也不附图。
      */
     suspend fun frameAttachmentForTurn(): VideoTurnAttachment? {
         if (!isCurrentCall()) return null
         if (!visionSupported()) return null
+        val mode = setting().frameCaptureMode
+        val cameraEpoch = VideoCallRuntime.currentCameraEpoch()
+        // 先取出待发送帧：手动夹帧和 30/60 秒定时帧都靠它。手动帧永远优先。
+        val pending = VideoCallRuntime.takePendingFrame()
+        if (pending?.manual == true) {
+            // 手动夹帧是用户显式动作：即使自动抓帧已关，也照样随这一句发出并永久保存。
+            val url = persistFrame(pending, FramePersistence.Clip) ?: return null
+            return VideoTurnAttachment(url = url, permanent = true)
+        }
+        if (!isAutomaticAttachmentCurrent(mode, cameraEpoch)) return null
+        // 1 Hz 滚动拼图属于"连续画面"和旧的"每轮一帧"；OFF/30s/60s 保持原有语义，
+        // 不能因为加了缓冲就变成所有非 OFF 模式每轮都发一张拼图。
+        if (VideoFramePolicy.captureOnTurn(mode)) {
+            rollingCollageAttachment(cameraEpoch, mode)?.let { return it }
+        }
+        // 拼图会挂起；失败回退前重新确认，避免切模式后仍启动一次自动抓帧。
+        if (!isAutomaticAttachmentCurrent(mode, cameraEpoch)) return null
         val frame = try {
-            resolveFrameForTurn()
+            when (mode) {
+                // OFF：只剩显式手动帧（上面已处理），不自动附图。
+                VideoFrameCaptureMode.OFF -> null
+                // 连续画面 / 旧"每轮一帧"：拼图失败时退回旧行为，发送前现场抓一帧。
+                VideoFrameCaptureMode.CONTINUOUS_SEQUENCE,
+                VideoFrameCaptureMode.EVERY_REPLY -> pending ?: captureFrameForTurn()
+                // 30/60 秒：只发面板定时器刷新出来的那一张，没刷新过就不发。
+                VideoFrameCaptureMode.EVERY_30S,
+                VideoFrameCaptureMode.EVERY_60S -> pending
+            }
         } catch (cancelled: CancellationException) {
             // 取消必须透传：吞掉它会让已经取消的一轮继续去落盘/提交。
             throw cancelled
         } catch (_: Exception) {
             null
         } ?: return null
-        // 抓帧期间可能已经挂断/取消，落盘前再确认一次。
-        if (!isCurrentCall()) return null
-        val persistence = if (frame.manual) FramePersistence.Clip else FramePersistence.Temp
-        val url = persistFrame(frame, persistence) ?: return null
-        return VideoTurnAttachment(url = url, permanent = persistence != FramePersistence.Temp)
+        // 自动帧从取出/抓取到落盘期间必须仍属于原来的模式和相机。
+        if (!isAutomaticAttachmentCurrent(mode, cameraEpoch)) return null
+        val url = persistFrame(frame, FramePersistence.Temp) ?: return null
+        if (!isAutomaticAttachmentCurrent(mode, cameraEpoch)) {
+            VideoFrameStore.deleteTransient(context, listOf(url))
+            return null
+        }
+        return VideoTurnAttachment(url = url, permanent = false)
     }
 
-    private suspend fun resolveFrameForTurn(): VideoFrame? {
-        VideoCallRuntime.takePendingFrame()?.let { return it }
-        if (!VideoFramePolicy.captureOnTurn(setting().frameCaptureMode)) return null
+    private suspend fun captureFrameForTurn(): VideoFrame? {
         if (!VideoCallRuntime.cameraAvailable()) return null
         return VideoCallRuntime.captureFrame()
     }
+
+    /**
+     * 最近几帧等比拼成一张临时图。
+     *
+     * 拼图期间可能挂断/关摄像头/切会话：缓冲代次和相机代次都要在**落盘前后**
+     * 各校验一次，任何一次失效都删掉已经写出的临时文件。
+     */
+    private suspend fun rollingCollageAttachment(
+        cameraEpoch: Long,
+        mode: VideoFrameCaptureMode,
+    ): VideoTurnAttachment? {
+        if (!isAutomaticAttachmentCurrent(mode, cameraEpoch)) return null
+        if (!VideoCallRuntime.cameraAvailable()) return null
+        val count = setting().rollingFrameCount.coerceIn(
+            RollingVideoFrameBuffer.MIN_FRAMES,
+            RollingVideoFrameBuffer.MAX_FRAMES,
+        )
+        val bufferEpoch = rollingFrames.epoch()
+        val rolling = rollingFrames.latest(count, cameraEpoch)
+        if (rolling.isEmpty()) return null
+        val quality = setting().frameQuality
+        // 拼图是**可选**增强：任何一张图编不出来都不该让整条文字/语音消息发不出去。
+        // 取消仍然原样透传，其余失败退化为"这一轮不带滚动画面"。
+        val collage = try {
+            withContext(Dispatchers.IO) {
+                val oriented = rolling.mapNotNull { frame ->
+                    VideoFrameStore.compressToJpeg(
+                        raw = frame.bytes,
+                        quality = quality,
+                        rotationDegrees = frame.rotationDegrees,
+                        mirror = frame.mirror,
+                    )
+                }
+                if (oriented.size != rolling.size) null else VideoFrameCollage.compose(oriented)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        if (!isRollingAttachmentCurrent(bufferEpoch, cameraEpoch, mode)) return null
+        val file = persistCollage(collage) ?: return null
+        val url = VideoFrameStore.fileUrl(file)
+        if (!isRollingAttachmentCurrent(bufferEpoch, cameraEpoch, mode)) {
+            VideoFrameStore.deleteTransient(context, listOf(url))
+            return null
+        }
+        return VideoTurnAttachment(url = url, permanent = false)
+    }
+
+    private fun isAutomaticAttachmentCurrent(mode: VideoFrameCaptureMode, cameraEpoch: Long): Boolean =
+        me.rerere.rikkahub.data.video.isAutomaticVideoAttachmentCurrent(
+            expectedMode = mode,
+            currentMode = setting().frameCaptureMode,
+            expectedCameraEpoch = cameraEpoch,
+            currentCameraEpoch = VideoCallRuntime.currentCameraEpoch(),
+            cameraGranted = VideoCallRuntime.isCameraEpochCurrent(conversationKey, cameraEpoch),
+            callCurrent = isCurrentCall(),
+        ) && visionSupported()
+
+    private fun isRollingAttachmentCurrent(
+        bufferEpoch: Long,
+        cameraEpoch: Long,
+        mode: VideoFrameCaptureMode,
+    ): Boolean =
+        rollingFrames.epoch() == bufferEpoch &&
+            isAutomaticAttachmentCurrent(mode, cameraEpoch)
 
     /**
      * 把一帧压成 JPEG 并落盘（压缩/写文件都在 IO 线程）。
@@ -273,6 +439,34 @@ internal class VideoCallCoordinator(
             directory = VideoFrameStore.directoryFor(context, persistence),
             prefix = VideoFrameStore.prefixFor(persistence),
         )
+    }
+
+    /**
+     * 拼图落盘（临时目录）。取消发生在 `withContext(NonCancellable)` 切回时的 prompt
+     * cancellation 里时，`file` 的赋值根本不会发生；所以文件所有权必须记在**外层**
+     * 变量里，并在 finally 里兜底删除 —— 和 [persistFrame] 是同一个模型。
+     */
+    private suspend fun persistCollage(jpeg: ByteArray): java.io.File? {
+        var written: java.io.File? = null
+        var handedOff = false
+        try {
+            val file = withContext(Dispatchers.IO + NonCancellable) {
+                VideoFrameStore.saveJpeg(
+                    bytes = jpeg,
+                    directory = VideoFrameStore.transientDirectory(context),
+                    prefix = "sequence",
+                )?.also { written = it }
+            } ?: return null
+            currentCoroutineContext().ensureActive()
+            handedOff = true
+            return file
+        } finally {
+            if (!handedOff) {
+                written?.let {
+                    VideoFrameStore.deleteTransient(context, listOf(VideoFrameStore.fileUrl(it)))
+                }
+            }
+        }
     }
 
     fun onUserTurn(text: String, atMillis: Long = System.currentTimeMillis()) {

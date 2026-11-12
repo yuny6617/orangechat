@@ -33,6 +33,22 @@
     },
     "header": {
       "select_conversation": "Select a conversation"
+    },
+    "export_selection": {
+      "toggle": "Select this message for export",
+      "selected": "{{count}} selected",
+      "select_all": "Select all",
+      "clear": "Clear selection",
+      "cancel": "Cancel selection",
+      "export": "Export selected messages",
+      "export_with_reasoning": "Export selected (with reasoning)",
+      "exporting": "An export is already running, please wait",
+      "export_progress": "Generating Markdown {{done}}/{{total}}…",
+      "export_cancelled": "Export cancelled",
+      "export_success": "Markdown exported ({{count}} messages)",
+      "export_success_pages": "Markdown exported ({{count}} messages, {{pages}} pages)",
+      "export_failed": "Export failed: {{message}}",
+      "empty_selection": "Select at least one message"
     }
   }
 }

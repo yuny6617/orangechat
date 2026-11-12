@@ -48,7 +48,7 @@ fun createCameraTool(context: Context): Tool {
             try {
                 // 视频通话正在用相机时，明确告诉模型"现在别抢摄像头"，并引导走留影协议，
                 // 而不是靠抢占失败来碰运气。
-                if (VideoCallRuntime.cameraAvailable()) {
+                if (VideoCallRuntime.isCameraEnabled() && VideoCallRuntime.camera.value != null) {
                     return@Tool listOf(UIMessagePart.Text(
                         buildJsonObject {
                             put("success", false)

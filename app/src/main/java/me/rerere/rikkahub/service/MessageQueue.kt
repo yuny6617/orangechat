@@ -18,11 +18,17 @@ data class QueuedMessage(
     val isEditing: Boolean = false,
     val transientSystemPrompt: String? = null,
     /**
-     * 暂停后"本轮附图"被摘掉时改用的 system prompt（视频 context 的无图版本）。
+     * 暂停后"本轮附件"被摘掉时改用的 system prompt（视频 context 的无附件版本）。
      *
-     * 暂停会把 [transientImageUrls] 摘掉，但 [transientSystemPrompt] 里还写着"本轮附了一张图"，
-     * 于是恢复队列时模型会被告知有一张根本不存在的图。永久手动夹帧仍然在 [parts] 里，
-     * 那种情况继续用 [transientSystemPrompt]（确实还有图）。
+     * 暂停会把 [transientImageUrls]/[transientAudio] 摘掉，同时把 [requestToken] 作废：
+     * 恢复队列是一次**全新请求**，没有 token 就没有任何相机授权，所以永久手动夹帧即使
+     * 还留在 [parts] 里（**历史里仍然看得见**），也绝不会被重放给 provider。
+     * 既然如此，[transientSystemPrompt] 里"本轮附了图 / 附了录音"的话就不再成立，
+     * 一律换成这个无附件版本。
+     *
+     * 最后一道防线在 provider 边界（`GenerationHandler` 的授权 apply）：那里按**实际交付**
+     * 的图片数量再同步一次 system context。就算这个变体本身还写着"有图"（提交时确实夹了
+     * 永久帧），发请求前也会被改成"本轮没有画面"。
      */
     val transientSystemPromptWithoutImages: String? = null,
     val enableTools: Boolean = true,
@@ -60,7 +66,12 @@ data class QueuedMessage(
     val completion: CompletableDeferred<Unit> = CompletableDeferred(),
     val reply: CompletableDeferred<String?> = CompletableDeferred(),
 ) {
-    /** 本消息是否还带着**永久**图片（手动夹帧）；暂停时用它决定要不要换掉"附图"说明。 */
+    /**
+     * 本消息是否还带着**永久**图片（手动夹帧）。
+     *
+     * 它描述的是"消息里看得见什么"，不是"会发给模型什么"：暂停后 token 作废，
+     * 这些帧仍留在历史里可见，但 provider 边界不会重放（见 [transientSystemPromptWithoutImages]）。
+     */
     val hasPermanentImage: Boolean
         get() = parts.any { it is UIMessagePart.Image }
 
@@ -130,10 +141,17 @@ class MessageQueue internal constructor(
         ownedImageUrls: List<String> = emptyList(),
         requestToken: String? = null,
         transientAudio: me.rerere.rikkahub.data.video.TransientAudioClip? = null,
+        /**
+         * Host-assigned id for the new user message. A caller that already bound a request to this
+         * id (the Moments draft selection anchor) can pass it so the binding exists before the
+         * queue is dispatched. Null keeps the normal random id.
+         */
+        newMessageId: Uuid? = null,
     ): QueuedMessage? {
         if (parts.isEmptyInputMessage() && existingMessageId == null) return null
         if (existingMessageId != null && (state.value.messages + inFlight.values).any { it.existingMessageId == existingMessageId }) return null
         val message = QueuedMessage(
+            id = newMessageId ?: Uuid.random(),
             parts = parts.toList(), answer = answer, interaction = interaction,
             transientSystemPrompt = transientSystemPrompt,
             transientSystemPromptWithoutImages = transientSystemPromptWithoutImages,
@@ -217,8 +235,9 @@ class MessageQueue internal constructor(
      * 摘掉。否则 resume/重试会带着一个已经不存在的路径，让模型以为有图/有音频其实没有。
      *
      * 同时还要做三件事（否则恢复的是一个"看起来很合法的旧请求"）：
-     * 1. 把 [QueuedMessage.transientSystemPrompt] 换成**无临时附件版本**
-     *    （永久手动夹帧仍在 parts 里，那种情况由提交方按实际附图重算）；
+     * 1. 把 [QueuedMessage.transientSystemPrompt] 换成**无附件版本**：暂停同时作废了 token，
+     *    没有 token 就没有相机授权，永久手动夹帧只留在历史里可见、不会被重放，
+     *    所以"本轮有图/有录音"的说明一律不能留（真正的兜底在 provider 边界按实际交付数量再同步）；
      * 2. 撤销这个 token 的送礼/留影授权并把它从队列项上摘掉：
      *    恢复队列是一次新请求，不能复用暂停前的权限；
      * 3. 录了一段但没发出去的那条消息，**追加一句"录音已失效"的说明**：
@@ -305,8 +324,10 @@ class MessageQueue internal constructor(
     /**
      * 暂停时把一个队列项上的"本轮临时附件"摘干净。
      *
-     * 注意永久手动夹帧仍在 [QueuedMessage.parts] 里：那种情况不改写系统提示的内容来源，
-     * 由提交方按"实际还剩什么"重算（见 VoiceCallService 的提示词变体）。
+     * 永久手动夹帧仍留在 [QueuedMessage.parts] 里（历史可见），但它**不会被重放**：
+     * token 在这里被作废，恢复时又是一次没有 token 的新请求，provider 边界只会按活跃
+     * 授权加图。所以提示词不能再说"本轮有图/有录音"，一律改用无附件版本；
+     * 万一那个版本仍带着永久帧的附图说明，由 provider 边界按实际交付数量兜底同步。
      */
     private fun stripTransientLocked(message: QueuedMessage): QueuedMessage {
         val hasTransient = message.hasTransientAttachment
@@ -326,11 +347,9 @@ class MessageQueue internal constructor(
             } else {
                 message.parts
             },
-            transientSystemPrompt = if (hasTransient && !message.hasPermanentImage) {
-                message.transientSystemPromptWithoutImages ?: message.transientSystemPrompt
-            } else {
-                message.transientSystemPrompt
-            },
+            // 恢复队列是一次新请求，这一轮没有任何附件授权：说明必须换成"没有附件"的版本。
+            transientSystemPrompt = message.transientSystemPromptWithoutImages
+                ?: message.transientSystemPrompt,
             // 恢复队列是一次新请求：旧 token 绝不能复用。
             requestToken = null,
         )

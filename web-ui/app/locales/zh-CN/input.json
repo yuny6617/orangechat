@@ -102,6 +102,8 @@
     "upload_document": "上传文档",
     "export_conversation": "导出会话为 Markdown",
     "export_conversation_with_reasoning": "导出会话为 Markdown（含推理过程）",
+    "export_selected": "导出选中消息为 Markdown（{{count}} 条）",
+    "export_selected_with_reasoning": "导出选中消息为 Markdown（{{count}} 条，含推理过程）",
     "unsupported_file_skipped": "{{count}} 个文件因格式不支持已被跳过",
     "placeholder_ready": "输入消息...",
     "placeholder_not_ready": "请先选择会话",

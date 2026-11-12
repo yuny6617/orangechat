@@ -1,4 +1,4 @@
-﻿/*
+/*
  * 橘瓣 OrangeChat
  * 衍生自 RikkaHub (https://github.com/rikkahub/rikkahub)，原作者 RE
  * 本项目基于 GNU AGPL v3 开源，详见根目录 LICENSE 文件
@@ -72,15 +72,18 @@ fun RikkahubTheme(
     }
     val amoledDarkMode by rememberAmoledDarkMode()
 
+    val selectedTheme = findThemeById(settings.themeId, settings.customThemes)
+        ?: findPresetTheme(settings.themeId)
+    val packageTokens = settings.customThemes.firstOrNull { it.id == settings.themeId }
+        ?.packageTokens.takeUnless { settings.dynamicColor }
+
     val colorScheme = when {
         settings.dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
         else -> {
-            val theme = findThemeById(settings.themeId, settings.customThemes)
-                ?: findPresetTheme(settings.themeId)
-            theme.getColorScheme(dark = darkTheme)
+            selectedTheme.getColorScheme(dark = darkTheme)
         }
     }
     val colorSchemeConverted = remember(darkTheme, amoledDarkMode, colorScheme) {
@@ -95,17 +98,20 @@ fun RikkahubTheme(
     }
     val extendColors = if (darkTheme) ExtendDarkColors else ExtendLightColors
 
+    // 显式颜色覆盖只解析一次，主题包扩展 surface 也要遵守同样的优先级。
+    val explicitPrimaryColor = settings.displaySetting.primaryColor?.toComposeColor()
+    val explicitGlobalTextColor = settings.displaySetting.globalTextColor?.toComposeColor()
+
     // 颜色自定义覆盖
     val finalColorScheme = remember(
         colorSchemeConverted,
-        settings.displaySetting.primaryColor,
-        settings.displaySetting.globalTextColor,
+        explicitPrimaryColor,
+        explicitGlobalTextColor,
         settings.displaySetting.interfaceSurfaceOpacity,
         settings.themeId,
     ) {
         var scheme = colorSchemeConverted
-        settings.displaySetting.primaryColor?.let { pc ->
-            val primaryColor = pc.toComposeColor()
+        explicitPrimaryColor?.let { primaryColor ->
             val luminance = 0.299f * primaryColor.red + 0.587f * primaryColor.green + 0.114f * primaryColor.blue
             val onPrimary = if (luminance > 0.5f) Color.Black else Color.White
             scheme = scheme.copy(
@@ -113,8 +119,7 @@ fun RikkahubTheme(
                 onPrimary = onPrimary,
             )
         }
-        settings.displaySetting.globalTextColor?.let { gtc ->
-            val textColor = gtc.toComposeColor()
+        explicitGlobalTextColor?.let { textColor ->
             scheme = scheme.copy(
                 onBackground = textColor,
                 onSurface = textColor,
@@ -137,6 +142,17 @@ fun RikkahubTheme(
             surfaceVariant = scheme.surfaceVariant.copy(alpha = interfaceSurfaceAlpha),
         )
         scheme
+    }
+
+    // 包主题额外 surface 角色：仅在实际由包配色驱动时存在，动态色/预设主题保持 null。
+    // 全局文字色优先于 mutedText，避免用户显式文字覆盖被包覆盖。
+    val packageSurfaceTokens = remember(packageTokens, darkTheme, explicitGlobalTextColor) {
+        runCatching {
+            packageTokens?.toPackageSurfaceTokens(
+                darkMode = darkTheme,
+                mutedTextOverride = explicitGlobalTextColor,
+            )
+        }.getOrNull()
     }
 
     val resolvedMaterialMode = when (settings.displaySetting.materialMode) {
@@ -162,12 +178,14 @@ fun RikkahubTheme(
         LocalDarkMode provides darkTheme,
         LocalMaterialMode provides resolvedMaterialMode,
         LocalPopupSurfaceOpacity provides settings.displaySetting.popupSurfaceOpacity,
+        LocalPackageSurfaceTokens provides packageSurfaceTokens,
         LocalExtendColors provides extendColors,
         LocalOverscrollFactory provides null
     ) {
         MaterialExpressiveTheme(
             colorScheme = finalColorScheme,
             typography = Typography,
+            shapes = packageTokens?.toShapes() ?: androidx.compose.material3.Shapes(),
             content = content,
             motionScheme = MotionScheme.expressive()
         )

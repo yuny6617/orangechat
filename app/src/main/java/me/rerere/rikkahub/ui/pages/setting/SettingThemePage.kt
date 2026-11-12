@@ -25,8 +25,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -78,6 +77,9 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val context = LocalContext.current
 
+    val themeRestorePreferences = remember(context) {
+        context.getSharedPreferences("theme_package_restore", android.content.Context.MODE_PRIVATE)
+    }
     var editingTheme by remember { mutableStateOf<CustomTheme?>(null) }
     var showImportDialog by remember { mutableStateOf(false) }
     var showPrimaryPicker by remember { mutableStateOf(false) }
@@ -96,11 +98,36 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         containerColor = settingsScaffoldContainerColor(CustomColors.topBarColors.containerColor)
     ) { contentPadding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = contentPadding + PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+        // Keep the importer composed while the whole page scrolls, preserving an in-flight
+        // import and its preview even when the user scrolls down to the theme list.
+        Column(
+            Modifier.fillMaxSize().padding(contentPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
-            item {
+            ThemePackageImport(
+                onApply = { imported, selected ->
+                    if (!settings.themeId.startsWith("package:") || !themeRestorePreferences.contains("themeId")) {
+                        themeRestorePreferences.edit().putString("themeId", settings.themeId)
+                            .putBoolean("dynamicColor", settings.dynamicColor).apply()
+                    }
+                    val ids = imported.map { it.id }.toSet()
+                    vm.updateSettings(settings.copy(
+                        customThemes = settings.customThemes.filterNot { it.id in ids } + imported,
+                        themeId = selected,
+                        dynamicColor = false,
+                    ))
+                },
+                onRestore = {
+                    val previousId = themeRestorePreferences.getString("themeId", "sakura") ?: "sakura"
+                    val validId = previousId.takeIf { id ->
+                        PresetThemes.any { it.id == id } || settings.customThemes.any { it.id == id }
+                    } ?: "sakura"
+                    vm.updateSettings(settings.copy(themeId = validId,
+                        dynamicColor = themeRestorePreferences.getBoolean("dynamicColor", false)))
+                },
+            )
+            Column(Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
@@ -120,7 +147,7 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                 }
             }
 
-            item {
+            Column {
                 Text(
                     text = "预设主题",
                     style = MaterialTheme.typography.labelMedium,
@@ -128,7 +155,7 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                     modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
                 )
             }
-            item {
+            Column {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -146,7 +173,7 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
             }
 
             if (settings.customThemes.isNotEmpty()) {
-                item {
+                Column {
                     Text(
                         text = "自定义主题",
                         style = MaterialTheme.typography.labelMedium,
@@ -154,12 +181,12 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                         modifier = Modifier.padding(top = 20.dp, bottom = 8.dp)
                     )
                 }
-                item {
+                Column {
                     Surface(shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
                         Column {
                             settings.customThemes.forEachIndexed { index, custom ->
                                 if (index > 0) { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-                                val lightScheme = remember(custom.id, custom.primaryColorArgb, custom.secondaryColorArgb, custom.tertiaryColorArgb) { custom.generateColorScheme(dark = false) }
+                                val lightScheme = remember(custom) { custom.generateColorScheme(dark = false) }
                                 Row(modifier = Modifier.fillMaxWidth().clickable { vm.updateSettings(settings.copy(themeId = custom.id)) }.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Box {
                                         Box(Modifier.offset(x = 0.dp).size(20.dp).clip(CircleShape).background(lightScheme.primary).border(1.dp, MaterialTheme.colorScheme.surface, CircleShape))

@@ -188,9 +188,36 @@ internal fun VideoCallSettingsScreen(
                     VideoFrameCaptureMode.entries.forEach { mode ->
                         SettingChoiceRow(
                             mode.displayName,
-                            if (mode == VideoFrameCaptureMode.OFF) "不自动附带画面" else "仅随下一轮请求发送画面",
+                            when (mode) {
+                                VideoFrameCaptureMode.OFF -> "不自动附带画面"
+                                VideoFrameCaptureMode.CONTINUOUS_SEQUENCE ->
+                                    "推荐：通话中每秒采样，每轮发送最近几张拼成的一张图"
+                                VideoFrameCaptureMode.EVERY_REPLY ->
+                                    "旧设置兼容：保持原来的每秒采样与拼图行为，不会被自动切换"
+                                VideoFrameCaptureMode.EVERY_30S,
+                                VideoFrameCaptureMode.EVERY_60S ->
+                                    "只刷新待发送帧，不持续采样；随下一轮请求发送最近一张"
+                            },
                             setting.frameCaptureMode == mode,
                         ) { onUpdate(setting.copy(frameCaptureMode = mode)) }
+                    }
+                    Text(
+                        "「连续画面（每秒）」是新安装的默认值；已保存的旧选项原样保留。" +
+                            "想启用连续采样，请显式选择「连续画面（每秒）」，而不是改旧选项的间隔。",
+                        Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (setting.frameCaptureMode.sequenceDriven) {
+                    SettingGroup(title = "连续画面 · 最新帧数") {
+                        (1..9).forEach { count ->
+                            SettingChoiceRow(
+                                "$count 张",
+                                "发送时拼接最近 $count 帧（1..9）；仅「连续画面（每秒）」和旧「每轮一帧」使用，30/60 秒与关闭不采样",
+                                setting.rollingFrameCount.coerceIn(1, 9) == count,
+                            ) { onUpdate(setting.copy(rollingFrameCount = count)) }
+                        }
                     }
                 }
                 SettingGroup(title = "抓帧画质") {

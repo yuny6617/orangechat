@@ -56,6 +56,7 @@ class VideoCallTurnLedger(private val capacity: Int = DEFAULT_CAPACITY) {
     private class Grant(
         val conversationId: String,
         val callEpoch: Long,
+        val cameraEpoch: Long,
         var giftGranted: Boolean = false,
     )
 
@@ -110,6 +111,13 @@ class VideoCallTurnLedger(private val capacity: Int = DEFAULT_CAPACITY) {
     fun isGranted(conversationId: String?, token: String?): Boolean =
         liveGrant(conversationId, token) != null
 
+    /** Camera permission is frozen when the token is first registered; re-entry cannot renew it. */
+    @Synchronized
+    fun cameraEpochForTurn(conversationId: String?, token: String?): Long? {
+        val grant = liveGrant(conversationId, token) ?: return null
+        return grant.cameraEpoch.takeIf { it == cameraEpoch }
+    }
+
     /**
      * 登记一轮请求的授权。
      *
@@ -129,7 +137,7 @@ class VideoCallTurnLedger(private val capacity: Int = DEFAULT_CAPACITY) {
             // 重复登记：原样返回，绝不重置 giftGranted，也不改变插入顺序。
             return VideoCallTurnGrant(token = key, conversationId = active, callEpoch = callEpoch)
         }
-        grants[key] = Grant(conversationId = active, callEpoch = callEpoch)
+        grants[key] = Grant(conversationId = active, callEpoch = callEpoch, cameraEpoch = cameraEpoch)
         while (grants.size > capacity) {
             val oldest = grants.keys.firstOrNull() ?: break
             grants.remove(oldest)
