@@ -226,13 +226,6 @@
           <div id="settingsIdentity"></div>
         </div>
 
-        <div class="oc-card oc-other-card">
-          <button id="settingsOtherOpen" type="button" class="oc-other-open">
-            <span>其他</span>
-            <span class="oc-meta">主题来源 · 能力与数据 · 关于</span>
-          </button>
-        </div>
-
         <div class="oc-card">
           <h3>阅读</h3>
           <label class="oc-field" for="settingPageSize">每页条数
@@ -276,33 +269,33 @@
           <p class="oc-note oc-note-warn">此入口待宿主 lead 接原生按钮；本页没有可调用的 JS API。</p>
         </div>
 
+        <!-- 「其他」不再用弹窗：WebView 里浮层高度在部分机型上会被压成只剩标题栏。
+             改成页面最底部的原生折叠块，展开就是全部内容，没有任何定位/层级依赖。 -->
+        <details id="settingsOtherFold" class="oc-card oc-fold">
+          <summary class="oc-fold-summary">
+            <span>其他</span>
+            <span class="oc-meta">主题来源 · 能力与数据 · 关于</span>
+          </summary>
+          <div class="oc-fold-body">
+            <section>
+              <h4>主题来源</h4>
+              <div id="settingsTheme"></div>
+            </section>
+            <section>
+              <h4>能力与数据</h4>
+              <div id="settingsCaps"></div>
+              <div id="settingsData"></div>
+            </section>
+            <section>
+              <h4>关于</h4>
+              <div id="settingsAbout"></div>
+              <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
+            </section>
+          </div>
+        </details>
+
       </section>
     </main>
-  </div>
-
-  <div id="settingsOtherDialog" class="oc-other-overlay" role="dialog" aria-modal="true" aria-labelledby="settingsOtherTitle" hidden>
-    <div class="oc-other-dialog" tabindex="-1">
-    <div class="oc-other-head">
-      <h3 id="settingsOtherTitle">其他</h3>
-      <button id="settingsOtherClose" type="button" class="oc-btn oc-btn-soft">关闭</button>
-    </div>
-    <div class="oc-other-body" id="settingsOtherBody" tabindex="0">
-    <section>
-      <h4>主题来源</h4>
-      <div id="settingsTheme"></div>
-    </section>
-    <section>
-      <h4>能力与数据</h4>
-      <div id="settingsCaps"></div>
-      <div id="settingsData"></div>
-    </section>
-    <section>
-      <h4>关于</h4>
-      <div id="settingsAbout"></div>
-      <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
-    </section>
-    </div>
-    </div>
   </div>
 
   <div id="viewer" class="oc-viewer" role="dialog" aria-modal="true" aria-label="图片查看" hidden>

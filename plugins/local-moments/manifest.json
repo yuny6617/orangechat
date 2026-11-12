@@ -2,7 +2,7 @@
   "id": "com.orangechat.localmoments",
   "name": "本机朋友圈",
   "description": "只在本机用户与本机助手之间记录动态：默认 3 条游标浏览、搜索筛选、评论点赞、图片与聊天记录卡片、草稿与可见范围。浏览只读宿主本地数据，不联网、不触发模型。",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "author": "OrangeChat",
   "icon": "🫧",
   "entry": "main.js",

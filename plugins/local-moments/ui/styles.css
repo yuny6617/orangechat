@@ -492,57 +492,35 @@ h3 { margin-bottom: 8px; font-size: 15px; line-height: 1.3; }
   .oc-media-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
-.oc-other-open {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  padding: 4px 2px;
-  text-align: left;
-  cursor: pointer;
-}
-.oc-other-open > span:first-child { font-weight: 700; }
-.oc-other-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: rgba(10, 14, 24, .38);
-}
-.oc-other-dialog {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  max-width: 520px;
-  height: 80vh;
-  height: 80dvh;
-  max-height: calc(100% - 16px);
-  min-height: 0;
-  overflow: hidden;
-  border: 1px solid var(--oc-border, rgba(120,120,140,.25));
-  border-radius: 16px;
-  padding: 16px;
-  background: var(--oc-surface, #fff);
-  color: var(--oc-text, #1d2433);
-}
-.oc-other-head { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; }
-.oc-other-head h3 { margin: 0; }
-.oc-other-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-body.oc-modal-open { overflow: hidden; }
-.oc-other-dialog section { margin-top: 14px; }
-.oc-other-dialog h4 { margin: 0 0 6px; font-size: 14px; }
-
 .oc-filter:not([open]) {
   width: fit-content;
   max-width: 300px;
   padding: 6px 10px;
 }
 .oc-filter:not([open]) summary { white-space: nowrap; }
+
+/* 「其他」折叠块：放在设置页最底部的原生 <details>。
+   曾经用 fixed 浮层弹窗，真机 WebView 上高度被压成只剩标题栏；折叠块不依赖定位/层级/视口单位。 */
+.oc-fold { padding: 0; }
+.oc-fold > summary.oc-fold-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px;
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+.oc-fold > summary.oc-fold-summary::-webkit-details-marker { display: none; }
+.oc-fold > summary.oc-fold-summary::after {
+  content: "›";
+  color: var(--oc-accent);
+  font-size: 22px;
+  line-height: 1;
+  transition: transform 0.15s;
+}
+.oc-fold[open] > summary.oc-fold-summary::after { transform: rotate(90deg); }
+.oc-fold-body { padding: 0 16px 16px; border-top: 1px solid var(--oc-border); }
+.oc-fold-body section { margin-top: 14px; }
+.oc-fold-body h4 { margin: 0 0 6px; font-size: 14px; }

@@ -81,6 +81,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.video.VIDEO_GIFT_EFFECT_DURATION_MS
+import me.rerere.rikkahub.data.video.CameraFacing
 import me.rerere.rikkahub.data.video.DanmakuLine
 import me.rerere.rikkahub.data.video.PreviewCalibration
 import me.rerere.rikkahub.data.video.PreviewTransform
@@ -314,29 +315,51 @@ fun VideoCallPage(
      *
      * 角度是**设置**（持久化），不是本页的临时状态：换镜头、退后台再回来、页面重建
      * 都不会把它清掉。真机上画面偏了就点「右转/左转」，角度会立刻生效并写回设置。
+     *
+     * **前后摄分开**：真机上 OPPO PKZ110 前摄要 90°、后摄要 270°，共享一个角度
+     * 必然让其中一支侧躺。这里按当前镜头的 facing 取对应的值。
      */
-    val previewCalibrationDegrees = settings.videoCallSetting.previewCalibrationDegrees
+    val previewCalibrationFrontDegrees = settings.videoCallSetting.previewCalibrationDegrees
         ?.let(PreviewCalibration::normalize)
-        ?: PreviewCalibration.deviceDefault(
+        ?: PreviewCalibration.deviceDefaultFront(
             android.os.Build.MANUFACTURER,
             android.os.Build.MODEL,
             android.os.Build.VERSION.SDK_INT,
         )
+    val previewCalibrationBackDegrees = settings.videoCallSetting.previewCalibrationBackDegrees
+        ?.let(PreviewCalibration::normalize)
+        ?: PreviewCalibration.deviceDefaultBack(
+            android.os.Build.MANUFACTURER,
+            android.os.Build.MODEL,
+            android.os.Build.VERSION.SDK_INT,
+        )
+    val previewFacingIsFront = cameraStatusState.facing == CameraFacing.Front
+    val previewCalibrationDegrees =
+        if (previewFacingIsFront) previewCalibrationFrontDegrees else previewCalibrationBackDegrees
     val settingsStore: SettingsStore = org.koin.compose.koinInject()
     val uiScope = rememberCoroutineScope()
-    LaunchedEffect(cameraController, previewCalibrationDegrees) {
-        cameraController.setPreviewCalibrationDegrees(previewCalibrationDegrees)
+    LaunchedEffect(
+        cameraController,
+        previewCalibrationFrontDegrees,
+        previewCalibrationBackDegrees,
+    ) {
+        cameraController.setPreviewCalibrationDegrees(previewCalibrationFrontDegrees, frontFacing = true)
+        cameraController.setPreviewCalibrationDegrees(previewCalibrationBackDegrees, frontFacing = false)
     }
     fun applyPreviewCalibration(degrees: Int) {
         val normalized = PreviewCalibration.normalize(degrees)
+        val front = previewFacingIsFront
         // 先让画面转起来（不等写盘），再落库；两处都以同一个归一化角度为准。
-        cameraController.setPreviewCalibrationDegrees(normalized)
+        cameraController.setPreviewCalibrationDegrees(normalized, frontFacing = front)
         uiScope.launch {
             settingsStore.update { current ->
+                val video = current.videoCallSetting
                 current.copy(
-                    videoCallSetting = current.videoCallSetting.copy(
-                        previewCalibrationDegrees = normalized,
-                    ),
+                    videoCallSetting = if (front) {
+                        video.copy(previewCalibrationDegrees = normalized)
+                    } else {
+                        video.copy(previewCalibrationBackDegrees = normalized)
+                    },
                 )
             }
         }

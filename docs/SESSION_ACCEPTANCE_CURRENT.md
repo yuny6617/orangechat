@@ -51,12 +51,12 @@
 ## 产物
 
 - `build/latest-install-apk.log`：优化共存APK构建成功。
-- APK：`app/build/outputs/apk/videoCoexist/app-arm64-v8a-videoCoexist.apk`，62,769,957字节。
-- APK SHA-256：`30D758EF294566E3CABE56F760E937B1ABDCBDA8E3FFF1A0E542E042A22FD6EE`。
+- APK：`app/build/outputs/apk/videoCoexist/app-arm64-v8a-videoCoexist.apk`，62,770,225字节（2026-11-12 20:31 构建，含 TextureView 复合顺序修正与 Gemini 历史回放修正）。
+- APK SHA-256：`C76E2BBC5BCF359B82E73FD54CF162CEDFA6DA8BF647E34EA29D90965B804B44`。
 - 包名 `me.rerere.orangechat.videogifts`，versionCode165，2.2.9，arm64-v8a。
 - 既有共存测试证书SHA-256：`ff516315e577235b64ff356dbc856c053b7e589ae636dd8bc4301e528b46d116`，未替换正式私钥。签名验证及内置OCR核验通过。
-- 插件：`build/local-moments-plugin/local-moments-1.0.0.zip`，55,839字节。
-- 插件SHA-256：`059137ED781EAAA61FF7370937F222AACF6CE8D1332BBAF3B740BCB11EEB006B`，确定性打包检查通过。
+- 插件：`build/local-moments-plugin/local-moments-1.0.2.zip`，55,702字节；「其他」改为设置页底部原生 `<details>` 折叠块（真机上 fixed 浮层高度会被压成只剩标题栏）。
+- 插件SHA-256：`2BFEE6A92DB773585D94B294C323389B8471B9669D38FF26E71507F3910D8BFF`，确定性打包检查通过。
 - 三套主题ZIP未改，构建检查/对比度审计通过。
 
 ## 必须保留的边界

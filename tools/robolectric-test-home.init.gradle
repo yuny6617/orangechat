@@ -1,0 +1,20 @@
+// Verification-only Gradle init script.
+//
+// Robolectric keeps a download lock under `user.home` and resolves `android-all`
+// artifacts through `maven.repo.local`. In this workspace `C:\Users\Administrator`
+// is not writable, so the default home dies with
+// `FileNotFoundException: C:\Users\Administrator\.robolectric-download-lock`.
+// Point both at the workspace-local cache instead:
+//   - user.home            -> writable temp dir (lock file)
+//   - maven.repo.local     -> pre-populated local Maven repo with android-all jars
+//
+// Usage:
+//   gradlew :app:testDebugUnitTest --tests '...' \
+//     --init-script tools/robolectric-test-home.init.gradle
+allprojects {
+    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        systemProperty 'user.home', 'D:/DSH-Work/rt'
+        systemProperty 'maven.repo.local', 'D:/DSH-Work/android-build-tools/maven-local'
+        systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+    }
+}

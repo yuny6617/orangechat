@@ -565,37 +565,25 @@ function fireWindow(type) {
   await settle();
   assert.match(documentObject.getElementById('settingsIdentity').textContent, /机主/);
   assert.match(documentObject.getElementById('settingsTheme').textContent, /CSS 变量/);
-  const other = requireElement('settingsOtherDialog');
-  assert.equal(other.hidden, true);
-  requireElement('settingsOtherOpen').focus();
-  click(requireElement('settingsOtherOpen'));
-  await settle();
-  assert.equal(other.hidden, false, 'Other modal must actually open');
-  assert.equal(documentObject.activeElement, requireElement('settingsOtherClose'));
+  // 「其他」是设置页底部原生 <details> 折叠块，不再是浮层弹窗：
+  // 内容必须在渲染时就已经填好，且不受 hidden 祖先影响。
+  const fold = requireElement('settingsOtherFold');
+  assert.equal(fold.tagName, 'DETAILS');
+  assert.equal(fold.getAttribute('open'), null, 'fold starts collapsed');
   for (const [id, content] of [['settingsTheme', /CSS 变量/], ['settingsCaps', /localdata.read/],
       ['settingsData', /Schema 版本/], ['settingsAbout', /插件版本/]]) {
     const node = requireElement(id);
-    assert.match(node.textContent, content, id + ' must be populated on open');
+    assert.match(node.textContent, content, id + ' must be populated on render');
     let ancestor = node;
     while (ancestor) {
       assert.equal(ancestor.hidden, false, id + ' must not have a hidden ancestor');
       ancestor = ancestor.parentNode;
     }
-    assert.ok(walk(other).includes(node), id + ' must belong to the modal');
+    assert.ok(walk(fold).includes(node), id + ' must live inside the bottom fold');
   }
-  assert.ok(documentObject.body.classList.contains('oc-modal-open'));
-  for (const listener of documentListeners.keydown || []) listener({ key: 'Tab', preventDefault() {} });
-  assert.equal(documentObject.activeElement, requireElement('settingsOtherBody'));
-  for (const listener of documentListeners.keydown || []) listener({ key: 'Escape', preventDefault() {} });
-  assert.equal(other.hidden, true);
-  assert.equal(documentObject.activeElement, requireElement('settingsOtherOpen'));
   assert.equal(documentObject.body.classList.contains('oc-modal-open'), false);
-  click(requireElement('settingsOtherOpen'));
-  click(requireElement('settingsOtherClose'));
-  assert.equal(other.hidden, true, 'close button must dismiss');
-  click(requireElement('settingsOtherOpen'));
-  click(other);
-  assert.equal(other.hidden, true, 'backdrop must dismiss');
+  assert.equal(documentObject.getElementById('settingsOtherOpen'), null);
+  assert.equal(documentObject.getElementById('settingsOtherDialog'), null);
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /启用互动/);
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /审核模式/);
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /参与助手/);

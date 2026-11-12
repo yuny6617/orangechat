@@ -759,11 +759,29 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                     rawHistoryMessages
                                 }
 
+                                // Gemini 的 content 协议要求 functionCall 轮必须紧跟在 user 或
+                                // functionResponse 之后。我们把 tool 调用和结果都存在 assistant
+                                // 消息里，截断窗口又可能只切到一半，所以直接回放历史会让 Gemini
+                                // 返回 400：
+                                //   "Please ensure that function call turn comes immediately after a
+                                //    user turn or after a function response turn."
+                                // 主动消息本来就是"接一轮新话题"，历史里的 tool 协议没有回放价值，
+                                // 这里剥掉它（本轮可用工具不受影响）。
+                                val strictToolAlternation = providerSetting is ProviderSetting.Google
+                                if (strictToolAlternation) {
+                                    trace.event("provider_compat", "google_tool_history_stripped=true")
+                                }
+                                val protocolSafeHistory = if (strictToolAlternation) {
+                                    stripHistoricalToolParts(providerSafeHistory)
+                                } else {
+                                    providerSafeHistory
+                                }
+
                                 // DeepSeek 带工具时必须保留历史 reasoning_content；其他场景仍精简旧主动消息。
                                 // 后台唤醒没有摄像头授权，历史里的视频通话画面一律不重放。
                                 val historyMessages = filterInvalidToolMessages(
                                     sanitizeProactiveHistory(
-                                        messages = providerSafeHistory,
+                                        messages = protocolSafeHistory,
                                         proactiveMessageIds = proactiveState.recentProactiveMessageIds,
                                         preserveReasoning = isDeepSeekCompatible(providerSetting, model) && tools.isNotEmpty(),
                                     ),

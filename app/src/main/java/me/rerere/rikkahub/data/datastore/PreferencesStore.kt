@@ -359,6 +359,9 @@ class SettingsStore(
                         previewCalibrationDegrees = stored.previewCalibrationDegrees?.let {
                             me.rerere.rikkahub.data.video.PreviewCalibration.normalize(it)
                         },
+                        previewCalibrationBackDegrees = stored.previewCalibrationBackDegrees?.let {
+                            me.rerere.rikkahub.data.video.PreviewCalibration.normalize(it)
+                        },
                     )
                 } ?: me.rerere.rikkahub.data.video.VideoCallSetting(),
                 modeInjections = runCatching { preferences[MODE_INJECTIONS]?.let { JsonInstant.decodeFromString<List<PromptInjection.ModeInjection>>(it) } }.getOrNull() ?: emptyList(),

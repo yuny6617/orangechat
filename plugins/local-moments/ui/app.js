@@ -14,7 +14,7 @@
   var C = window.MomentsCore;
   var B = window.MomentsBridge;
 
-  var PLUGIN_VERSION = '1.0.0';
+  var PLUGIN_VERSION = '1.0.2';
   var PLUGIN_ID = 'com.orangechat.localmoments';
   var DECLARED_PERMISSIONS = [
     'localdata.read',
@@ -383,7 +383,6 @@
   }
 
   function showView(name) {
-    closeOtherSettings();
     var views = ['list', 'detail', 'editor', 'drafts', 'author', 'settings'];
     for (var i = 0; i < views.length; i++) {
       show($('view-' + views[i]), views[i] === name);
@@ -2021,42 +2020,6 @@
     about.appendChild(settingsRow('模型', '浏览/搜索/详情不触发模型'));
     $('settingsAbout').appendChild(about);
   }
-
-  var otherModalReturnFocus = null;
-
-  function openOtherSettings() {
-    // Populate the modal at open time as well as on route/host updates. A modal
-    // must not depend on an earlier asynchronous settings render having finished.
-    renderSettings();
-    otherModalReturnFocus = document.activeElement || $('settingsOtherOpen');
-    show($('settingsOtherDialog'), true);
-    document.body.classList.add('oc-modal-open');
-    $('settingsOtherClose').focus();
-  }
-
-  function closeOtherSettings() {
-    if ($('settingsOtherDialog').hidden) return;
-    show($('settingsOtherDialog'), false);
-    document.body.classList.remove('oc-modal-open');
-    if (otherModalReturnFocus && typeof otherModalReturnFocus.focus === 'function') otherModalReturnFocus.focus();
-    otherModalReturnFocus = null;
-  }
-
-  function otherModalKeydown(event) {
-    if ($('settingsOtherDialog').hidden) return;
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeOtherSettings();
-    } else if (event.key === 'Tab') {
-      // This read-only modal has two focus stops, including its keyboard-scrollable
-      // body. Keep focus inside it without depending on native <dialog> support.
-      var target = event.shiftKey ? $('settingsOtherBody') : $('settingsOtherClose');
-      if (document.activeElement === target) target = event.shiftKey ? $('settingsOtherClose') : $('settingsOtherBody');
-      event.preventDefault();
-      target.focus();
-    }
-  }
-
   function settingsRow(label, value) {
     var row = el('div', 'oc-settings-row');
     row.appendChild(el('span', '', label));
@@ -2612,23 +2575,6 @@
       navigate('list');
     }));
 
-    var otherDialog = $('settingsOtherDialog');
-    if ($('settingsOtherOpen') && otherDialog) {
-      $('settingsOtherOpen').addEventListener('click', guard(function () {
-        openOtherSettings();
-      }));
-    }
-    if ($('settingsOtherClose') && otherDialog) {
-      $('settingsOtherClose').addEventListener('click', guard(function () {
-        closeOtherSettings();
-      }));
-    }
-
-    otherDialog.addEventListener('click', function (event) {
-      if (event.target === otherDialog) closeOtherSettings();
-    });
-    document.addEventListener('keydown', otherModalKeydown);
-
     $('taskSettingsRefresh').addEventListener('click', guard(function () { loadTaskSettings(true); }));
     $('taskStatusRefresh').addEventListener('click', guard(function () {
       refreshTaskStatus('');
@@ -2647,7 +2593,6 @@
       if (document.hidden) closeViewer();
     });
     window.addEventListener('pagehide', function () {
-      closeOtherSettings();
       closeViewer();
       state.list.loaded = false;
       state.detail.post = null;

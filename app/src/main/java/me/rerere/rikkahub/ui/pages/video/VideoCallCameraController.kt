@@ -174,12 +174,21 @@ class VideoCallCameraController(
      *
      * 故意放在控制器上、而不是放进 [Generation]：换镜头、退后台再回来、页面重建都会重建
      * generation，如果角度跟着 generation 走，用户每切一次前后摄就得重新校一次。
-     * 这里它是控制器级状态，只有设置被改才变（来源是 `VideoCallSetting.previewCalibrationDegrees`）。
+     * 这里它是控制器级状态，只有设置被改才变（来源是 `VideoCallSetting.previewCalibrationDegrees`
+     * 与 `previewCalibrationBackDegrees`）。
+     *
+     * **前后摄分开存**：真机上 OPPO PKZ110 前摄需要 +90°、后摄需要 0°，一个共享角度
+     * 必然让其中一支镜头侧躺。写入/读取都按当前 generation 的 facing 取对应值。
      */
-    private var previewCalibrationDegrees: Int = PreviewCalibration.DEFAULT_DEGREES
+    private var previewCalibrationFront: Int = PreviewCalibration.DEFAULT_DEGREES
+    private var previewCalibrationBack: Int = PreviewCalibration.DEFAULT_DEGREES
     private var previewMirrored = false
     // Monotonic under gate: A → B → A must still reject a capture submitted before B.
     private var geometryRevision = 0L
+
+    /** 按镜头取校准角；必须在门闩内调用。 */
+    private fun calibrationLocked(frontFacing: Boolean): Int =
+        if (frontFacing) previewCalibrationFront else previewCalibrationBack
 
     /**
      * 这一代"预览能开、但抓帧停用"的原因；正常可抓帧时是空串。
@@ -208,19 +217,20 @@ class VideoCallCameraController(
      *
      * 角度同时进入预览矩阵和抓帧 JPEG 的归一化旋转。重算预览矩阵、作废在飞的抓帧票据；
      * 下一个抓帧请求读取新的校准角度。角度会先归一化到 0/90/180/270，非法值不会进矩阵。
+     * [frontFacing] 决定这个角度写到哪一支镜头。
      */
-    fun setPreviewCalibrationDegrees(degrees: Int) {
+    fun setPreviewCalibrationDegrees(degrees: Int, frontFacing: Boolean) {
         val normalized = PreviewCalibration.normalize(degrees)
         gate.exclusive {
-            if (normalized == previewCalibrationDegrees) return@exclusive
-            previewCalibrationDegrees = normalized
+            if (normalized == calibrationLocked(frontFacing)) return@exclusive
+            if (frontFacing) previewCalibrationFront = normalized else previewCalibrationBack = normalized
             invalidateGeometryLocked()
             gate.currentOrNull()?.let { publishTransformLocked(it) }
         }
     }
 
-    /** 当前预览校准角度（面板显示用）。 */
-    fun previewCalibration(): Int = previewCalibrationDegrees
+    /** 当前预览校准角度（面板显示用）；[frontFacing] 指定是哪一支镜头。 */
+    fun previewCalibration(frontFacing: Boolean): Int = gate.exclusive { calibrationLocked(frontFacing) }
 
     /** 面板是否已经把一个可用的 SurfaceTexture 交了过来（Surface 就绪）。 */
     private val _surfaceReady = MutableStateFlow(false)
@@ -558,11 +568,10 @@ class VideoCallCameraController(
             viewHeight = generation.viewHeight,
             // 预览矩阵带上校准；抓帧方向用同一个 captureRotationDegrees（基准角 + 同一校准角），
             // 所以两边方向一致，且 JPEG 只旋转一次（HAL 的 JPEG_ORIENTATION 固定 0）。
-            calibrationDegrees = previewCalibrationDegrees,
+            calibrationDegrees = calibrationLocked(generation.frontFacing),
             previewMirrored = previewMirrored,
-            // Video calls always fit the complete frame into the fixed 4:3 card. A crop or a
-            // non-uniform scale here is what users perceive as "compressed/deformed".
-            fit = true,
+            // Use center-crop (fit = false) to fill the 3:4 portrait card without black bars.
+            fit = false,
         )
         _previewTransform.value = transform
         logPreviewGeometry(generation, transform)
@@ -1292,7 +1301,7 @@ class VideoCallCameraController(
         sensorOrientation = generation.sensorOrientation,
         displayRotationDegrees = generation.displayRotationDegrees,
         frontFacing = generation.frontFacing,
-        calibrationDegrees = previewCalibrationDegrees,
+        calibrationDegrees = calibrationLocked(generation.frontFacing),
     )
 
     /**

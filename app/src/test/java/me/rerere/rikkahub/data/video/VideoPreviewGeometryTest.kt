@@ -103,6 +103,7 @@ class VideoPreviewGeometryTest {
                 viewWidth = case.viewWidth,
                 viewHeight = case.viewHeight,
             )
+            // TextureView 先做 setTransform 的 M，再做默认拉伸 S → 屏幕画面 = M ∘ S。
             val shown = textureViewDefaultStretch(
                 case.bufferWidth,
                 case.bufferHeight,
@@ -1021,6 +1022,24 @@ class VideoPreviewGeometryTest {
         assertEquals(0, PreviewCalibration.deviceDefault("other", "Reno14 Pro", 36))
         assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "Reno14 Pro", 35))
         assertEquals(0, PreviewCalibration.deviceDefault("OPPO", "Reno14 Pro", 37))
+    }
+
+    /**
+     * 前后摄**分开**给默认角：真机 OPPO PKZ110 / Android 16 上前摄要 90°、后摄要 270°，
+     * 共享一个角度必然让其中一支镜头侧躺（这是本轮真机验收发现的回归）。
+     */
+    @Test
+    fun `front and back device defaults are independent`() {
+        assertEquals(90, PreviewCalibration.deviceDefaultFront("OPPO", "PKZ110", 36))
+        assertEquals(270, PreviewCalibration.deviceDefaultBack("OPPO", "PKZ110", 36))
+        // 未知机型两支镜头都回到"不做补偿"，交给用户手动校准。
+        assertEquals(0, PreviewCalibration.deviceDefaultFront("OPPO", "PFJM10", 36))
+        assertEquals(0, PreviewCalibration.deviceDefaultBack("OPPO", "PFJM10", 36))
+        assertEquals(0, PreviewCalibration.deviceDefaultFront("Xiaomi", "PKZ110", 36))
+        assertEquals(0, PreviewCalibration.deviceDefaultBack("Xiaomi", "PKZ110", 36))
+        // 已知的 Reno14 Pro 只给前摄建议；后摄保持标准公式。
+        assertEquals(90, PreviewCalibration.deviceDefaultFront("OPPO", "Reno14 Pro", 36))
+        assertEquals(0, PreviewCalibration.deviceDefaultBack("OPPO", "Reno14 Pro", 36))
     }
 
     /** 实际调用生产 toAndroidMatrix 桥接，独立用 Android Matrix 拼合 M S 并逆映射 view。

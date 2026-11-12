@@ -47,15 +47,24 @@ data class VideoCallSetting(
     /** 完整送礼提示词；空白使用内置全文。执行 id/schema、通话作用域与次数限制始终由程序校验。 */
     val giftPrompt: String = "",
     /**
-     * 人工校准角度（0/90/180/270），同步应用到预览和发送的抓帧。
+     * **前摄**的人工校准角度（0/90/180/270），同步应用到前摄预览和抓帧。
      *
-     * null 表示自动选择 [PreviewCalibration.deviceDefault] 的窄范围设备建议，未知设备为 0°。
+     * null 表示自动选择 [PreviewCalibration.deviceDefaultFront] 的窄范围设备建议，未知设备为 0°。
      * 显式角度始终覆盖自动建议；复位保存 0°，不会再次应用设备补偿。
      * 设备建议来自用户实测反馈，不代表已证实的 HAL 行为。
      *
-     * 抓帧/落盘 JPEG 在传输前应用同一校准角度和当前预览镜像设置。
+     * 校准必须**按镜头分开**：真机上 OPPO PKZ110（Android 16）实测前摄要 +90°、
+     * 后摄要 0°，一个全局角度只可能让其中一支镜头正确。
      */
     val previewCalibrationDegrees: Int? = null,
+    /**
+     * **后摄**的人工校准角度；null 表示用 [PreviewCalibration.deviceDefaultBack]
+     * （目前所有已知机型都是 0°，即标准 `sensor - display` 公式）。
+     *
+     * 字段名保持向后兼容：旧版本只存过一个全局角度，读回时按**前摄**处理，
+     * 因为用户都是在自拍画面上调校准的。
+     */
+    val previewCalibrationBackDegrees: Int? = null,
 ) {
     val giftsAvailable: Boolean
         get() = giftsEnabled

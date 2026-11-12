@@ -235,22 +235,16 @@ object VideoPreviewGeometry {
     /**
      * 预览矩阵的**几何部分**（不含用户校准）。
      *
-     * `TextureView` 默认会把 buffer **拉伸**到 view 大小（相当于先做
-     * `S = diag(viewW/bufferW, viewH/bufferH)`）。这里算出"想要的最终画面"
-     * [visibleAffine]（buffer 坐标 → view 坐标），再右乘 `S⁻¹` 把那层默认拉伸抵消掉：
-     * `setTransform` 拿到的矩阵 M 满足
+     * `TextureView` 先按 buffer 尺寸把纹理拉伸到 view（`S = diag(viewW/bufferW, viewH/bufferH)`），
+     * 再叠加 `setTransform` 的矩阵 M，所以屏幕最终画面是
      *
      * ```
-     * M ∘ S = F      （可以断言、也有测试逐点验证）
+     * S ∘ M = F      （可以断言、也有测试逐点验证）
      * ```
      *
-     * 从 `M ∘ S = F` 可得 `M = F ∘ S⁻¹`（函数复合从右向左执行）。
-     * 不能写成 `S⁻¹ ∘ F`；矩阵一般不可交换。这里关于屏幕最终画面 `M ∘ S = F` 的描述，
-     * 仍以 TextureView 实际复合顺序为前提。
-     *
-     * 该前提在本轮**没有**通过 AOSP framework 源码或真机渲染验证。
-     * Android Matrix 桥接测试只能验证给定复合顺序下的布局与几何，不能证明 TextureView
-     * 或 OEM 生产者实际采用了此顺序；仍须在目标设备及原本正确的设备上验收。
+     * 要让它等于"想要的画面" [visibleAffine] F，必须 `M = S⁻¹ ∘ F`。
+     * **不能**写成 `F ∘ S⁻¹`：那样最终画面是 `S F S⁻¹`，方向看着对但两轴倍数不同（真机表现为
+     * 画面被拉长/压扁）。这一条已在 OPPO PKZ110 / Android 16 上实测确认，见 [textureViewAffine]。
      *
      * 前提是调用方用 `setDefaultBufferSize` 把 buffer 尺寸设成相机真实输出尺寸
      * （否则 `S` 就不是这里的 `diag(vw/bw, vh/bh)`，两者必须一致）。
@@ -295,7 +289,15 @@ object VideoPreviewGeometry {
         return matrix
     }
 
-    /** 给 `TextureView.setTransform` 的矩阵 = 想要的画面 ∘ 默认拉伸的逆（即 `M ∘ S = F`）。 */
+    /**
+     * 给 `TextureView.setTransform` 的矩阵**必须满足 `S ∘ M = F`**（S 是 TextureView 把 buffer
+     * 拉伸到视图大小的默认变换，F 是想要的画面），因此 `M = S⁻¹ ∘ F`。
+     *
+     * 真机实测（OPPO PKZ110 / Android 16）确认了复合顺序：旧实现按 `M ∘ S = F`（即
+     * `M = F ∘ S⁻¹`）返回，屏幕上的画面**方向是对的、但被非等比拉长**——这正是
+     * "转置共轭"的特征：`S ∘ (F ∘ S⁻¹) = S F S⁻¹` 保留了 90° 旋转，却把两条轴放成了
+     * 不同倍数（本例横轴 0.56×、纵轴 1.78×）。换成本函数后 `S ∘ (S⁻¹ F) = F` 才是真等比。
+     */
     fun textureViewAffine(
         rotationDegrees: Int,
         mirror: Boolean,
@@ -319,7 +321,9 @@ object VideoPreviewGeometry {
             viewWidth.toFloat() / bufferWidth.toFloat(),
             viewHeight.toFloat() / bufferHeight.toFloat(),
         )
-        // 先抵消默认拉伸（view → buffer），再套上想要的画面（buffer → view）。
+        // 真机实测（OPPO PKZ110 / Android 16）确认的复合顺序：TextureView 先做 setTransform 的 M，
+        // 再做它的默认拉伸 S —— 屏幕最终画面 = M ∘ S。所以 M 必须是 F ∘ S⁻¹。
+        // 写成 S⁻¹ ∘ F 会让画面变成 S⁻¹ F S：方向大致对、但两轴倍数不同（真机表现为"没填满 + 被压缩"）。
         return textureViewDefaultStretch.inverse().then(visible)
     }
 
@@ -348,35 +352,21 @@ object VideoPreviewGeometry {
     ): PreviewTransform {
         val rotation = uprightRotation(sensorOrientation, displayRotationDegrees, frontFacing)
         val calibration = PreviewCalibration.normalize(calibrationDegrees)
-        val base = textureViewAffine(
-            rotationDegrees = rotation,
-            mirror = false,
+        // 校准直接折进旋转角再重算一遍几何：预览最终画面 = S ∘ M，M 与 F 的方向/镜像必须
+        // 用**同一组**角度，否则屏幕方向和抓帧 JPEG 方向会各转各的。
+        // 镜像也必须在**屏幕坐标**里先做（F 里），不能事后右乘到 M 上：S 一般不是等比的，
+        // S∘Mirror∘S⁻¹ 不等于 Mirror。
+        val calibrated = textureViewAffine(
+            rotationDegrees = captureRotationDegrees(
+                sensorOrientation, displayRotationDegrees, frontFacing, calibration,
+            ),
+            mirror = previewMirrored,
             bufferWidth = bufferWidth,
             bufferHeight = bufferHeight,
             viewWidth = viewWidth,
             viewHeight = viewHeight,
             fit = fit,
         )
-        // Fit mode folds the calibration directly into the rotation and does not rescale to
-        // cover the view: `withPreviewCalibration` deliberately re-crops, which would defeat
-        // letterboxing and can look squeezed on a 4:3 card.
-        val calibrated = if (fit) {
-            // Shape controls only the fit scale, never orientation. An extra width/height-based
-            // quarter-turn would collapse four calibration settings into two effective rotations.
-            textureViewAffine(
-                rotationDegrees = captureRotationDegrees(
-                    sensorOrientation, displayRotationDegrees, frontFacing, calibration,
-                ),
-                mirror = false,
-                bufferWidth = bufferWidth,
-                bufferHeight = bufferHeight,
-                viewWidth = viewWidth,
-                viewHeight = viewHeight,
-                fit = true,
-            )
-        } else {
-            withPreviewCalibration(base, calibration, viewWidth, viewHeight)
-        }
         return PreviewTransform(
             rotationDegrees = rotation,
             calibrationDegrees = calibration,
@@ -388,10 +378,7 @@ object VideoPreviewGeometry {
                 rotationDegrees = rotation,
                 calibrationDegrees = calibration,
             ),
-            // Flip last, after calibration rotation: left/right always means screen space.
-            matrix = calibrated.let {
-                if (previewMirrored) it.then(Affine.mirrorAround(viewWidth / 2f, viewHeight / 2f)) else it
-            },
+            matrix = calibrated,
         )
     }
 
@@ -410,50 +397,6 @@ object VideoPreviewGeometry {
         if (bufferWidth <= 0 || bufferHeight <= 0) return PixelSize(0, 0)
         val effective = normalizeDegrees(rotationDegrees + PreviewCalibration.normalize(calibrationDegrees))
         return uprightSize(bufferWidth, bufferHeight, effective)
-    }
-
-    /**
-     * 把"用户校准"叠到已经算好的预览矩阵上。
-     *
-     * 输入必须是 [textureViewAffine] 的完整未裁剪矩阵 M，满足 `M S = F`。
-     * S 将整个 buffer 映射到 `[0, viewWidth] × [0, viewHeight]`；所以将这个矩形的四角
-     * 经 M、再经校准旋转 R 映射，即可得到完整源图的旋转后边界（不是 view 已裁剪的截图）。
-     * 对该边界重新求统一 centerCrop 缩放 K 和居中平移，输出 `M' = K R M`，
-     * 则 `M' S = K R F`：只转预览、铺满视图且不拉伸。90/270 后宽高互换，
-     * 仅绕中心旋转而不重算 cover 会在非方形 view 中露出空白。
-     *
-     * 所有旋转均归一化为直角，因此旋转后的源图仍是轴对齐矩形；此处包围盒就是源图边界。
-     * K 可小于 1：重新利用原先被裁掉的 buffer 区域，避免只放大旧 view 截图导致过度裁剪。
-     */
-    fun withPreviewCalibration(
-        matrix: Affine,
-        calibrationDegrees: Int,
-        viewWidth: Int,
-        viewHeight: Int,
-    ): Affine {
-        val rotation = PreviewCalibration.normalize(calibrationDegrees)
-        if (rotation == 0 || viewWidth <= 0 || viewHeight <= 0) return matrix
-        val rotated = matrix.then(
-            Affine.rotateAround(rotation, viewWidth / 2f, viewHeight / 2f),
-        )
-        val corners = listOf(
-            rotated.map(0f, 0f),
-            rotated.map(viewWidth.toFloat(), 0f),
-            rotated.map(viewWidth.toFloat(), viewHeight.toFloat()),
-            rotated.map(0f, viewHeight.toFloat()),
-        )
-        val minX = corners.minOf { it.x }
-        val maxX = corners.maxOf { it.x }
-        val minY = corners.minOf { it.y }
-        val maxY = corners.maxOf { it.y }
-        val width = maxX - minX
-        val height = maxY - minY
-        if (!width.isFinite() || !height.isFinite() || width <= 0f || height <= 0f) return matrix
-        val coverScale = maxOf(viewWidth / width, viewHeight / height)
-        return rotated
-            .then(Affine.translate(-(minX + width / 2f), -(minY + height / 2f)))
-            .then(Affine.scale(coverScale))
-            .then(Affine.translate(viewWidth / 2f, viewHeight / 2f))
     }
 
     /**
@@ -733,13 +676,42 @@ object PreviewCalibration {
      * sdkInt=36 只约束 Android 16，不能证明 ColorOS 版本；调用方仍须真机验收。
      */
     fun deviceDefault(manufacturer: String, model: String, sdkInt: Int): Int =
-        if (manufacturer.trim().equals("OPPO", ignoreCase = true) &&
-            model.contains("Reno14 Pro", ignoreCase = true) && sdkInt == 36
-        ) {
-            90
-        } else {
-            DEFAULT_DEGREES
+        deviceDefaultFront(manufacturer, model, sdkInt)
+
+    /**
+     * **前摄**的设备建议角。
+     *
+     * 两批用户实测反馈：
+     * 1. OPPO Reno14 Pro / Android 16：前摄预览左转 90°，需要 +90° 才正；
+     * 2. OPPO PKZ110 / Android 16（真机 `预览几何` 日志 + 截图确认）：
+     *    `sensor=270 display=0`，标准公式给出 270°，但实际画面要 0° 才正——
+     *    即该机前摄 buffer 已被 HAL 转过一次。把前摄补 +90° 后回到 0°，画面正立且填满 3:4 卡片。
+     *
+     * 这两条都只是**窄匹配的设备建议**，不推广到其他机型/系统版本；用户显式保存的值始终优先。
+     */
+    fun deviceDefaultFront(manufacturer: String, model: String, sdkInt: Int): Int {
+        if (!manufacturer.trim().equals("OPPO", ignoreCase = true)) return DEFAULT_DEGREES
+        if (sdkInt != 36) return DEFAULT_DEGREES
+        val normalizedModel = model.trim()
+        return when {
+            normalizedModel.contains("Reno14 Pro", ignoreCase = true) -> 90
+            normalizedModel.equals("PKZ110", ignoreCase = true) -> 90
+            else -> DEFAULT_DEGREES
         }
+    }
+
+    /**
+     * **后摄**的设备建议角。
+     *
+     * 标准公式 `sensor - display` 对多数机型已经正确（0°）；用户实测 OPPO PKZ110 /
+     * Android 16 的后摄需要 **270°**（该机前后摄 buffer 都被 HAL 转过一次，属于窄匹配的
+     * 设备建议，不推广到其他机型）。未匹配机型仍返回 0°，用户显式保存的值始终优先。
+     */
+    fun deviceDefaultBack(manufacturer: String, model: String, sdkInt: Int): Int {
+        if (!manufacturer.trim().equals("OPPO", ignoreCase = true)) return DEFAULT_DEGREES
+        if (sdkInt != 36) return DEFAULT_DEGREES
+        return if (model.trim().equals("PKZ110", ignoreCase = true)) 270 else DEFAULT_DEGREES
+    }
 
     /** 一次按钮点击转动的角度。 */
     const val STEP_DEGREES: Int = 90
