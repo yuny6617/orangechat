@@ -280,11 +280,13 @@
     </main>
   </div>
 
-  <dialog id="settingsOtherDialog" class="oc-other-dialog">
+  <div id="settingsOtherDialog" class="oc-other-overlay" role="dialog" aria-modal="true" aria-labelledby="settingsOtherTitle" hidden>
+    <div class="oc-other-dialog" tabindex="-1">
     <div class="oc-other-head">
-      <h3>其他</h3>
+      <h3 id="settingsOtherTitle">其他</h3>
       <button id="settingsOtherClose" type="button" class="oc-btn oc-btn-soft">关闭</button>
     </div>
+    <div class="oc-other-body" id="settingsOtherBody" tabindex="0">
     <section>
       <h4>主题来源</h4>
       <div id="settingsTheme"></div>
@@ -299,7 +301,9 @@
       <div id="settingsAbout"></div>
       <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
     </section>
-  </dialog>
+    </div>
+    </div>
+  </div>
 
   <div id="viewer" class="oc-viewer" role="dialog" aria-modal="true" aria-label="图片查看" hidden>
     <div class="oc-viewer-bar">

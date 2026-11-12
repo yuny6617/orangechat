@@ -27,14 +27,46 @@ import me.rerere.ai.ui.UIMessage
 internal fun proactiveCommitMessageId(taskId: String, index: Int): String =
     UUID.nameUUIDFromBytes("orangechat-proactive:$taskId:$index".toByteArray(Charsets.UTF_8)).toString()
 
-/** Process-wide serial dispatcher. No stale pending work is replayed after a process restart. */
-internal class ProactiveTaskExecutor(
-    private val context: Context,
-    private val settingsStore: SettingsStore,
-    private val repository: ConversationRepository,
-    private val chatService: ChatService,
+/** Test ports replace Android I/O, not the dispatcher or network budget state machine. */
+internal interface ProactiveExecutorPorts {
+    suspend fun host(): ProactiveHostSnapshot
+    suspend fun recover() {}
+    fun now(): Long
+    fun admitCycle(trigger: String, host: ProactiveHostSnapshot): Boolean = true
+    fun diagnostic(task: ProactiveTask?, outcome: String) {}
+}
+
+internal class ProactiveTaskExecutor private constructor(
+    private val androidContext: Context?,
+    private val productionSettings: SettingsStore?,
+    private val productionRepository: ConversationRepository?,
+    private val productionChat: ChatService?,
+    val store: ProactiveTaskStore,
+    private val ports: ProactiveExecutorPorts?,
+    private val taskTimeoutMillis: Long,
 ) {
-    val store = ProactiveTaskStore(context)
+    constructor(context: Context, settingsStore: SettingsStore, repository: ConversationRepository, chatService: ChatService) :
+        this(context, settingsStore, repository, chatService, ProactiveTaskStore(context), null, 180_000L)
+
+    internal constructor(store: ProactiveTaskStore, ports: ProactiveExecutorPorts, taskTimeoutMillis: Long = 180_000L) :
+        this(null, null, null, null, store, ports, taskTimeoutMillis)
+
+    private val context get() = requireNotNull(androidContext)
+    private val settingsStore get() = requireNotNull(productionSettings)
+    private val repository get() = requireNotNull(productionRepository)
+    private val chatService get() = requireNotNull(productionChat)
+    private fun now() = ports?.now() ?: System.currentTimeMillis()
+    private fun diagnostic(task: ProactiveTask?, outcome: String) {
+        // Diagnostics must never abort admission, sibling tasks or terminal cleanup.
+        runCatching {
+            if (ports != null) ports.diagnostic(task, outcome) else {
+                android.util.Log.i("ProactiveExecutor", "assistant=${task?.assistantId} outcome=$outcome")
+                task?.let { ProactiveActivityStore(context, it.assistantId, it.conversationId).append(ProactiveActivity(
+                    id = "dispatch:${it.taskId}:$outcome", timestamp = now(), outcome = outcome,
+                )) }
+            }
+        }
+    }
 
     suspend fun migrate() = migrationMutex.withLock {
         val settings = settingsStore.settingsFlow.first { !it.init }
@@ -63,14 +95,18 @@ internal class ProactiveTaskExecutor(
         }
     }
 
+    suspend fun conversationSnapshot(id: Uuid): Conversation? {
+        val persisted = repository.getConversationById(id) ?: return null
+        val live = chatService.getOrCreateSession(id).state.value
+        return if (live.messageNodesLoaded) live else persisted
+    }
+
     suspend fun host(): ProactiveHostSnapshot {
+        ports?.let { return it.host() }
         val settings = settingsStore.settingsFlow.value
         val conversations = settings.proactiveMessageSetting.assistantConfigs.orEmpty().mapNotNull { config ->
             runCatching { Uuid.parse(config.conversationId) }.getOrNull()?.let { id ->
-                repository.getConversationById(id)?.let { persisted ->
-                    val live = chatService.getOrCreateSession(id).state.value
-                    if (live.messageNodesLoaded) live else persisted
-                }
+                conversationSnapshot(id)
             }
         }
         return snapshot(conversations)
@@ -92,70 +128,96 @@ internal class ProactiveTaskExecutor(
         )
     }
 
-    suspend fun drain(trigger: String, run: suspend (ProactiveTask) -> Unit) = dispatchMutex.withLock {
-        initialize(context)
-        migrate()
-        // Manual taps must reach the provider immediately; recovery is for the autonomous
-        // scheduler path and can wait behind stale commit payloads.
-        if (trigger != "manual") {
-            recoverCommits(
-                recordSent = ::recordRecoveredSent,
-                commit = ::commitRecovered,
-            )
+    suspend fun drain(trigger: String, run: suspend (ProactiveTask) -> Unit) {
+        if (ports == null) {
+            initialize(context)
+            migrate()
+            // A concurrent drain is already reconciling durable intents; peers may still claim
+            // unrelated windows instead of waiting behind its Room I/O.
+            if (recoveryMutex.tryLock()) try {
+                recoverCommits(recordSent = ::recordRecoveredSent, commit = ::commitRecovered)
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                diagnostic(null, "recovery_failed:${error::class.simpleName}")
+            } finally { recoveryMutex.unlock() }
+        } else try {
+            ports.recover()
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            diagnostic(null, "recovery_failed:${error::class.simpleName}")
         }
-        val now = System.currentTimeMillis()
-        val host = host()
-        if (!host.setting.enabled) return@withLock
-        val prefs = context.getSharedPreferences("proactive_dispatch", Context.MODE_PRIVATE)
-        val last = prefs.getLong("last_cycle", 0L)
-        if (trigger != "manual" && now - last < host.setting.minIntervalMinutes.coerceAtLeast(1) * 60_000L) {
-            return@withLock
-        }
-        check(prefs.edit().putLong("last_cycle", now).commit()) { "Could not persist proactive cycle" }
-        // Stale targets must not linger and block a newly configured window for this assistant.
-        store.snapshot().tasks.filter { it.status == ProactiveTaskStatus.Pending &&
-            !proactiveTaskAllowed(it, host, now) }.map { it.assistantId }.distinct().forEach { store.cancel(it) }
-        val appointments = if (host.setting.allowAiScheduledWakeup) ProactiveWakeupStore(context).all() else emptyList()
-        host.setting.assistantConfigs.orEmpty().filter { it.enabled }.forEach { config ->
-            val appointment = appointments.singleOrNull { it.assistantId == config.assistantId &&
-                it.conversationId == config.conversationId }
-            if (trigger != "manual" && appointment != null && appointment.timeMillis > now) return@forEach
-            val anchor = host.userAnchors[config.conversationId] ?: return@forEach
-            // Promote a previously scheduled task instead of leaving it behind its cooldown.
-            if (trigger == "manual") store.promotePendingToManual(config.assistantId, now)
-            if (store.snapshot().tasks.none { it.assistantId == config.assistantId &&
-                    it.status in setOf(ProactiveTaskStatus.Pending, ProactiveTaskStatus.Running) }) {
-                store.enqueue(ProactiveTask(
-                    assistantId = config.assistantId, conversationId = config.conversationId,
-                    anchorUserMessageId = anchor,
-                    trigger = if (trigger == "manual") "manual" else if (appointment != null) "appointment" else "automatic",
-                    appointmentToken = appointment?.token.takeIf { trigger != "manual" },
-                    createdAtMillis = now,
-                ))
+        val claimed = dispatchMutex.withLock {
+            val timestamp = now()
+            val host = host()
+            if (!host.setting.enabled || (trigger != "manual" && host.setting.globalPolicy.paused)) {
+                return@withLock emptyList<ProactiveTask>()
             }
-        }
-        if (trigger == "manual") {
-            // All participants are claimed first, then run concurrently, so a slow assistant
-            // cannot hide the others behind a sequential generation.
-            supervisorScope {
+            val admitted = (ports?.admitCycle(trigger, host) ?: run {
+                val prefs = context.getSharedPreferences("proactive_dispatch", Context.MODE_PRIVATE)
+                val last = prefs.getLong("last_cycle", 0L)
+                if (trigger != "manual" && timestamp - last < host.setting.minIntervalMinutes.coerceAtLeast(1) * 60_000L) {
+                    false
+                } else {
+                    check(prefs.edit().putLong("last_cycle", timestamp).commit())
+                    true
+                }
+            })
+            if (!admitted) return@withLock emptyList<ProactiveTask>()
+            store.snapshot().tasks.filter { it.status == ProactiveTaskStatus.Pending &&
+                !proactiveTaskAllowed(it, host, timestamp) }.forEach { store.cancelTask(it.taskId) }
+            val appointments = if (ports == null && host.setting.allowAiScheduledWakeup) {
+                ProactiveWakeupStore(context).all()
+            } else emptyList()
+            host.setting.assistantConfigs.orEmpty().filter { it.enabled }.forEach { config ->
+                val appointment = appointments.singleOrNull { it.assistantId == config.assistantId &&
+                    it.conversationId == config.conversationId }
+                if (trigger != "manual" && appointment != null && appointment.timeMillis > timestamp) return@forEach
+                val anchor = host.userAnchors[config.conversationId]
+                if (anchor == null) {
+                    diagnostic(ProactiveTask(assistantId = config.assistantId, conversationId = config.conversationId,
+                        anchorUserMessageId = "", trigger = trigger, createdAtMillis = timestamp), "no_user_anchor")
+                    return@forEach
+                }
+                if (trigger == "manual") store.promotePendingToManual(config.assistantId, timestamp)
+                if (store.snapshot().tasks.none { it.assistantId == config.assistantId &&
+                        it.status in setOf(ProactiveTaskStatus.Pending, ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending) }) {
+                    store.enqueue(ProactiveTask(
+                        assistantId = config.assistantId, conversationId = config.conversationId,
+                        anchorUserMessageId = anchor,
+                        trigger = if (trigger == "manual") "manual" else if (appointment != null) "appointment" else "automatic",
+                        appointmentToken = appointment?.token.takeIf { trigger != "manual" }, createdAtMillis = timestamp,
+                    ))
+                }
+            }
+            buildList {
                 while (true) {
-                    val task = store.claimNext(host(), System.currentTimeMillis(), manualBatch = true) ?: break
-                    launch {
-                        try { run(task) } finally {
-                            jobs.remove(task.taskId)
-                            store.finish(task.taskId, ProactiveTaskStatus.Failed, "no_message")
-                        }
-                    }
+                    val next = store.claimNext(host, timestamp, manualBatch = trigger == "manual") ?: break
+                    add(next)
                 }
             }
-        } else {
-            while (true) {
-                val task = store.claimNext(host(), System.currentTimeMillis()) ?: break
-                try { run(task) } finally {
+        }
+        // No dispatcher lock is held across a provider or a task completion. Per-conversation
+        // claims, cancellation and reservations remain durable in the shared store.
+        supervisorScope {
+            claimed.forEach { task -> launch(start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
+                jobs[task.taskId] = currentCoroutineContext()[Job]!!
+                try {
+                    kotlinx.coroutines.withTimeout(taskTimeoutMillis) { run(task) }
+                } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+                    diagnostic(task, "generation_timeout")
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    diagnostic(task, "generation_cancelled")
+                    throw error
+                } catch (error: Exception) {
+                    diagnostic(task, "generation_failed:${error::class.simpleName}")
+                } finally {
                     jobs.remove(task.taskId)
-                    store.finish(task.taskId, ProactiveTaskStatus.Failed, "no_message")
+                    runCatching { store.finish(task.taskId, ProactiveTaskStatus.Failed, "generation_finished_without_send") }
+                        .onFailure { diagnostic(task, "terminal_persistence_failed") }
                 }
-            }
+            } }
         }
     }
 
@@ -164,13 +226,15 @@ internal class ProactiveTaskExecutor(
             val policy = settings.proactiveMessageSetting
             val active = store.snapshot().tasks.filter { it.status in setOf(ProactiveTaskStatus.Pending, ProactiveTaskStatus.Running) }
             active.filter { task ->
-                !policy.enabled || policy.globalPolicy.paused ||
+                !policy.enabled || (task.trigger != "manual" && policy.globalPolicy.paused) ||
                     settings.assistants.none { it.id.toString() == task.assistantId } ||
                     policy.assistantConfigs?.singleOrNull { it.assistantId == task.assistantId }?.let {
                         !it.enabled || it.conversationId != task.conversationId ||
                             (task.admittedConfig != null && task.admittedConfig != it)
                     } != false
-            }.map { it.assistantId }.distinct().forEach { cancel(context, it) }
+            }.forEach { task ->
+                if (store.cancelTask(task.taskId)) jobs[task.taskId]?.cancel()
+            }
         }
     }
 
@@ -181,19 +245,19 @@ internal class ProactiveTaskExecutor(
 
     suspend fun requireAllowed(task: ProactiveTask) {
         currentCoroutineContext().ensureActive()
-        if (!store.canCommit(task.taskId, host(), System.currentTimeMillis())) {
+        if (!store.canCommit(task.taskId, host(), now())) {
             throw kotlinx.coroutines.CancellationException("Proactive task revoked")
         }
     }
 
     suspend fun <T> networkTurn(task: ProactiveTask, call: suspend () -> T): T {
-        val token = store.reserveTurn(task.taskId, host(), System.currentTimeMillis())
+        val token = store.reserveTurn(task.taskId, host(), now())
             ?: throw kotlinx.coroutines.CancellationException("Proactive budget or authorization exhausted")
         try {
-            if (!store.markDispatched(token, host(), System.currentTimeMillis())) {
+            if (!store.markDispatched(token, host(), now())) {
                 throw kotlinx.coroutines.CancellationException("Proactive task revoked before network dispatch")
             }
-            return call()
+            return kotlinx.coroutines.withTimeout(taskTimeoutMillis) { call() }
         } finally { store.settleTurn(token) }
     }
 
@@ -279,13 +343,28 @@ internal class ProactiveTaskExecutor(
             }
             // First reconcile an already committed Room transaction, even if settings/anchor
             // changed after it. Never append in that case; only repair the ledger receipt.
-            val persisted = repository.getConversationById(Uuid.parse(task.conversationId))
+            val conversationId = runCatching { Uuid.parse(task.conversationId) }.getOrNull()
+            if (conversationId == null) {
+                store.abandonCommit(task.taskId, ProactiveTaskStatus.Interrupted, "invalid_conversation_id")
+                continue
+            }
+            val persisted = try {
+                kotlinx.coroutines.withTimeout(15_000L) { repository.getConversationById(conversationId) }
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                if (error !is kotlinx.coroutines.TimeoutCancellationException) throw error
+                diagnostic(task, "commit_snapshot_timeout")
+                continue
+            } catch (error: Exception) {
+                diagnostic(task, "commit_snapshot_failed:${error::class.simpleName}")
+                continue
+            }
             val persistedById = persisted?.messageNodes?.flatMap { it.messages }?.associateBy { it.id }.orEmpty()
             if (persisted?.assistantId?.toString() == task.assistantId &&
                 payload.all { persistedById[it.id] == it }
             ) {
                 recordSent(task, payload)
                 store.markCommitSent(task.taskId)
+                diagnostic(task, "commit_recovered_existing")
                 continue
             }
             val host = host()
@@ -295,17 +374,30 @@ internal class ProactiveTaskExecutor(
                 continue
             }
             val started = store.startCommit(task.taskId) ?: continue
-            if (!runCatching { commit(started, payload) }.getOrDefault(false)) {
-                // Payload stays durable for the next process launch; never re-run generation.
-                return
+            try {
+                val committed = kotlinx.coroutines.withTimeout(15_000L) { commit(started, payload) }
+                if (!committed) {
+                    // A definitive guard/conflict rejection cannot occupy this conversation forever.
+                    store.abandonCommit(task.taskId, ProactiveTaskStatus.Interrupted, "commit_rejected")
+                    diagnostic(task, "commit_rejected")
+                    continue
+                }
+                recordSent(task, payload)
+                store.markCommitSent(task.taskId)
+            } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+                diagnostic(task, "commit_recovery_timeout")
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                // Unknown Room outcome retains the exact durable payload, but cannot block peers.
+                diagnostic(task, "commit_recovery_failed:${error::class.simpleName}")
             }
-            recordSent(task, payload)
-            store.markCommitSent(task.taskId)
         }
     }
 
     companion object {
         private val dispatchMutex = Mutex()
+        private val recoveryMutex = Mutex()
         private val migrationMutex = Mutex()
         private val startLock = Any()
         private var started = false

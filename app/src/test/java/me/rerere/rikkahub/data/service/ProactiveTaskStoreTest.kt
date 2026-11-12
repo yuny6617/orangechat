@@ -44,15 +44,16 @@ class ProactiveTaskStoreTest {
         assertEquals(listOf(configs[0]), migrateProactiveParticipants(listOf(configs[0]), "b", configs, owner))
     }
 
-    @Test fun serialFairClaimsAndTerminalCas() {
+    @Test fun fairClaimsReserveEachConversationAndTerminalCas() {
         val store = ProactiveTaskStore(MemoryStorage())
         listOf(task("a1"), task("a2"), task("b1", "b")).forEach { assertTrue(store.enqueue(it)) }
         assertFalse(store.enqueue(task("a1")))
         assertEquals("a1", store.claimNext(host(), now)?.taskId)
-        assertNull(store.claimNext(host(), now))
+        assertEquals("b1", store.claimNext(host(), now)?.taskId)
+        assertNull(store.claimNext(host(), now)) // a2 shares a1's busy conversation.
         assertTrue(store.finish("a1", ProactiveTaskStatus.Failed, "no_provider"))
         assertFalse(store.finish("a1", ProactiveTaskStatus.Sent, "late"))
-        assertEquals("b1", store.claimNext(host(), now)?.taskId)
+        assertEquals("a2", store.claimNext(host(), now)?.taskId)
     }
 
     @Test fun everyTurnIsChargedAndOnlyPreDispatchCanRollback() {

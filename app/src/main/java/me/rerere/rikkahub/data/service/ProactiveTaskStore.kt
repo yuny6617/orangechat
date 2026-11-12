@@ -177,19 +177,10 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
         manualBatch: Boolean = false,
     ): ProactiveTask? = synchronized(lock) {
         val state = read()
-        if (manualBatch) {
-            // Parallel manual calls are allowed, but never over an automatic/commit turn.
-            if (state.tasks.any {
-                    it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending) &&
-                        (it.trigger != "manual" || it.status == ProactiveTaskStatus.CommitPending)
-                }
-            ) return@synchronized null
-        } else if (state.tasks.any {
-                it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending)
-            }
-        ) {
-            return@synchronized null
-        }
+        // Running and durable commits reserve only their own conversation, never the whole queue.
+        val occupiedConversations = state.tasks.filter {
+            it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending)
+        }.mapTo(hashSetOf()) { it.conversationId }
         val day = validDay(state, host, now) ?: return@synchronized null
         val usage = state.days[day] ?: ProactiveDayUsage()
         // A manual tap is an explicit user request and must not be rejected by the autonomous
@@ -207,6 +198,7 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
             val manual = task.trigger == "manual"
             task.status == ProactiveTaskStatus.Pending && task.dueAtMillis <= now &&
                 proactiveTaskAllowed(task, host, now) && task.conversationId !in host.busyConversations &&
+                task.conversationId !in occupiedConversations &&
                 config != null &&
                 // A manual tap must act now: the per-assistant cooldown/daily cap exists for the
                 // autonomous scheduler, not for an explicit user request.
@@ -367,6 +359,16 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
         if (state.reservations.values.any { it.taskId == taskId }) return@synchronized false
         save(state.copy(tasks = state.tasks.map {
             if (it.taskId == taskId) task.copy(status = next, outcome = outcome) else it
+        }))
+        true
+    }
+
+    fun cancelTask(taskId: String): Boolean = synchronized(lock) {
+        val state = read()
+        val task = state.tasks.singleOrNull { it.taskId == taskId &&
+            it.status in setOf(ProactiveTaskStatus.Pending, ProactiveTaskStatus.Running) } ?: return@synchronized false
+        save(state.copy(tasks = state.tasks.map {
+            if (it.taskId == taskId) task.copy(status = ProactiveTaskStatus.Cancelled, outcome = "cancelled") else it
         }))
         true
     }

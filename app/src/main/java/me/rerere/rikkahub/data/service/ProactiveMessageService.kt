@@ -523,7 +523,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                 val targetAssistant = baseSettings.assistants.singleOrNull { it.id.toString() == task.assistantId }
                                     ?: return@launch
                                 val assistantUuid = targetAssistant.id
-                                val conversation = conversationRepository.getConversationById(Uuid.parse(task.conversationId))
+                                val conversation = executor.conversationSnapshot(Uuid.parse(task.conversationId))
                                 if (conversation == null || conversation.assistantId != assistantUuid) return@launch
 
                                 val latestUserMessage = conversation?.currentMessages
@@ -569,8 +569,8 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                 }
                                 val proactiveState = stateStore.synchronizeWithUser(latestUserMessage.id.toString())
                                 val maxFollowUps = proactiveSetting.maxFollowUpMessages.coerceIn(1, 8)
-                                if (proactiveState.stopUntilUserReturns ||
-                                    proactiveState.followUpCount >= maxFollowUps
+                                if (triggerSource != "manual" && (proactiveState.stopUntilUserReturns ||
+                                    proactiveState.followUpCount >= maxFollowUps)
                                 ) {
                                     outcome = "follow_up_limit"
                                     appointment?.let { consumeAppointment(it) }
@@ -600,7 +600,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                 // 这一步对所有触发源（含 isForceTrigger / 激进模式设备事件）一视同仁，是并发安全的核心。
                                 // 如果当前已有生成在跑（正常聊天或另一路主动消息），直接放弃本次触发，不排队等待、不重试。
                                 // 理由：等对方生成结束后，上下文（用户可能已在聊别的话题）大概率已过时，硬等没有意义。
-                                val myJob = coroutineContext[Job]
+                                val myJob = currentCoroutineContext()[Job]
                                 if (myJob == null || !chatService.getOrCreateSession(conversationId).tryClaimGeneration(myJob)) {
                                     outcome = "generation_busy"
                                     trace.event("generation_claim", "success=false")
@@ -958,7 +958,7 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                 // 用户可能在主动生成期间回来了。即使厂商 ROM/Provider 没及时传播取消，
                                 // 保存前也必须重新读取真实会话并核对锚点，绝不把过期主动回复插入正常聊天。
                                 trace.event("anchor_recheck_start")
-                                val latestPersistedUserId = conversationRepository.getConversationById(conversationId)
+                                val latestPersistedUserId = executor.conversationSnapshot(conversationId)
                                     ?.currentMessages
                                     ?.lastOrNull { it.role == MessageRole.USER }
                                     ?.id
@@ -1104,14 +1104,9 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                     reactionTurn.onGenerationSucceeded(completedMessages.last())
                                     appointmentMessageSaved = true
                                     outcome = "sent"
-                                    val persistedRunIds = chatService.getConversationFlow(conversationId).value.currentMessages
-                                        .asSequence()
-                                        .filter { it.id in runAssistantMessageIds }
-                                        .map { it.id.toString() }
-                                        .toSet()
                                     stateStore.recordSent(
                                         state = proactiveState,
-                                        messageIds = persistedRunIds.ifEmpty { setOf(aiMessage.id.toString()) },
+                                        messageIds = proactiveCommittedMessageIds(task.taskId, completedMessages.size),
                                         text = replyText,
                                     )
                                     runCatching {
@@ -1197,6 +1192,14 @@ class ProactiveMessageTriggerService : android.app.Service(), KoinComponent {
                                     }
 
                                 }
+                                runCatching {
+                                    ProactiveActivityStore(this@ProactiveMessageTriggerService,
+                                        task.assistantId, task.conversationId).append(ProactiveActivity(
+                                        id = "outcome:${task.taskId}", timestamp = System.currentTimeMillis(),
+                                        outcome = "主动消息：$outcome",
+                                        note = failure?.let { "${it::class.simpleName}" }.orEmpty(),
+                                    ))
+                                }.onFailure { Log.w(TAG, "Could not persist per-assistant outcome", it) }
                                 conversationId?.let { chatService.removeConversationReference(it) }
                                 trace.finish(outcome, failure)
                             }

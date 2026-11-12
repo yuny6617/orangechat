@@ -733,7 +733,13 @@ fun PluginWebViewPage(
             TopAppBar(
                 title = {
                     Column {
-                        Text(pluginInfo?.manifest?.name ?: "\u63D2\u4EF6\u7BA1\u7406")
+                        Text(
+                            text = pluginInfo?.manifest?.name ?: "插件管理",
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
                         if (pluginInfo?.manifest?.permissions?.contains("ai_chat") == true) {
                             Text(if (conversationId.isBlank()) "AI：助手默认模型" else "AI：当前会话模型",
                                 style = MaterialTheme.typography.labelSmall)

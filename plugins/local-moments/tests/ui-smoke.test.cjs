@@ -129,22 +129,36 @@ class FakeElement {
     const index = list.indexOf(listener);
     if (index >= 0) list.splice(index, 1);
   }
-  focus() {}
+  focus() { documentObject.activeElement = this; }
   querySelectorAll() { return []; }
 }
 
 const html = fs.readFileSync(path.join(ROOT, 'ui/index.html'), 'utf8');
 const elements = new Map();
 
-for (const match of html.matchAll(/<([a-z0-9]+)([^>]*)>/gi)) {
-  const tag = match[1];
-  const attributes = match[2];
-  const idMatch = /id="([^"]+)"/.exec(attributes);
-  if (!idMatch) continue;
+// Retain real ancestry and static text: a flat id map cannot detect modal bodies
+// left inside a hidden route or a dialog containing only its header.
+const htmlRoot = new FakeElement('html');
+const stack = [htmlRoot];
+const voidTags = new Set(['meta', 'link', 'input', 'img', 'br', 'hr']);
+for (const match of html.matchAll(/<\/?([a-z0-9]+)([^>]*)>|([^<]+)/gi)) {
+  if (match[3]) {
+    const text = new FakeElement('#text'); text.textContent = match[3];
+    stack[stack.length - 1].appendChild(text); continue;
+  }
+  const tag = match[1].toLowerCase();
+  if (match[0].startsWith('</')) {
+    while (stack.length > 1 && stack.pop().tagName !== tag.toUpperCase()) {}
+    continue;
+  }
   const element = new FakeElement(tag);
-  element.id = idMatch[1];
-  if (/\bhidden\b/.test(attributes)) element.hidden = true;
-  elements.set(element.id, element);
+  for (const attr of match[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)) element.setAttribute(attr[1], attr[2] || '');
+  if (element.id) {
+    assert.equal(elements.has(element.id), false, 'duplicate id ' + element.id);
+    elements.set(element.id, element);
+  }
+  stack[stack.length - 1].appendChild(element);
+  if (!voidTags.has(tag)) stack.push(element);
 }
 
 function requireElement(id) {
@@ -551,6 +565,37 @@ function fireWindow(type) {
   await settle();
   assert.match(documentObject.getElementById('settingsIdentity').textContent, /机主/);
   assert.match(documentObject.getElementById('settingsTheme').textContent, /CSS 变量/);
+  const other = requireElement('settingsOtherDialog');
+  assert.equal(other.hidden, true);
+  requireElement('settingsOtherOpen').focus();
+  click(requireElement('settingsOtherOpen'));
+  await settle();
+  assert.equal(other.hidden, false, 'Other modal must actually open');
+  assert.equal(documentObject.activeElement, requireElement('settingsOtherClose'));
+  for (const [id, content] of [['settingsTheme', /CSS 变量/], ['settingsCaps', /localdata.read/],
+      ['settingsData', /Schema 版本/], ['settingsAbout', /插件版本/]]) {
+    const node = requireElement(id);
+    assert.match(node.textContent, content, id + ' must be populated on open');
+    let ancestor = node;
+    while (ancestor) {
+      assert.equal(ancestor.hidden, false, id + ' must not have a hidden ancestor');
+      ancestor = ancestor.parentNode;
+    }
+    assert.ok(walk(other).includes(node), id + ' must belong to the modal');
+  }
+  assert.ok(documentObject.body.classList.contains('oc-modal-open'));
+  for (const listener of documentListeners.keydown || []) listener({ key: 'Tab', preventDefault() {} });
+  assert.equal(documentObject.activeElement, requireElement('settingsOtherBody'));
+  for (const listener of documentListeners.keydown || []) listener({ key: 'Escape', preventDefault() {} });
+  assert.equal(other.hidden, true);
+  assert.equal(documentObject.activeElement, requireElement('settingsOtherOpen'));
+  assert.equal(documentObject.body.classList.contains('oc-modal-open'), false);
+  click(requireElement('settingsOtherOpen'));
+  click(requireElement('settingsOtherClose'));
+  assert.equal(other.hidden, true, 'close button must dismiss');
+  click(requireElement('settingsOtherOpen'));
+  click(other);
+  assert.equal(other.hidden, true, 'backdrop must dismiss');
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /启用互动/);
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /审核模式/);
   assert.match(documentObject.getElementById('taskSettingsSummary').textContent, /参与助手/);

@@ -1446,11 +1446,25 @@ class ChatService(
             ) return@withStateLock false
             if (!executor.prepareCommit(task, messages)) return@withStateLock false
             val committing = executor.startCommit(task) ?: return@withStateLock false
-            val payload = executor.decodeCommitPayload(committing) ?: return@withStateLock false
+            val payload = executor.decodeCommitPayload(committing) ?: run {
+                executor.store.abandonCommit(task.taskId,
+                    me.rerere.rikkahub.data.service.ProactiveTaskStatus.Failed, "invalid_commit_payload")
+                return@withStateLock false
+            }
             val saved = withContext(NonCancellable) {
                 conversationRepo.appendProactiveMessagesIdempotently(conversationId, assistantId, anchorId, payload)
-            } ?: return@withStateLock false
-            if (!executor.markCommitSent(committing)) return@withStateLock false
+            } ?: run {
+                // A null result is a definitive guard rejection, not an ambiguous database failure.
+                // Retaining CommitPending here used to lock out every subsequent proactive task.
+                executor.store.abandonCommit(task.taskId,
+                    me.rerere.rikkahub.data.service.ProactiveTaskStatus.Interrupted, "publication_guard_changed")
+                return@withStateLock false
+            }
+            // Room already committed. A ledger receipt failure must not hide the saved message or
+            // cause regeneration: keep its payload for exact-ID reconciliation on the next check.
+            runCatching { executor.markCommitSent(committing) }.onFailure {
+                Log.w(TAG, "Proactive message committed; ledger receipt needs reconciliation", it)
+            }
             updateConversation(conversationId, saved)
             session.persistedConversation = saved
             session.messageJournal.invalidate()

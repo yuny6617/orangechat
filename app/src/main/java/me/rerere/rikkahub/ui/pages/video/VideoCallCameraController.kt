@@ -1285,26 +1285,15 @@ class VideoCallCameraController(
      *
      * 与预览矩阵**同一个纯函数**（[VideoPreviewGeometry.captureRotationDegrees] /
      * [VideoPreviewGeometry.uprightRotation]），因此预览正着看到的画面方向就是照片存下来的方向。
-     * 预览卡宽高比取自 [PreviewTransform.contentSize]（同一个旋转 + 校准），
-     * 所以 JPEG 与预览的取景范围也一致：都是整张源图。
+     * 预览使用 fit 留边显示整张源图；卡片比例只决定缩放，不再额外推断旋转方向。
+     * 因此 JPEG 与预览使用同一个最终角度、相同完整取景范围。
      */
-    private fun captureRotation(generation: Generation): Int {
-        val base = VideoPreviewGeometry.captureRotationDegrees(
-            sensorOrientation = generation.sensorOrientation,
-            displayRotationDegrees = generation.displayRotationDegrees,
-            frontFacing = generation.frontFacing,
-            calibrationDegrees = previewCalibrationDegrees,
-        )
-        // Preview is forced to portrait (see textureViewTransform fit mode); capture must use
-        // the same extra rotation or the model would receive a sideways relative to what the
-        // user sees.
-        val adjustment = VideoPreviewGeometry.portraitRotationAdjustment(
-            bufferWidth = generation.previewWidth,
-            bufferHeight = generation.previewHeight,
-            rotationDegrees = base,
-        )
-        return (base + adjustment) % 360
-    }
+    private fun captureRotation(generation: Generation): Int = VideoPreviewGeometry.captureRotationDegrees(
+        sensorOrientation = generation.sensorOrientation,
+        displayRotationDegrees = generation.displayRotationDegrees,
+        frontFacing = generation.frontFacing,
+        calibrationDegrees = previewCalibrationDegrees,
+    )
 
     /**
      * 选镜头：优先请求的朝向，没有就退回第一颗。

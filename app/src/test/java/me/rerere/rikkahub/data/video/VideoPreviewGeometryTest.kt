@@ -1201,6 +1201,72 @@ class VideoPreviewGeometryTest {
         }
     }
 
+    @Test
+    fun `portrait fit calibration has four distinct clockwise corner positions`() {
+        // Reported regression: landscape buffer, sensor 90. Shape-based rotation used to
+        // collapse calibration 0/270 into 90 degrees and 90/180 into 270 degrees.
+        val expected = listOf(
+            Point2(300f, 0f),
+            Point2(300f, 312.5f),
+            Point2(0f, 400f),
+            Point2(0f, 87.5f),
+        )
+        val positions = listOf(0, 90, 180, 270).mapIndexed { index, calibration ->
+            val transform = VideoPreviewGeometry.textureViewTransform(
+                90, 0, false, 640, 480, 300, 400,
+                calibrationDegrees = calibration, previewMirrored = false, fit = true,
+            )
+            val shown = textureViewDefaultStretch(640, 480, 300, 400).then(transform.matrix)
+            val corner = shown.map(0f, 0f)
+            assertPoint(expected[index].x, expected[index].y, corner)
+            corner
+        }
+        assertEquals(4, positions.toSet().size)
+    }
+
+    @Test
+    fun `fit preview and capture map asymmetric points identically after uniform fit`() {
+        for ((bw, bh) in listOf(640 to 480, 480 to 640)) {
+            for (sensor in listOf(0, 90, 180, 270)) for (display in listOf(0, 90, 180, 270)) {
+                for (front in listOf(false, true)) for (calibration in listOf(0, 90, 180, 270)) {
+                    for (mirror in listOf(false, true)) {
+                        val transform = VideoPreviewGeometry.textureViewTransform(
+                            sensor, display, front, bw, bh, 300, 400, calibration,
+                            previewMirrored = mirror, fit = true,
+                        )
+                        val shown = textureViewDefaultStretch(bw, bh, 300, 400).then(transform.matrix)
+                        // Independent quarter-turn arithmetic and integer corner mapping.
+                        val angle = ((if (front) sensor + display else sensor - display) + calibration + 720) % 360
+                        assertEquals(angle, VideoPreviewGeometry.captureRotationDegrees(
+                            sensor, display, front, calibration,
+                        ))
+                        val width = if (angle % 180 == 0) bw else bh
+                        val height = if (angle % 180 == 0) bh else bw
+                        val scale = minOf(300f / width, 400f / height)
+                        val jpeg = VideoPreviewGeometry.uprightImageAffine(angle, mirror, bw, bh)
+                        val points = listOf(Point2(0f, 0f), Point2(bw.toFloat(), 0f),
+                            Point2(0f, bh.toFloat()), Point2(bw * 0.23f, bh * 0.61f))
+                        for (point in points) {
+                            val rotated = when (angle) {
+                                0 -> point
+                                90 -> Point2(bh - point.y, point.x)
+                                180 -> Point2(bw - point.x, bh - point.y)
+                                else -> Point2(point.y, bw - point.x)
+                            }
+                            val x = if (mirror) width - rotated.x else rotated.x
+                            assertPoint(x, rotated.y, jpeg.map(point))
+                            assertPoint(
+                                (300f - width * scale) / 2f + x * scale,
+                                (400f - height * scale) / 2f + rotated.y * scale,
+                                shown.map(point),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private data class Case(
         val bufferWidth: Int,
         val bufferHeight: Int,
