@@ -19,7 +19,7 @@
 - 朋友圈：独立 ZIP，默认 3 条游标分页、搜索、详情/评论/点赞、草稿、受众 ACL、原生选图持久媒体/缩略图、聊天快照分享与头像资源。
 - 宿主：受信任本地页面 + 主 frame + page token + 页面代次；原生能力授权、跨插件工具授权、受控媒体 origin、已有生图结果持久复制；API Key 不交页面。
 - 助手任务：真实助手模型，当前动态与最新有界评论、隔离私聊；有限轮次/回复/调用/每日预算；原生设置/停止/助手发帖/待审列表；取消与同步写共用临界区。进程被杀不重跑。
-- 主题：三套实际互动卡片源码配色、严格 bounded ZIP/重复 JSON key 检查、明暗/对比度、Material roles/shapes、设置卡片/侧栏选中/边框/静态阴影、WebView 最终颜色变量；保留用户背景和文字覆盖，恢复导入前主题。主题 ZIP 在插件导入入口也会被识别，显示主题选择并走原生设置应用，不再被误当成插件清单解析。
+- 主题：三套实际互动卡片源码配色、严格 bounded ZIP/重复 JSON key 检查、明暗/对比度、Material roles/shapes、设置卡片/侧栏选中/边框/静态阴影、WebView 最终颜色变量；保留用户背景和文字覆盖，恢复导入前主题。主题 ZIP 在插件导入入口也会被识别，显示主题选择并走原生设置应用，不再被误当成插件清单解析。主题设置页新增“当前正在使用主题包”区域：列出已导入主题包、用单选勾选生效项，并提供“不启用主题包”恢复导入前主题。
 - 生命周期：停用与更新保留业务数据；卸载默认保留，可显式删除/先 SAF 导出，撤销原生授权并停止/释放任务。完整本地备份包含独立插件逻辑数据/媒体/任务设置，恢复旧任务不续跑；同步失败和启动恢复有定向 JVM 测试，真实断电/设备恢复未验证。
 
 ## 已确认的验证
@@ -27,7 +27,7 @@
 - 早期 integrated4：视频 264 项、VoiceAudioPayload 16 项、Proactive 82 项、桥接 5 项、主题校验 50 项分别零失败。其 localdata 的 27 项失败随后定位为 Windows native SQLite 临时路径过长。
 - 短 java.io.tmpdir 与工作区 user.home 的定向批次实际通过；`session-final-exact-tests2.log` 的旧快照为 app 404 项、0 失败、2 跳过，并非全量。后续视频/桥接定向 107 项零失败；最新导出单测 16 项零失败。最新全量测试因构建资源目录占用而未运行到断言，不能宣称整仓全量通过。
 - 模型 registry 9 项通过。插件 core/bridge/syntax/fake-DOM 检查通过；后续头像及协议变化重新运行。
-- 最新优化共存 APK 在主动消息手动并发触发、竖屏 3:4 预览、返回手势和聊天卡片图片导出修复后构建成功（62,758,313 bytes；SHA256 `7307629AC34EB164B5559FD1119AB498382A01CC4C2CFCE9D6186FE5BA4EACAC`），包 `me.rerere.orangechat.videogifts`、arm64-v8a、既有共存测试证书 SHA256 `ff516315e577235b64ff356dbc856c053b7e589ae636dd8bc4301e528b46d116`；内置 OCR 验证通过。这不是正式包的原签名更新版。
+- 最新优化共存 APK 在主动消息手动并发触发、竖屏 3:4 预览、返回手势、聊天卡片图片导出和主题包选择器修复后构建成功（62,760,853 bytes；SHA256 `5148015A823124189F545FAA6E6097C1B97C371ACBE36A6F006F1B24CA8B7643`），包 `me.rerere.orangechat.videogifts`、arm64-v8a、既有共存测试证书 SHA256 `ff516315e577235b64ff356dbc856c053b7e589ae636dd8bc4301e528b46d116`；内置 OCR 验证通过。这不是正式包的原签名更新版。
 - 本轮定向 JVM 测试：视频预览/主动消息/主题读取/导出共 8 个测试类、135 项、0 失败、0 跳过（`final3-tests2.log`，BUILD SUCCESSFUL）。主题 ZIP 仍通过对比度审计；朋友圈 ZIP 确定性校验通过。
 - 全量 `:app:testDebugUnitTest`：2292 项、5 失败、3 跳过；其中主动唤醒记录标题一项由本次改名引起，已修正并单测通过（`d2c912d`）。其余 4 项为 `GenerationFlowCompatibilityTest` 的 `createdAt` 纳秒序列化差异、`WorkspaceRoutingTest` 的 Windows `mklink /J` 权限失败、`VoiceCallServiceLifecycleTest` 的空 ASR 状态、`VideoGiftCardUiTest` 的测试 Koin 缺少 `FilesManager`；未在本次功能改动中新增，但全量仍未全绿。
 
@@ -35,7 +35,7 @@
 
 - 本地功能分支：`feature/local-moments-themes-export`
 - 本地提交：`b44a3e5`（主体功能与两轮修复）、`d58ddda`（恢复聊天卡片图片导出）
-- APK：62,758,313 bytes，SHA-256 `7307629AC34EB164B5559FD1119AB498382A01CC4C2CFCE9D6186FE5BA4EACAC`
+- APK：62,760,853 bytes，SHA-256 `5148015A823124189F545FAA6E6097C1B97C371ACBE36A6F006F1B24CA8B7643`
 - 图片导出：已恢复聊天卡片/气泡样式，按消息块分页；导出单测 16 项通过。
 - GitHub：已配置 `fork` 远端 `https://github.com/yuny6617/orangechat.git` 并实际尝试推送。`ls-remote` 曾成功返回上游 HEAD，但连续 `push` 均在连接 `github.com:443` 时超时失败（约 21 秒）；同时当前无可用非交互凭证。未强推、未覆盖默认分支，需恢复稳定网络并提供授权后重试。
 

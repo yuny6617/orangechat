@@ -36,6 +36,7 @@ import me.rerere.rikkahub.ui.theme.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -85,6 +86,27 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
     var showPrimaryPicker by remember { mutableStateOf(false) }
     var showSecondaryPicker by remember { mutableStateOf(false) }
     var showTertiaryPicker by remember { mutableStateOf(false) }
+    val packageThemes = settings.customThemes.filter { it.packageTokens != null }
+    val editableCustomThemes = settings.customThemes.filter { it.packageTokens == null }
+    fun restorePreviousTheme() {
+        val previousId = themeRestorePreferences.getString("themeId", "sakura") ?: "sakura"
+        val validId = previousId.takeIf { id ->
+            PresetThemes.any { it.id == id } || settings.customThemes.any { it.id == id }
+        } ?: "sakura"
+        vm.updateSettings(settings.copy(
+            themeId = validId,
+            dynamicColor = themeRestorePreferences.getBoolean("dynamicColor", false),
+        ))
+    }
+    fun selectPackageTheme(theme: CustomTheme) {
+        if (!settings.themeId.startsWith("package:")) {
+            themeRestorePreferences.edit()
+                .putString("themeId", settings.themeId)
+                .putBoolean("dynamicColor", settings.dynamicColor)
+                .apply()
+        }
+        vm.updateSettings(settings.copy(themeId = theme.id, dynamicColor = false))
+    }
 
     Scaffold(
         topBar = {
@@ -127,6 +149,91 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                         dynamicColor = themeRestorePreferences.getBoolean("dynamicColor", false)))
                 },
             )
+            if (packageThemes.isNotEmpty()) {
+                Column {
+                    Text(
+                        text = "当前正在使用主题包",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
+                    )
+                    Text(
+                        text = packageThemes.firstOrNull { it.id == settings.themeId }?.name
+                            ?: "未启用主题包",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                    ) {
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable { restorePreviousTheme() }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(
+                                    selected = !settings.themeId.startsWith("package:"),
+                                    onClick = { restorePreviousTheme() },
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text("不启用主题包", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "恢复导入前选择的主题与动态配色",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                            packageThemes.forEach { theme ->
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                val packageId = theme.id.removePrefix("package:").substringBeforeLast(":")
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .clickable { selectPackageTheme(theme) }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RadioButton(
+                                        selected = settings.themeId == theme.id,
+                                        onClick = { selectPackageTheme(theme) },
+                                    )
+                                    Column(Modifier.weight(1f)) {
+                                        Text(theme.name, style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            "主题包：$packageId",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    if (settings.themeId == theme.id) {
+                                        Text(
+                                            "使用中",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                    TextButton(
+                                        onClick = {
+                                            if (settings.themeId == theme.id) restorePreviousTheme()
+                                            vm.deleteCustomTheme(theme.id)
+                                        },
+                                        contentPadding = PaddingValues(horizontal = 8.dp),
+                                    ) {
+                                        Text(
+                                            "删除",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Column(Modifier.fillMaxWidth()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -172,7 +279,7 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                 }
             }
 
-            if (settings.customThemes.isNotEmpty()) {
+            if (editableCustomThemes.isNotEmpty()) {
                 Column {
                     Text(
                         text = "自定义主题",
@@ -184,7 +291,7 @@ fun SettingThemePage(vm: SettingVM = koinViewModel()) {
                 Column {
                     Surface(shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)) {
                         Column {
-                            settings.customThemes.forEachIndexed { index, custom ->
+                            editableCustomThemes.forEachIndexed { index, custom ->
                                 if (index > 0) { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
                                 val lightScheme = remember(custom) { custom.generateColorScheme(dark = false) }
                                 Row(modifier = Modifier.fillMaxWidth().clickable { vm.updateSettings(settings.copy(themeId = custom.id)) }.padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
