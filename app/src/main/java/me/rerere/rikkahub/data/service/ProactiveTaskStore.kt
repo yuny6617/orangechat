@@ -108,7 +108,7 @@ internal fun proactiveTaskAllowed(task: ProactiveTask, host: ProactiveHostSnapsh
     val config = setting.assistantConfigs?.singleOrNull { it.assistantId == task.assistantId } ?: return false
     val zone = runCatching { ZoneId.of(setting.globalPolicy.budgetZoneId) }.getOrNull() ?: return false
     val customActiveHours = config.effectiveActiveHoursEnabled
-    return setting.enabled && !setting.globalPolicy.paused && config.enabled &&
+    return setting.enabled && (task.trigger == "manual" || !setting.globalPolicy.paused) && config.enabled &&
         task.assistantId in host.assistantIds && config.conversationId == task.conversationId &&
         host.conversationOwners[task.conversationId] == task.assistantId &&
         host.userAnchors[task.conversationId] == task.anchorUserMessageId &&
@@ -169,13 +169,37 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
 
     /** Serial claim, cooldown, task/day limit and fairness cursor are one durable write.
      * Admission charges a task even if it later fails or PASSes. No automatic retries. */
-    fun claimNext(host: ProactiveHostSnapshot, now: Long): ProactiveTask? = synchronized(lock) {
+    fun claimNext(
+        host: ProactiveHostSnapshot,
+        now: Long,
+        manualBatch: Boolean = false,
+    ): ProactiveTask? = synchronized(lock) {
         val state = read()
-        if (state.tasks.any { it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending) }) return@synchronized null
+        if (manualBatch) {
+            // Parallel manual calls are allowed, but never over an automatic/commit turn.
+            if (state.tasks.any {
+                    it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending) &&
+                        (it.trigger != "manual" || it.status == ProactiveTaskStatus.CommitPending)
+                }
+            ) return@synchronized null
+        } else if (state.tasks.any {
+                it.status in setOf(ProactiveTaskStatus.Running, ProactiveTaskStatus.CommitPending)
+            }
+        ) {
+            return@synchronized null
+        }
         val day = validDay(state, host, now) ?: return@synchronized null
         val usage = state.days[day] ?: ProactiveDayUsage()
-        if (usage.modelTurns >= host.setting.globalPolicy.dailyModelTurnLimit) return@synchronized null
+        // A manual tap is an explicit user request and must not be rejected by the autonomous
+        // daily-turn safety budget. Automatic tasks still obey it.
+        val hasManualPending = state.tasks.any {
+            it.status == ProactiveTaskStatus.Pending && it.trigger == "manual"
+        }
+        if (!hasManualPending && usage.modelTurns >= host.setting.globalPolicy.dailyModelTurnLimit) {
+            return@synchronized null
+        }
         val eligible = state.tasks.filter { task ->
+            if (manualBatch && task.trigger != "manual") return@filter false
             val config = host.setting.assistantConfigs?.singleOrNull { it.assistantId == task.assistantId }
             val last = state.lastAdmittedAt[task.assistantId]
             val manual = task.trigger == "manual"
@@ -218,7 +242,9 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
         }
         val day = validDay(state, host, now) ?: return@synchronized null
         val usage = state.days[day] ?: ProactiveDayUsage()
-        if (usage.modelTurns >= host.setting.globalPolicy.dailyModelTurnLimit) return@synchronized null
+        if (task.trigger != "manual" && usage.modelTurns >= host.setting.globalPolicy.dailyModelTurnLimit) {
+            return@synchronized null
+        }
         val token = UUID.randomUUID().toString()
         save(state.copy(
             zoneId = host.setting.globalPolicy.budgetZoneId, latestDay = day,

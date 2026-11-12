@@ -292,7 +292,9 @@ fun VideoCallPage(
         }
     }
 
-    BackHandler { hangUp() }
+    // System back / edge-swipe must behave like the top-left back button: keep the call alive
+    // in the floating call surface instead of hanging up. Only the explicit 挂断 action ends it.
+    BackHandler { onBack() }
 
     // 服务自己持有稳定的 StateFlow：coordinator 重建时 UI 订阅对象不变，
     // 弹幕/礼物计数/提示始终是当前通话的状态（旧写法会一直订阅旧 flow）。
@@ -658,7 +660,8 @@ fun VideoCallPage(
             // 预览矩阵使用 fit（整张源图等比贴合、留边），所以任何传感器比例都不会被
             // 拉伸或裁剪。外层仍按宽度量出 4:3 高度，键盘不会把相机画面压扁。
             Box(
-                Modifier.fillMaxWidth().aspectRatio(4f / 3f)
+                // 竖屏 4:3（宽:高 = 3:4）。用户明确要求竖屏画面，不能再按横屏 4:3 拉伸。
+                Modifier.fillMaxWidth().aspectRatio(3f / 4f)
                     .clip(RoundedCornerShape(26.dp))
                     .background(Color(0xFF1E2A33)),
                 contentAlignment = Alignment.Center,

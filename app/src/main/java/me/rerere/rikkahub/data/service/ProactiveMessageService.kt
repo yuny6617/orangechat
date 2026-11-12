@@ -306,7 +306,8 @@ class ProactiveMessageService {
         }
 
         fun triggerNow(context: Context, setting: ProactiveMessageSetting) {
-            if (!setting.enabled || setting.globalPolicy.paused) return
+            // Manual is an explicit user action and ignores a legacy hidden pause flag.
+            if (!setting.enabled) return
             // 手动触发优先保证"现在就跑"：不再先做一次 scheduleNext 的落盘/闹钟计算。
             // 本次运行结束后，服务自己的 finally 会安排下一次。
             val serviceIntent = Intent(context, ProactiveMessageTriggerService::class.java).apply {

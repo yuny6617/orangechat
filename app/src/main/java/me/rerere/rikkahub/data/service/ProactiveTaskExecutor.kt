@@ -5,6 +5,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import me.rerere.ai.core.MessageRole
@@ -93,10 +95,14 @@ internal class ProactiveTaskExecutor(
     suspend fun drain(trigger: String, run: suspend (ProactiveTask) -> Unit) = dispatchMutex.withLock {
         initialize(context)
         migrate()
-        recoverCommits(
-            recordSent = ::recordRecoveredSent,
-            commit = ::commitRecovered,
-        )
+        // Manual taps must reach the provider immediately; recovery is for the autonomous
+        // scheduler path and can wait behind stale commit payloads.
+        if (trigger != "manual") {
+            recoverCommits(
+                recordSent = ::recordRecoveredSent,
+                commit = ::commitRecovered,
+            )
+        }
         val now = System.currentTimeMillis()
         val host = host()
         if (!host.setting.enabled) return@withLock
@@ -128,11 +134,27 @@ internal class ProactiveTaskExecutor(
                 ))
             }
         }
-        while (true) {
-            val task = store.claimNext(host(), System.currentTimeMillis()) ?: break
-            try { run(task) } finally {
-                jobs.remove(task.taskId)
-                store.finish(task.taskId, ProactiveTaskStatus.Failed, "no_message")
+        if (trigger == "manual") {
+            // All participants are claimed first, then run concurrently, so a slow assistant
+            // cannot hide the others behind a sequential generation.
+            supervisorScope {
+                while (true) {
+                    val task = store.claimNext(host(), System.currentTimeMillis(), manualBatch = true) ?: break
+                    launch {
+                        try { run(task) } finally {
+                            jobs.remove(task.taskId)
+                            store.finish(task.taskId, ProactiveTaskStatus.Failed, "no_message")
+                        }
+                    }
+                }
+            }
+        } else {
+            while (true) {
+                val task = store.claimNext(host(), System.currentTimeMillis()) ?: break
+                try { run(task) } finally {
+                    jobs.remove(task.taskId)
+                    store.finish(task.taskId, ProactiveTaskStatus.Failed, "no_message")
+                }
             }
         }
     }
