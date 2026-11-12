@@ -1459,12 +1459,32 @@ class VoiceCallService : Service(), KoinComponent {
      * 权限/设置变化之后的显式刷新（麦克风授权、ASR 配置变化）。
      *
      * 正在录/正在转写/正在发送时**不覆盖**当前状态（不能让一次刷新把录音状态清成 Idle）。
+     *
+     * 另外：当能力其实是可用的（`availability.enabled == true`）时，保留上一次的**失败提示**
+     * （例如"没有识别到内容，请重新录一段"）。否则 settings/conversation 每一次发射都会
+     * 把刚给出的失败原因刷回"待录制"，用户永远看不到为什么这段没发出去。
+     * 能力不可用时以 availability 的权威原因覆盖（例如权限被撤销）。
      */
     fun refreshVideoVoiceInput() {
         if (!videoMode || callEnded) return
         if (videoVoice.isActionable && videoVoice.isRecording) return
         if (videoVoice.isBusy) return
-        videoVoice = refreshVideoVoiceState()
+        val availability = videoVoiceAvailability()
+        val keptNotice = videoVoice.reason.takeIf {
+            availability.enabled &&
+                videoVoice.status == VideoVoiceStatus.Unavailable &&
+                it.isNotBlank()
+        }
+        videoVoice = VideoVoiceUiState(
+            status = if (!availability.enabled || keptNotice != null) {
+                VideoVoiceStatus.Unavailable
+            } else {
+                VideoVoiceStatus.Idle
+            },
+            route = availability.route ?: videoVoice.route,
+            reason = keptNotice ?: availability.reason,
+            maxDurationMs = VideoVoicePolicy.MAX_RECORDING_MS,
+        )
     }
 
     private fun refreshVideoVoiceState(reason: String = ""): VideoVoiceUiState {
@@ -2142,10 +2162,24 @@ class VoiceCallService : Service(), KoinComponent {
     private fun startConversationMonitor() {
         conversationMonitorJob?.cancel()
         conversationMonitorJob = serviceScope.launch {
+            // 只在"语音输入可用性真的变了"（模型/服务商/权限/ASR 配置）时才刷新。
+            // 无条件刷新会把一次性的提示（例如"没有识别到内容，请重新录一段"）在每次
+            // settings 发射时清回 Idle，用户就再也看不到失败原因了。
+            var lastAvailability: me.rerere.rikkahub.data.video.VideoVoiceAvailability? = null
             combine(conversation, settingsStore.settingsFlow) { conv, _ -> conv }.collect { conv ->
                 // Route follows this conversation's model/provider and current settings while idle.
                 // Active recordings retain their frozen route until they finish or are cancelled.
-                refreshVideoVoiceInput()
+                val availability = runCatching { videoVoiceAvailability() }.getOrNull()
+                if (availability != null) {
+                    // 第一次发射只记录基线：进入通话时已经由 startVideoCall 刷新过一次，
+                    // 这里再"刷新"会把期间刚设置的一次性提示（例如"没有识别到内容"）清回 Idle。
+                    if (lastAvailability == null) {
+                        lastAvailability = availability
+                    } else if (availability != lastAvailability) {
+                        lastAvailability = availability
+                        refreshVideoVoiceInput()
+                    }
+                }
                 if (_uiState.value.status != VoiceCallStatus.Processing &&
                     _uiState.value.status != VoiceCallStatus.Speaking
                 ) return@collect
