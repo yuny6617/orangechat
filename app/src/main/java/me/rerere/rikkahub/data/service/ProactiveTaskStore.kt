@@ -106,7 +106,9 @@ internal data class ProactiveHostSnapshot(
 internal fun proactiveTaskAllowed(task: ProactiveTask, host: ProactiveHostSnapshot, now: Long): Boolean {
     val setting = host.setting
     val config = setting.assistantConfigs?.singleOrNull { it.assistantId == task.assistantId } ?: return false
-    val zone = runCatching { ZoneId.of(setting.globalPolicy.budgetZoneId) }.getOrNull() ?: return false
+    val zone = runCatching {
+        ZoneId.of(setting.globalPolicy.budgetZoneId.ifBlank { ZoneId.systemDefault().id })
+    }.getOrNull() ?: return false
     val customActiveHours = config.effectiveActiveHoursEnabled
     return setting.enabled && (task.trigger == "manual" || !setting.globalPolicy.paused) && config.enabled &&
         task.assistantId in host.assistantIds && config.conversationId == task.conversationId &&
@@ -402,8 +404,10 @@ internal class ProactiveTaskStore(private val storage: ProactiveSchedulerStorage
     }
 
     private fun validDay(state: ProactiveSchedulerState, host: ProactiveHostSnapshot, now: Long): String? {
-        val zone = host.setting.globalPolicy.budgetZoneId
-        if (zone.isBlank() || (state.zoneId.isNotBlank() && state.zoneId != zone)) return null
+        // Older multi-assistant builds could persist configs with an empty budget zone. Treat
+        // blank as the local zone instead of silently refusing every claim (all messages fail).
+        val zone = host.setting.globalPolicy.budgetZoneId.ifBlank { ZoneId.systemDefault().id }
+        if (state.zoneId.isNotBlank() && state.zoneId != zone) return null
         val day = budgetDay(now, zone) ?: return null
         // Clock rollback or zone changes cannot manufacture another daily allowance.
         return day.takeIf { state.latestDay.isBlank() || it >= state.latestDay }

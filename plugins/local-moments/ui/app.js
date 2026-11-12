@@ -2576,6 +2576,20 @@
       navigate('list');
     }));
 
+    var otherDialog = $('settingsOtherDialog');
+    if ($('settingsOtherOpen') && otherDialog) {
+      $('settingsOtherOpen').addEventListener('click', guard(function () {
+        if (typeof otherDialog.showModal === 'function') otherDialog.showModal();
+        else otherDialog.setAttribute('open', '');
+      }));
+    }
+    if ($('settingsOtherClose') && otherDialog) {
+      $('settingsOtherClose').addEventListener('click', guard(function () {
+        if (typeof otherDialog.close === 'function') otherDialog.close();
+        else otherDialog.removeAttribute('open');
+      }));
+    }
+
     $('taskSettingsRefresh').addEventListener('click', guard(function () { loadTaskSettings(true); }));
     $('taskStatusRefresh').addEventListener('click', guard(function () {
       refreshTaskStatus('');

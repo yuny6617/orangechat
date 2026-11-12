@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,6 +80,9 @@ fun ChatExportSheet(
     val settings: Settings = LocalSettings.current
     val pluginManager = koinInject<PluginManager>()
     val chatService = koinInject<ChatService>()
+    val plugins by pluginManager.plugins.collectAsState()
+    val momentsPlugin = plugins.firstOrNull { it.manifest.id == LOCAL_MOMENTS_PLUGIN_ID }
+    val momentsReady = momentsPlugin?.isEnabled == true
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     var imageExportOptions by remember { mutableStateOf(ImageExportOptions()) }
@@ -304,26 +308,13 @@ fun ChatExportSheet(
                     }
                 }
 
+                if (momentsReady) {
                 OutlinedCard(
                     onClick = {
                         if (exporting) {
                             toaster.show("正在导出，请稍后再试", ToastType.Error)
                         } else {
-                            val plugin = pluginManager.getPlugin(LOCAL_MOMENTS_PLUGIN_ID)
-                            if (plugin == null) {
-                                if (pluginManager.isLoading.value) {
-                                    toaster.show("插件列表正在加载，请稍后重试", ToastType.Error)
-                                } else {
-                                    toaster.show(
-                                        "请先在插件管理安装本机朋友圈（$LOCAL_MOMENTS_PLUGIN_ID）；未创建任何本地数据",
-                                        ToastType.Error,
-                                    )
-                                }
-                            } else if (!plugin.isEnabled) {
-                                toaster.show("本机朋友圈已安装但未启用，请先在插件管理启用", ToastType.Error)
-                            } else {
-                                showMomentsShare = true
-                            }
+                            showMomentsShare = true
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -409,6 +400,7 @@ fun ChatExportSheet(
                             }
                         }
                     }
+                }
                 }
             }
         }

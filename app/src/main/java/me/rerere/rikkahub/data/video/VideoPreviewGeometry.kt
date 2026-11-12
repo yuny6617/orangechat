@@ -233,6 +233,17 @@ object VideoPreviewGeometry {
         }
 
     /**
+     * The video-call card is portrait. Some front cameras (the reported device included) expose a
+     * landscape buffer whose upright result still has width > height, which leaves the portrait
+     * card full of black bars. Rotate that case by 90° for both preview and captured JPEG.
+     */
+    fun portraitRotationAdjustment(bufferWidth: Int, bufferHeight: Int, rotationDegrees: Int): Int {
+        if (bufferWidth <= 0 || bufferHeight <= 0) return 0
+        val upright = uprightSize(bufferWidth, bufferHeight, rotationDegrees)
+        return if (upright.width > upright.height) 90 else 0
+    }
+
+    /**
      * 预览矩阵的**几何部分**（不含用户校准）。
      *
      * `TextureView` 默认会把 buffer **拉伸**到 view 大小（相当于先做
@@ -361,8 +372,13 @@ object VideoPreviewGeometry {
         // cover the view: `withPreviewCalibration` deliberately re-crops, which would defeat
         // letterboxing and can look squeezed on a 4:3 card.
         val calibrated = if (fit) {
+            val portraitAdjustment = portraitRotationAdjustment(
+                bufferWidth = bufferWidth,
+                bufferHeight = bufferHeight,
+                rotationDegrees = rotation + calibration,
+            )
             textureViewAffine(
-                rotationDegrees = normalizeDegrees(rotation + calibration),
+                rotationDegrees = normalizeDegrees(rotation + calibration + portraitAdjustment),
                 mirror = false,
                 bufferWidth = bufferWidth,
                 bufferHeight = bufferHeight,

@@ -491,3 +491,40 @@ h3 { margin-bottom: 8px; font-size: 15px; line-height: 1.3; }
 @media (min-width: 640px) {
   .oc-media-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+.oc-other-open {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 4px 2px;
+  text-align: left;
+  cursor: pointer;
+}
+.oc-other-open > span:first-child { font-weight: 700; }
+.oc-other-dialog {
+  width: min(92vw, 520px);
+  max-height: 82vh;
+  overflow: auto;
+  border: 1px solid var(--oc-border, rgba(120,120,140,.25));
+  border-radius: 16px;
+  padding: 16px;
+  background: var(--oc-surface, #fff);
+  color: var(--oc-text, #1d2433);
+}
+.oc-other-dialog::backdrop { background: rgba(10, 14, 24, .38); }
+.oc-other-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.oc-other-dialog section { margin-top: 14px; }
+.oc-other-dialog h4 { margin: 0 0 6px; font-size: 14px; }
+
+.oc-filter:not([open]) {
+  width: fit-content;
+  max-width: 300px;
+  padding: 6px 10px;
+}
+.oc-filter:not([open]) summary { white-space: nowrap; }

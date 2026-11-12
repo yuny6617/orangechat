@@ -120,6 +120,15 @@ class ProactiveTaskStoreTest {
         assertEquals("a2", store.claimNext(h, now + 24 * 60 * 60_000)?.taskId)
     }
 
+    @Test fun blankLegacyBudgetZoneStillAllowsClaims() {
+        val store = ProactiveTaskStore(MemoryStorage())
+        val h = host().let { it.copy(setting = it.setting.copy(
+            globalPolicy = it.setting.globalPolicy.copy(budgetZoneId = ""),
+        )) }
+        store.enqueue(task("a"))
+        assertEquals("a", store.claimNext(h, now)?.taskId)
+    }
+
     @Test fun pinnedZoneDstAndClockRollbackCannotResetBudget() {
         assertEquals("2025-03-08", budgetDay(Instant.parse("2025-03-09T07:30:00Z").toEpochMilli(), "America/Los_Angeles"))
         assertNull(budgetDay(now, "invalid-zone"))

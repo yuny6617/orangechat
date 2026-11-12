@@ -45,7 +45,7 @@
           <span id="listMeta" class="oc-meta"></span>
         </div>
 
-        <details id="filterPanel" class="oc-card oc-filter" open>
+        <details id="filterPanel" class="oc-card oc-filter">
           <summary>
             <span>搜索与筛选</span>
             <span id="filterSummary" class="oc-meta">全部动态</span>
@@ -226,9 +226,11 @@
           <div id="settingsIdentity"></div>
         </div>
 
-        <div class="oc-card">
-          <h3>主题来源</h3>
-          <div id="settingsTheme"></div>
+        <div class="oc-card oc-other-card">
+          <button id="settingsOtherOpen" type="button" class="oc-other-open">
+            <span>其他</span>
+            <span class="oc-meta">主题来源 · 能力与数据 · 关于</span>
+          </button>
         </div>
 
         <div class="oc-card">
@@ -244,7 +246,7 @@
           <button id="settingRefresh" type="button" class="oc-btn oc-btn-soft">重新读取动态</button>
         </div>
 
-        <div class="oc-card">
+        <div class="oc-card" hidden>
           <h3>助手互动（宿主原生设置）</h3>
           <p class="oc-note"><strong>设置入口：</strong>宿主页面右上角的原生“互动”按钮（旁边是“停止”）。参与助手、轮数、预算、间隔、审核和全局停止只能在那里修改；本页只读，不能扩权。</p>
           <div id="taskSettingsSummary"></div>
@@ -259,7 +261,7 @@
           <p id="taskStatusText" class="oc-status" role="status">宿主原生“互动”设置决定参与助手、预算与审核；本页只读，浏览不会触发模型。</p>
         </div>
 
-        <div class="oc-card">
+        <div class="oc-card" hidden>
           <h3>待审核（宿主原生确认）</h3>
           <p class="oc-note">这里只读取宿主 <code>task.review.list</code>。点“通过”或“拒绝”后，宿主 WebView 还会弹出自己的原生确认框；页面不会自动批准，也不会直接写入评论。</p>
           <div id="taskReviews"></div>
@@ -268,26 +270,36 @@
           </div>
         </div>
 
-        <div class="oc-card">
+        <div class="oc-card" hidden>
           <h3>助手发帖（宿主原生）</h3>
           <p class="oc-note">宿主当前没有向插件页公开 <code>startPublish</code> 的 JS 接口。本页不会伪造“助手发帖”按钮或发布结果；用户任务需要的助手发帖入口应由 lead 在宿主原生按钮中接线。</p>
           <p class="oc-note oc-note-warn">此入口待宿主 lead 接原生按钮；本页没有可调用的 JS API。</p>
         </div>
 
-        <div class="oc-card">
-          <h3>能力与数据</h3>
-          <div id="settingsCaps"></div>
-          <div id="settingsData"></div>
-        </div>
-
-        <div class="oc-card">
-          <h3>关于</h3>
-          <div id="settingsAbout"></div>
-          <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
-        </div>
       </section>
     </main>
   </div>
+
+  <dialog id="settingsOtherDialog" class="oc-other-dialog">
+    <div class="oc-other-head">
+      <h3>其他</h3>
+      <button id="settingsOtherClose" type="button" class="oc-btn oc-btn-soft">关闭</button>
+    </div>
+    <section>
+      <h4>主题来源</h4>
+      <div id="settingsTheme"></div>
+    </section>
+    <section>
+      <h4>能力与数据</h4>
+      <div id="settingsCaps"></div>
+      <div id="settingsData"></div>
+    </section>
+    <section>
+      <h4>关于</h4>
+      <div id="settingsAbout"></div>
+      <p class="oc-note">本插件不发起业务网络请求，不读取模型 key，不把朋友圈存成一个大 JSON，也不使用 localStorage。</p>
+    </section>
+  </dialog>
 
   <div id="viewer" class="oc-viewer" role="dialog" aria-modal="true" aria-label="图片查看" hidden>
     <div class="oc-viewer-bar">

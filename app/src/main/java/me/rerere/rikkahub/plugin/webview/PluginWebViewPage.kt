@@ -244,7 +244,20 @@ fun PluginWebViewPage(
                 taskSettings = null
             }) { Text("保存") } },
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-            dismissButton = { TextButton(onClick = { localDataBridge?.tasks()?.stopAll(); taskSettings = null }) { Text("停止全部") } })
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        val bridge = localDataBridge
+                        if (bridge != null) {
+                            runCatching { nativeReviews = bridge.tasks().pendingReviews() }
+                                .onFailure { Toast.makeText(context, "无法读取审核队列", Toast.LENGTH_LONG).show() }
+                        }
+                    }) { Text("待审核") }
+                    TextButton(onClick = { localDataBridge?.tasks()?.stopAll(); taskSettings = null }) {
+                        Text("停止全部")
+                    }
+                }
+            })
     }
     if (selectedPublishAssistant != null) {
         val bridge = localDataBridge
@@ -729,29 +742,15 @@ fun PluginWebViewPage(
                 },
                 actions = {
                     if (pluginInfo?.manifest?.permissions?.contains("localdata.read") == true) {
-                        TextButton(onClick = {
-                            val bridge = localDataBridge ?: return@TextButton
-                            val open: () -> Unit = { runCatching { nativeReviews = bridge.tasks().pendingReviews() }.onFailure {
-                                Toast.makeText(context, "无法读取审核队列", Toast.LENGTH_LONG).show()
-                            } }
-                            if (bridge.needsConsent()) pendingLocalAction = open else open()
-                        }) { Text("待审 ${nativeReviews?.size ?: 0}") }
-                        TextButton(onClick = {
-                            val bridge = localDataBridge ?: return@TextButton
-                            val settings = runCatching { bridge.tasks().settings() }.getOrNull() ?: return@TextButton
-                            if (selectedPublishAssistant != null) { selectedPublishAssistant = null; pendingTaskMedia = emptyList(); selectedPublishUris = emptyList() }
-                            else selectedPublishAssistant = settings.participants.firstOrNull { settings.effectivePolicy(it) != LocalAssistantPolicy.DISABLED }
-                        }) { Text("助手发帖") }
-                    }
-                    if (pluginInfo?.manifest?.permissions?.contains("localdata.read") == true) {
+                        // One compact settings entry replaces the old 待审/互动/助手发帖/停止 row.
+                        // Pending reviews and stop-all are inside the native settings dialog.
                         TextButton(onClick = {
                             val bridge = localDataBridge ?: return@TextButton
                             val open: () -> Unit = { runCatching { taskSettings = bridge.tasks().settings() }.onFailure {
                                 Toast.makeText(context, "无法读取任务设置", Toast.LENGTH_LONG).show()
                             } }
                             if (bridge.needsConsent()) pendingLocalAction = open else open()
-                        }) { Text("互动") }
-                        TextButton(onClick = { me.rerere.rikkahub.plugin.localtasks.LocalTaskHosts.peek(pluginId)?.stopAll() }) { Text("停止") }
+                        }) { Text("助手设置") }
                     }
                     if (pluginInfo?.manifest?.permissions?.contains("localdata.backup") == true) {
                         TextButton(onClick = {
