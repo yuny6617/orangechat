@@ -29,6 +29,7 @@
 - 模型 registry 9 项通过。插件 core/bridge/syntax/fake-DOM 检查通过；后续头像及协议变化重新运行。
 - 最新优化共存 APK 在主题包导入、主动消息、4:3 预览和聊天卡片图片导出修复后构建成功（62,759,153 bytes；SHA256 `0CAFD006CB8E07AD500ACC3705F1D3A49FA45455C4709F22681002CC60D880A9`），包 `me.rerere.orangechat.videogifts`、arm64-v8a、既有共存测试证书 SHA256 `ff516315e577235b64ff356dbc856c053b7e589ae636dd8bc4301e528b46d116`；内置 OCR 验证通过。这不是正式包的原签名更新版。
 - 本轮定向 JVM 测试：视频预览/主动消息/主题读取/导出共 8 个测试类、135 项、0 失败、0 跳过（`final3-tests2.log`，BUILD SUCCESSFUL）。主题 ZIP 仍通过对比度审计；朋友圈 ZIP 确定性校验通过。
+- 全量 `:app:testDebugUnitTest`：2292 项、5 失败、3 跳过；其中主动唤醒记录标题一项由本次改名引起，已修正并单测通过（`d2c912d`）。其余 4 项为 `GenerationFlowCompatibilityTest` 的 `createdAt` 纳秒序列化差异、`WorkspaceRoutingTest` 的 Windows `mklink /J` 权限失败、`VoiceCallServiceLifecycleTest` 的空 ASR 状态、`VideoGiftCardUiTest` 的测试 Koin 缺少 `FilesManager`；未在本次功能改动中新增，但全量仍未全绿。
 
 ## 交付状态
 
