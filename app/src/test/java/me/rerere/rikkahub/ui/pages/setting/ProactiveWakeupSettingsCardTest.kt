@@ -63,8 +63,8 @@ class ProactiveWakeupSettingsCardTest {
             }
             }
         }
-        compose.onNodeWithText("后台活动记录").assertIsDisplayed()
-        compose.onNodeWithText("查看主动唤醒记录").performClick()
+        compose.onNodeWithText("AI 约定唤醒记录").assertIsDisplayed()
+        compose.onNodeWithText("查看 AI 约定唤醒记录").performClick()
         try {
             compose.waitUntil(10_000) {
                 compose.onAllNodesWithText("等待执行", substring = true).fetchSemanticsNodes().isNotEmpty()
