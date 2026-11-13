@@ -241,6 +241,24 @@ fun SettingDisplayThemePage(vm: SettingVM = koinViewModel()) {
                     ListItem(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .clip(RoundedCornerShape(4.dp)),
+                        headlineContent = { Text("主题底纹") },
+                        supportingContent = { Text("使用主题自带的聊天背景纹样；已设置背景图片或纯色时自动让位") },
+                        trailingContent = {
+                            Switch(
+                                checked = displaySetting.themePatternEnabled,
+                                onCheckedChange = {
+                                    updateDisplaySetting(
+                                        displaySetting.copy(themePatternEnabled = it)
+                                    )
+                                }
+                            )
+                        },
+                        colors = CustomColors.listItemColors,
+                    )
+                    ListItem(
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .clip(
                                 RoundedCornerShape(
                                     topStart = 4.dp,

@@ -7,12 +7,14 @@
 package me.rerere.rikkahub.ui.pages.chat
 
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
@@ -64,6 +66,61 @@ fun rememberChatBackgroundVisuals(setting: Settings): ChatBackgroundVisuals {
     )
 }
 
+/**
+ * 主题自带的聊天底纹。
+ *
+ * 键是主题包内 theme 的 id：应用主题时 themeId 会被写成 `package:<包名>:<主题id>`，
+ * 所以匹配前先用 [themePatternKey] 取最后一段，避免和包名硬绑定。
+ * 每个主题可给亮/暗两版纹样：深色模式换用提亮过的线色，保证在深色底上仍看得见。
+ */
+private data class ThemePattern(
+    @DrawableRes val light: Int,
+    @DrawableRes val dark: Int = light,
+)
+
+private val ThemePatterns: Map<String, ThemePattern> = mapOf(
+    "pearltide" to ThemePattern(R.drawable.pearltide_chat_bg),
+    "terracotta" to ThemePattern(
+        R.drawable.theme_pattern_terracotta,
+        R.drawable.theme_pattern_terracotta_dark,
+    ),
+    "celadon" to ThemePattern(
+        R.drawable.theme_pattern_celadon,
+        R.drawable.theme_pattern_celadon_dark,
+    ),
+    "nocturne" to ThemePattern(
+        R.drawable.theme_pattern_nocturne,
+        R.drawable.theme_pattern_nocturne_dark,
+    ),
+    "matcha" to ThemePattern(
+        R.drawable.theme_pattern_matcha,
+        R.drawable.theme_pattern_matcha_dark,
+    ),
+)
+
+private fun themePatternKey(themeId: String): String =
+    if (themeId.startsWith("package:")) themeId.substringAfterLast(':') else themeId
+
+/**
+ * 当前应当绘制的主题底纹资源；返回 null 表示不绘制。
+ *
+ * 只有在「用户没有自备背景」且「设置里打开了主题底纹」时才返回资源：
+ * 用户自选背景图片 > 自定义纯色 > 主题底纹 > 主题背景色，避免多层纹理互相透叠。
+ */
+@Composable
+private fun rememberThemePatternRes(setting: Settings, userHasOwnBackground: Boolean): Int? {
+    val dark = LocalDarkMode.current
+    val key = themePatternKey(setting.themeId)
+    val switchOn = setting.displaySetting.themePatternEnabled
+    return remember(key, dark, switchOn, userHasOwnBackground) {
+        if (userHasOwnBackground || !switchOn) {
+            null
+        } else {
+            ThemePatterns[key]?.let { if (dark) it.dark else it.light }
+        }
+    }
+}
+
 @Composable
 fun AssistantBackground(
     setting: Settings,
@@ -72,17 +129,23 @@ fun AssistantBackground(
     val visuals = rememberChatBackgroundVisuals(setting)
     val chatBackgroundColor = setting.displaySetting.chatBackgroundColor?.let { it.toComposeColor() }
     val isScrollCaptureInProgress = LocalScrollCaptureInProgress.current
+    val themePattern = rememberThemePatternRes(
+        setting = setting,
+        userHasOwnBackground = assistant.background != null || chatBackgroundColor != null,
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         // MIUI's scroll capture composites the page by repeated screenshots. Keep image layers
         // out of that capture window for one diagnostic pass; solid colors remain unchanged.
-        if (!isScrollCaptureInProgress && setting.themeId == "pearltide") {
-            Image(
-                painter = painterResource(id = R.drawable.pearltide_chat_bg),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
+        if (!isScrollCaptureInProgress) {
+            themePattern?.let { res ->
+                Image(
+                    painter = painterResource(id = res),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
 
         when {

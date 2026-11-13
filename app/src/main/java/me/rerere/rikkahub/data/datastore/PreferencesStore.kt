@@ -1090,6 +1090,8 @@ data class DisplaySetting(
     val assistantBubbleFrame: BubbleFrameSetting = BubbleFrameSetting(),
     val bubbleCornerRadius: Float = 16f,
     val bubbleImageOverlayEnabled: Boolean = false, // 关=纯图片, 开=图片+主题色遮罩
+    // 主题包内置聊天底纹开关；关闭后只保留纯色背景。用户自选背景图/纯色优先级更高，不受此开关影响。
+    val themePatternEnabled: Boolean = true,
 )
 
 @Serializable
