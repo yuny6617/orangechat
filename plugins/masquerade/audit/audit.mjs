@@ -443,6 +443,16 @@ const ROUND_3 = [
       detail: 'LICENSE / README 均声明宿主 AGPL-3.0，并指出 host-patch 衍生文件与组合作品的约束',
     };
   }),
+  check('R3-10', '宿主同款流式导入自检：真机不会报「找不到 manifest.json」', () => {
+    const tool = R('scripts/verify-package.mjs');
+    const self = spawnSync(process.execPath, [tool, '--self-test'], { encoding: 'utf8', timeout: 30000 });
+    const real = spawnSync(process.execPath, [tool], { encoding: 'utf8', timeout: 30000 });
+    return {
+      ok: self.status === 0 && real.status === 0 &&
+        (self.stdout || '').includes('SELF_TEST: OK') && (real.stdout || '').includes('导入可成功'),
+      detail: '复刻 ZipInputStream 流式读取 + findManifest + validateManifest；5 组正反样本证明源码包/缺清单包必被判失败',
+    };
+  }),
 ];
 
 const ROUNDS = [
@@ -463,6 +473,7 @@ const FINDINGS = [
   { round: 3, item: 'R3-02 / 可复现构建', text: '从 GitHub 干净 sparse clone 后独立跑 `npm run verify` 全绿，但重建的 ZIP 由 135612 B 变成 137677 B：Windows checkout 把文本转成 CRLF，且 `build.mjs` 用当前时间写 DOS 时间戳，导致同一份源码产物漂移。已让 `collect()` 对文本类文件统一 LF、固定 ZIP 时间戳，并把 R3-02 升级为「连续两次构建字节必须完全一致」，同时另做了一次 clone 内构建与本地产物比对。' },
   { round: 3, item: 'R3-09 / 许可合规', text: '远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。' },
   { round: 3, item: 'R3-02 / 宿主可插拔性', text: '初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。' },
+  { round: 3, item: 'R3-10 / 真机导入失败「找不到 manifest.json」', text: '真机导入报该错后回读宿主 `PluginScanner.kt`：unzip() 用 `ZipInputStream` 流式读取本地文件头，findManifest() 只查根目录与一级子目录。插件包本身根目录就有 manifest.json，经独立流式复刻（11 个 entry 全部可读）与线上 raw 直链下载 sha256 比对（与本地完全一致）确认产物无误；根因是误把 GitHub 的 `Code → Download ZIP` 仓库源码包（清单在第 4 层）当成插件包导入，已用反证样本复现同一报错。修复：新增 `scripts/verify-package.mjs` 完整复刻宿主导入链路，可检查任意 ZIP 并输出人话诊断，含 5 组正反样本自测；纳入 `npm run verify` 与新增的 R3-10；README 置顶正确的 raw 直链、下载后自检步骤与错误对照。此前的 Python zipfile / Node 中央目录回读走的是另一条路径，无法覆盖真机的流式解析，这是原有验证链的盲区。' },
 ];
 
 function buildReport(results, allOk) {

@@ -36,7 +36,8 @@ feat(masquerade): 可插拔「假面舞会」插件 / MCP 与加号入口
 
 - `node --test tests/*.test.mjs`：23/23 通过
 - `node scripts/build.mjs`：ZIP 11 条目，CRC 回读 + Python `zipfile.testzip()` 交叉校验通过
-- `node audit/audit.mjs`：**三轮 31/31 全绿**，报告见 `plugins/masquerade/audit/AUDIT_REPORT.md`；含 17 组检测器正反样本自测，并如实记录 9 项发现与修复
+- `node audit/audit.mjs`：**三轮 32/32 全绿**，报告见 `plugins/masquerade/audit/AUDIT_REPORT.md`；含 17 组检测器正反样本自测，并如实记录 10 项发现与修复
+- `node scripts/verify-package.mjs`：复刻宿主 `ZipInputStream` + `findManifest` + `validateManifest` 全导入链路，5 组正反样本自测；真机反馈的「找不到 manifest.json」已固化为自动回归
 - 权限最小化 `ai_chat` + `conversation_sync`；HTTPS + 双重域名白名单；密钥不回显；WebView 动态渲染全经转义
 
 ## 限制（needs validation）

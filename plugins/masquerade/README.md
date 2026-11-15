@@ -17,9 +17,35 @@
 
 ---
 
+## 📱 装到手机：请认准这一个文件
+
+> **真机踩过的坑**：在 GitHub 点 `Code → Download ZIP` 下载到的是**整个仓库源码包**，
+> 其中 `manifest.json` 位于 `plugins/masquerade/plugin/manifest.json`（第 4 层）；
+> 而宿主 `PluginScanner.findManifest()` 只查**根目录和一级子目录**，
+> 导入必然报 **「导入失败: 找不到 manifest.json」**。
+
+**唯一可导入的文件**：`dist/orangechat-masquerade-1.0.0.zip`
+
+- 一键下载（已实测返回 `application/zip`、135415 字节）：
+  <https://raw.githubusercontent.com/yuny6617/orangechat/feature/masquerade-integration/plugins/masquerade/dist/orangechat-masquerade-1.0.0.zip>
+- 或在仓库文件列表进入 `plugins/masquerade/dist/`，点该 `.zip` → `View raw` / `Download`；**不要**点页面顶部的 `Code → Download ZIP`
+- 或直接使用对话中提供的附件卡片保存
+
+**下载后自检**（任选其一）：
+
+- 用解压软件打开：**第一层**就能看到 `manifest.json` 和 `main.js`；若第一层是 `orangechat-xxx/` 文件夹，就是拿错包了
+- 电脑上跑 `node scripts/verify-package.mjs <你下载的文件>`，输出 `✓ 导入可成功` 才对
+
+然后在橘瓣里：`插件页 → + 导入插件 → 选择该 zip → 确认权限 → 启用`。
+安装后插件详情页本身就能打开 WebView 页面；**不打宿主补丁也能用**。
+
+---
+
 ## 快速开始
 
-### 1. 构建可导入的插件包
+### 1. 拿到插件包（推荐直接下载，本地构建可选）
+
+按上一节下载现成的 ZIP 即可；若要在本地重建：
 
 ```bash
 node scripts/build.mjs
@@ -31,8 +57,6 @@ node scripts/build.mjs
 ```bash
 python -c "import zipfile; z=zipfile.ZipFile('dist/orangechat-masquerade-1.0.0.zip'); print(z.testzip(), len(z.namelist()))"
 ```
-
-在橘瓣里按 `PLUGINS_GUIDE.md` 导入该 ZIP。安装并启用后，插件详情页本身就能打开 WebView 页面；**不需要打宿主补丁也能用**。
 
 ### 2. 让入口出现在聊天页加号里（可选补丁）
 
@@ -100,6 +124,7 @@ idle ──masquerade_invite──▶ invited ──masquerade_accept──▶ a
 node --test tests/*.test.mjs     # 23 个用例：状态机、隔离、密钥、XSS、契约、MCP 冒烟
 node scripts/build.mjs           # ZIP 构建 + CRC 回读
 node audit/audit.mjs             # 三轮安全审计 / 代码审查，生成 audit/AUDIT_REPORT.md
+node scripts/verify-package.mjs  # 宿主同款流式导入自检；也可传入任意 ZIP 路径排障
 npm run verify                   # 以上全部
 ```
 
@@ -114,7 +139,7 @@ plugin/        manifest.json + main.js（QuickJS ES5 子集）+ ui/（专属 Web
 mcp/           stdio MCP server，vm 复用 main.js
 studio/        浏览器交互预览页
 host-patch/    宿主加号按钮补丁生成脚本、完整文件、unified diff
-scripts/       零依赖 ZIP 构建（CRC 回读校验）
+scripts/       零依赖 ZIP 构建（CRC 回读校验）+ 宿主同款导入自检
 tests/         核心 / 契约 / MCP 冒烟测试
 audit/         三轮审计脚本与报告
 dist/          可导入的插件 ZIP

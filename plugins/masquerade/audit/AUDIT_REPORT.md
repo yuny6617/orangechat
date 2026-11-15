@@ -51,7 +51,7 @@
 - **R2-04 / 畸形输入健壮性**：首轮审计实跑发现 4 次未捕获异常：`String({ toString: null })` 会抛 TypeError，`get_role_card` / `update_role_card` / `delete_role_card` / `masquerade_invite` 读到畸形 card_id 时直接崩。已新增 `safeString()` 只接受标量（对象/数组/坏 toString 一律当空值），并让 `escapeHtml` 复用；48 组异常输入复测 0 次未捕获异常，核心单测 13/13 仍通过。
 - **R2-08 / 补丁复现的隐藏依赖**：上传到宿主仓库时把补丁后文件覆盖到了本地参考副本，R2-08 随即 FAIL，暴露出真实问题：`generate.mjs` 默认源是仓库外的 `_ref/orangechat/...`，用户 clone 后 `npm run verify` 必然失败，审计结果不可复现。已把原始宿主文件快照 `FilesPicker.kt.orig` 随仓库提供作为默认输入，新增 `--out` 支持，并加入「输入已是补丁后版本」的显式报错；R2-08 改为在临时目录重生成后逐字比对产物，且失败时逐条报出问题而非硬编码「成功」。此外规则改为懒执行 `evaluate()`（`--round=1` 不再连带触发构建），生成脚本默认不留中间文件，`innerHTML` 检测器升级为括号/引号平衡抓取整条赋值语句。
 
-## 第 3 轮 · 交付审查 · 可构建、可预览、可追溯（9/9）
+## 第 3 轮 · 交付审查 · 可构建、可预览、可追溯（10/10）
 
 | 编号 | 检查项 | 结果 | 实际核对内容 |
 |---|---|---|---|
@@ -64,16 +64,18 @@
 | R3-07 | 交付文档齐全 | PASS | 7 份文档齐全，缺：无 |
 | R3-08 | 端到端落幕语义：助手必须知道刚才是游戏 | PASS | 启幕卡 / 落幕卡 / transientSystemPrompt / 长期记忆四条通道一致 |
 | R3-09 | 许可声明明确区分插件 MIT 与宿主 AGPL-3.0 | PASS | LICENSE / README 均声明宿主 AGPL-3.0，并指出 host-patch 衍生文件与组合作品的约束 |
+| R3-10 | 宿主同款流式导入自检：真机不会报「找不到 manifest.json」 | PASS | 复刻 ZipInputStream 流式读取 + findManifest + validateManifest；5 组正反样本证明源码包/缺清单包必被判失败 |
 
 ### 本轮发现与修复
 
 - **R3-02 / 可复现构建**：从 GitHub 干净 sparse clone 后独立跑 `npm run verify` 全绿，但重建的 ZIP 由 135612 B 变成 137677 B：Windows checkout 把文本转成 CRLF，且 `build.mjs` 用当前时间写 DOS 时间戳，导致同一份源码产物漂移。已让 `collect()` 对文本类文件统一 LF、固定 ZIP 时间戳，并把 R3-02 升级为「连续两次构建字节必须完全一致」，同时另做了一次 clone 内构建与本地产物比对。
 - **R3-09 / 许可合规**：远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。
 - **R3-02 / 宿主可插拔性**：初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。
+- **R3-10 / 真机导入失败「找不到 manifest.json」**：真机导入报该错后回读宿主 `PluginScanner.kt`：unzip() 用 `ZipInputStream` 流式读取本地文件头，findManifest() 只查根目录与一级子目录。插件包本身根目录就有 manifest.json，经独立流式复刻（11 个 entry 全部可读）与线上 raw 直链下载 sha256 比对（与本地完全一致）确认产物无误；根因是误把 GitHub 的 `Code → Download ZIP` 仓库源码包（清单在第 4 层）当成插件包导入，已用反证样本复现同一报错。修复：新增 `scripts/verify-package.mjs` 完整复刻宿主导入链路，可检查任意 ZIP 并输出人话诊断，含 5 组正反样本自测；纳入 `npm run verify` 与新增的 R3-10；README 置顶正确的 raw 直链、下载后自检步骤与错误对照。此前的 Python zipfile / Node 中央目录回读走的是另一条路径，无法覆盖真机的流式解析，这是原有验证链的盲区。
 
 ## 复验
 
-- 三轮共 31 条检查，逐条重跑；任一 FAIL 即退出码 1。
+- 三轮共 32 条检查，逐条重跑；任一 FAIL 即退出码 1。
 - 检测器 `selfTest()` 用 17 组正反样本验证规则本身不产生假阴性（例如故意写入硬编码密钥、未转义 innerHTML、通配符白名单、map 回调内的裸插值时必须报错）。
 - 修复后回归：`node --test tests/*.test.mjs` + `node scripts/build.mjs` + `python zipfile.testzip()` 全部通过。
 

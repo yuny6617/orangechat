@@ -8,7 +8,7 @@
     "test": "node --test tests/*.test.mjs",
     "build": "node scripts/build.mjs",
     "audit": "node audit/audit.mjs",
-    "verify": "node --test tests/*.test.mjs && node audit/audit.mjs && node scripts/build.mjs"
+    "verify": "node --test tests/*.test.mjs && node audit/audit.mjs && node scripts/build.mjs && node scripts/verify-package.mjs"
   },
   "engines": {
     "node": ">=18"
