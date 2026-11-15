@@ -40,7 +40,7 @@
 | R2-05 | 生产代码无 TODO / 调试日志残留 | PASS | 4 个生产 JS 无 TODO/FIXME/console.log/debugger |
 | R2-06 | 单文件规模在可审查范围内 | PASS | 8 个文件均 < 1000 行；最大 633 行 |
 | R2-07 | 零第三方依赖，状态机只有一份实现 | PASS | package.json 无依赖；MCP 通过 vm 复用 plugin/main.js，未复制状态机 |
-| R2-08 | 宿主补丁锚点唯一、只改一个文件、按钮按插件启用状态出现 | PASS | generate.mjs 重跑成功且不留中间文件；diff 仅含 FilesPicker.kt；入口由插件 ID + isEnabled 条件渲染 |
+| R2-08 | 宿主补丁可自包含复现：锚点唯一、只改一个文件、按钮条件渲染 | PASS | 用仓库内原始快照重跑，输出与产物逐字一致；diff 仅含 FilesPicker.kt；入口由插件 ID + isEnabled 条件渲染；无中间文件残留 |
 | R2-09 | 测试覆盖关键不变量（隔离/密钥/XSS/状态机） | PASS | 3 个测试文件，覆盖 5 类关键不变量 |
 | R2-10 | 检测器自身无假阴性（正反样本自测） | PASS | 17 组正反样本全部符合预期 |
 
@@ -49,9 +49,9 @@
 - **R2-03 / 返回值结构**：roleplay_turn 失败分支曾同时出现重复 error 键，且在 invited 状态直接落幕会误写一条「游戏记忆」。已清理重复键，并把 invited 的收回改为 cancelled 分支（不写记忆、不发聊天卡）。
 - **R2-01 / 状态机健壮性**：单测暴露两个真实缺陷：先建卡再列卡会丢三张内置卡（改为独立 seeded 哨兵）；进行中再次邀请先报「角色卡不存在」而非「已有进行中」（把状态检查提前）。两处均已修复并补回归用例。
 - **R2-04 / 畸形输入健壮性**：首轮审计实跑发现 4 次未捕获异常：`String({ toString: null })` 会抛 TypeError，`get_role_card` / `update_role_card` / `delete_role_card` / `masquerade_invite` 读到畸形 card_id 时直接崩。已新增 `safeString()` 只接受标量（对象/数组/坏 toString 一律当空值），并让 `escapeHtml` 复用；48 组异常输入复测 0 次未捕获异常，核心单测 13/13 仍通过。
-- **R2-08 / 审计自身可复跑性**：审计脚本初版在模块加载时就执行全部三轮，`--round=1` 会连带触发第三轮构建副作用；`generate.mjs` 每次重跑都会留下 `FilesPicker.kt.before` 中间文件。已把规则改为懒执行 `evaluate()`，并让生成脚本默认不写中间产物（重算 diff 时才用 `--keep-before`）。`innerHTML` 检测器也升级为括号/引号平衡抓取整条赋值语句，避免被 map 回调内的分号截断而漏检。
+- **R2-08 / 补丁复现的隐藏依赖**：上传到宿主仓库时把补丁后文件覆盖到了本地参考副本，R2-08 随即 FAIL，暴露出真实问题：`generate.mjs` 默认源是仓库外的 `_ref/orangechat/...`，用户 clone 后 `npm run verify` 必然失败，审计结果不可复现。已把原始宿主文件快照 `FilesPicker.kt.orig` 随仓库提供作为默认输入，新增 `--out` 支持，并加入「输入已是补丁后版本」的显式报错；R2-08 改为在临时目录重生成后逐字比对产物，且失败时逐条报出问题而非硬编码「成功」。此外规则改为懒执行 `evaluate()`（`--round=1` 不再连带触发构建），生成脚本默认不留中间文件，`innerHTML` 检测器升级为括号/引号平衡抓取整条赋值语句。
 
-## 第 3 轮 · 交付审查 · 可构建、可预览、可追溯（8/8）
+## 第 3 轮 · 交付审查 · 可构建、可预览、可追溯（9/9）
 
 | 编号 | 检查项 | 结果 | 实际核对内容 |
 |---|---|---|---|
@@ -63,14 +63,16 @@
 | R3-06 | 浏览器预览页可独立打开 | PASS | 复用同一套 CSS/JS/main.js，右侧演示聊天上下文里的专属卡片 |
 | R3-07 | 交付文档齐全 | PASS | 7 份文档齐全，缺：无 |
 | R3-08 | 端到端落幕语义：助手必须知道刚才是游戏 | PASS | 启幕卡 / 落幕卡 / transientSystemPrompt / 长期记忆四条通道一致 |
+| R3-09 | 许可声明明确区分插件 MIT 与宿主 AGPL-3.0 | PASS | LICENSE / README 均声明宿主 AGPL-3.0，并指出 host-patch 衍生文件与组合作品的约束 |
 
 ### 本轮发现与修复
 
+- **R3-09 / 许可合规**：远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。
 - **R3-02 / 宿主可插拔性**：初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。
 
 ## 复验
 
-- 三轮共 30 条检查，逐条重跑；任一 FAIL 即退出码 1。
+- 三轮共 31 条检查，逐条重跑；任一 FAIL 即退出码 1。
 - 检测器 `selfTest()` 用 17 组正反样本验证规则本身不产生假阴性（例如故意写入硬编码密钥、未转义 innerHTML、通配符白名单、map 回调内的裸插值时必须报错）。
 - 修复后回归：`node --test tests/*.test.mjs` + `node scripts/build.mjs` + `python zipfile.testzip()` 全部通过。
 

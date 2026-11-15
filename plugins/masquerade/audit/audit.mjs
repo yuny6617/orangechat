@@ -5,6 +5,7 @@
  * 每轮都是真实扫描或本地行为验证；失败项退出码非 0，绝不写「已检查」声明代替执行。
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { spawnSync } from 'node:child_process';
@@ -313,18 +314,36 @@ const ROUND_2 = [
       detail: 'package.json 无依赖；MCP 通过 vm 复用 plugin/main.js，未复制状态机',
     };
   }),
-  check('R2-08', '宿主补丁锚点唯一、只改一个文件、按钮按插件启用状态出现', () => {
-    const before = R('host-patch/FilesPicker.kt.before');
-    if (fs.existsSync(before)) fs.unlinkSync(before); /* 清掉历史遗留，再断言本次重跑不产生残留 */
-    const gen = spawnSync(process.execPath, [R('host-patch/generate.mjs')], { encoding: 'utf8', timeout: 30000 });
+  check('R2-08', '宿主补丁可自包含复现：锚点唯一、只改一个文件、按钮条件渲染', () => {
+    /* 不依赖任何仓库外的参考副本：用随仓库提供的原始快照重新生成，逐字比对产物。 */
+    const origPath = R('host-patch/FilesPicker.kt.orig');
     const patched = read('host-patch/FilesPicker.kt');
     const patch = read('host-patch/FilesPicker.kt.patch');
     const files = [...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]);
-    const leftover = fs.existsSync(before);
+    const problems = [];
+    if (!fs.existsSync(origPath)) problems.push('缺原始快照 FilesPicker.kt.orig');
+    else if (fs.readFileSync(origPath, 'utf8').includes('masqueradeInstalled')) problems.push('原始快照已被补丁污染');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'masquerade-audit-'));
+    try {
+      const out = path.join(tmp, 'FilesPicker.kt');
+      const gen = spawnSync(process.execPath,
+        [R('host-patch/generate.mjs'), '--out=' + out],
+        { encoding: 'utf8', timeout: 30000 });
+      if (gen.status !== 0) {
+        problems.push('generate.mjs 失败：' + String(gen.stderr || gen.stdout || '').trim().split('\n')[0]);
+      } else if (fs.readFileSync(out, 'utf8') !== patched) {
+        problems.push('重新生成结果与仓库产物不一致');
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+    if (files.length !== 1 || !files[0].endsWith('FilesPicker.kt')) problems.push('diff 文件数异常');
+    if (!patched.includes('if (masqueradeInstalled)') || !patched.includes('it.isEnabled')) problems.push('条件渲染缺失');
+    if (fs.existsSync(R('host-patch/FilesPicker.kt.before'))) problems.push('残留中间文件 FilesPicker.kt.before');
     return {
-      ok: gen.status === 0 && !leftover && files.length === 1 && files[0].endsWith('FilesPicker.kt') &&
-        patched.includes('if (masqueradeInstalled)') && patched.includes('it.isEnabled'),
-      detail: 'generate.mjs 重跑成功且不留中间文件；diff 仅含 FilesPicker.kt；入口由插件 ID + isEnabled 条件渲染',
+      ok: problems.length === 0,
+      detail: problems.length ? '问题：' + problems.join('；') :
+        '用仓库内原始快照重跑，输出与产物逐字一致；diff 仅含 FilesPicker.kt；入口由插件 ID + isEnabled 条件渲染；无中间文件残留',
     };
   }),
   check('R2-09', '测试覆盖关键不变量（隔离/密钥/XSS/状态机）', () => {
@@ -409,6 +428,14 @@ const ROUND_3 = [
       detail: '启幕卡 / 落幕卡 / transientSystemPrompt / 长期记忆四条通道一致',
     };
   }),
+  check('R3-09', '许可声明明确区分插件 MIT 与宿主 AGPL-3.0', () => {
+    const lic = read('LICENSE');
+    const doc = read('README.md');
+    return {
+      ok: /AGPL/.test(lic) && /AGPL/.test(doc) && /host-patch/.test(lic) && /组合作品/.test(doc),
+      detail: 'LICENSE / README 均声明宿主 AGPL-3.0，并指出 host-patch 衍生文件与组合作品的约束',
+    };
+  }),
 ];
 
 const ROUNDS = [
@@ -425,7 +452,8 @@ const FINDINGS = [
   { round: 2, item: 'R2-03 / 返回值结构', text: 'roleplay_turn 失败分支曾同时出现重复 error 键，且在 invited 状态直接落幕会误写一条「游戏记忆」。已清理重复键，并把 invited 的收回改为 cancelled 分支（不写记忆、不发聊天卡）。' },
   { round: 2, item: 'R2-01 / 状态机健壮性', text: '单测暴露两个真实缺陷：先建卡再列卡会丢三张内置卡（改为独立 seeded 哨兵）；进行中再次邀请先报「角色卡不存在」而非「已有进行中」（把状态检查提前）。两处均已修复并补回归用例。' },
   { round: 2, item: 'R2-04 / 畸形输入健壮性', text: '首轮审计实跑发现 4 次未捕获异常：`String({ toString: null })` 会抛 TypeError，`get_role_card` / `update_role_card` / `delete_role_card` / `masquerade_invite` 读到畸形 card_id 时直接崩。已新增 `safeString()` 只接受标量（对象/数组/坏 toString 一律当空值），并让 `escapeHtml` 复用；48 组异常输入复测 0 次未捕获异常，核心单测 13/13 仍通过。' },
-  { round: 2, item: 'R2-08 / 审计自身可复跑性', text: '审计脚本初版在模块加载时就执行全部三轮，`--round=1` 会连带触发第三轮构建副作用；`generate.mjs` 每次重跑都会留下 `FilesPicker.kt.before` 中间文件。已把规则改为懒执行 `evaluate()`，并让生成脚本默认不写中间产物（重算 diff 时才用 `--keep-before`）。`innerHTML` 检测器也升级为括号/引号平衡抓取整条赋值语句，避免被 map 回调内的分号截断而漏检。' },
+  { round: 2, item: 'R2-08 / 补丁复现的隐藏依赖', text: '上传到宿主仓库时把补丁后文件覆盖到了本地参考副本，R2-08 随即 FAIL，暴露出真实问题：`generate.mjs` 默认源是仓库外的 `_ref/orangechat/...`，用户 clone 后 `npm run verify` 必然失败，审计结果不可复现。已把原始宿主文件快照 `FilesPicker.kt.orig` 随仓库提供作为默认输入，新增 `--out` 支持，并加入「输入已是补丁后版本」的显式报错；R2-08 改为在临时目录重生成后逐字比对产物，且失败时逐条报出问题而非硬编码「成功」。此外规则改为懒执行 `evaluate()`（`--round=1` 不再连带触发构建），生成脚本默认不留中间文件，`innerHTML` 检测器升级为括号/引号平衡抓取整条赋值语句。' },
+  { round: 3, item: 'R3-09 / 许可合规', text: '远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。' },
   { round: 3, item: 'R3-02 / 宿主可插拔性', text: '初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。' },
 ];
 

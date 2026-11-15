@@ -1,7 +1,9 @@
 /*
  * 从橘瓣源码生成「加号菜单」最小补丁。
- * 用法：node host-patch/generate.mjs [--src=<...>/FilesPicker.kt] [--keep-before]
+ * 用法：node host-patch/generate.mjs [--src=<原始 FilesPicker.kt>] [--out=<输出>] [--keep-before]
  * 只做四处精确插入；锚点不唯一时立即失败，绝不猜位置。
+ * 默认输入是随仓库提供的原始快照 FilesPicker.kt.orig（因此 clone 后即可复现，
+ * 不依赖任何本地参考副本），默认输出是 FilesPicker.kt。
  * 默认只产出补丁后的完整文件，不留中间产物；需要重算 unified diff 时才用 --keep-before
  * 写出 FilesPicker.kt.before，用完请自行删除。
  */
@@ -10,13 +12,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HOST_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HOST_DIR, '..');
-const DEFAULT_SRC = path.join(ROOT, '..', '_ref', 'orangechat', 'app', 'src', 'main', 'java',
-  'me', 'rerere', 'rikkahub', 'ui', 'components', 'ai', 'FilesPicker.kt');
+const DEFAULT_SRC = path.join(HOST_DIR, 'FilesPicker.kt.orig');
+const DEFAULT_OUT = path.join(HOST_DIR, 'FilesPicker.kt');
 const arg = process.argv.find((a) => a.startsWith('--src='));
+const outArg = process.argv.find((a) => a.startsWith('--out='));
 const SRC = arg ? arg.slice(6) : DEFAULT_SRC;
+const OUT = outArg ? outArg.slice(6) : DEFAULT_OUT;
 
 const original = fs.readFileSync(SRC, 'utf8');
+/* 防止误把「补丁后」文件当成原始输入，导致二次插入。 */
+if (original.includes('masqueradeInstalled')) {
+  throw new Error('输入已是补丁后版本：请传原始 FilesPicker.kt（默认使用仓库内的 FilesPicker.kt.orig）');
+}
 /* Windows checkout 常见 CRLF：保持原文件换行风格，避免整文件 diff。 */
 const EOL = original.indexOf('\r\n') >= 0 ? '\r\n' : '\n';
 const fit = (s) => s.split('\n').join(EOL);
@@ -101,6 +108,7 @@ for (const [needle, expected] of checks) {
 if (process.argv.includes('--keep-before')) {
   fs.writeFileSync(path.join(HOST_DIR, 'FilesPicker.kt.before'), original);
 }
-fs.writeFileSync(path.join(HOST_DIR, 'FilesPicker.kt'), output);
-console.log('OK: 生成 FilesPicker.kt（+' + (output.split('\n').length - original.split('\n').length) + ' 行）');
+fs.writeFileSync(OUT, output);
+console.log('OK: 生成 ' + path.basename(OUT) + '（+' + (output.split('\n').length - original.split('\n').length) + ' 行）');
 console.log('SRC:', SRC);
+console.log('OUT:', OUT);

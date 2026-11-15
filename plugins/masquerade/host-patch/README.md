@@ -27,13 +27,23 @@ cp /path/to/orangechat-masquerade/host-patch/FilesPicker.kt \
 
 回滚：`git apply -R host-patch/FilesPicker.kt.patch`
 
-重新生成补丁（需要一份橘瓣源码副本）：
+## 三件套与可复现性
+
+| 文件 | 内容 |
+|---|---|
+| `FilesPicker.kt.orig` | 宿主 `46748a5` 版本的**原始** `FilesPicker.kt` 快照（CRLF，496 行） |
+| `FilesPicker.kt` | 打补丁后的完整文件（529 行，+33） |
+| `FilesPicker.kt.patch` | 两者之间的 unified diff |
+
+原始快照随仓库提供，因此生成脚本**不依赖任何仓库外的参考副本**，clone 下来即可复跑：
 
 ```bash
-node host-patch/generate.mjs --src=/path/to/orangechat/app/src/main/java/me/rerere/rikkahub/ui/components/ai/FilesPicker.kt
+node host-patch/generate.mjs
+# 也可以指定别的宿主版本与输出位置：
+node host-patch/generate.mjs --src=/path/to/orangechat/.../FilesPicker.kt --out=/tmp/FilesPicker.kt
 ```
 
-脚本对四个锚点做「必须恰好出现一次」的校验，源码漂移时直接报错，不会悄悄打错位置；同时自动适配 CRLF / LF 换行，避免整文件 diff。默认只输出补丁后的 `FilesPicker.kt`，**不留任何中间产物**。
+脚本对四个锚点做「必须恰好出现一次」的校验，源码漂移时直接报错，不会悄悄打错位置；若误把补丁后文件当作输入，会显式拒绝，避免二次插入；同时自动适配 CRLF / LF 换行，避免整文件 diff。默认只输出补丁后的文件，**不留任何中间产物**。审计 R2-08 会用这份快照在临时目录重生成并逐字比对产物，保证补丁确实可复现。
 
 需要重算 unified diff 时才写原始副本：
 

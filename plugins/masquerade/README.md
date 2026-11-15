@@ -124,4 +124,6 @@ dist/          可导入的插件 ZIP
 
 ## 许可
 
-代码：MIT（见 [LICENSE](LICENSE)）。第三方素材各自许可见 `plugin/ui/assets/ATTRIBUTION.md`。
+本子项目原创代码：MIT（见 [LICENSE](LICENSE)）。第三方素材各自许可见 `plugin/ui/assets/ATTRIBUTION.md`。
+
+**注意**：宿主橘瓣基于 **GNU AGPL v3**。`host-patch/` 下的 `FilesPicker.kt` 与 `.patch` 是宿主 AGPL 源文件的衍生，仍受 AGPL-3.0 约束，不适用 MIT；把插件与宿主一起分发或编译时，组合作品需遵循 AGPL-3.0。
