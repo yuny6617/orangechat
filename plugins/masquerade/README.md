@@ -9,7 +9,7 @@
 
 | 形态 | 产物 | 用途 |
 |---|---|---|
-| 橘瓣插件 | `dist/orangechat-masquerade-1.0.0.zip` | 装进 App，出现在聊天页加号面板，有专属 WebView UI |
+| 橘瓣插件 | `dist/orangechat-masquerade-1.2.0.zip` | 装进 App，出现在聊天页加号面板，有专属 WebView UI |
 | MCP server | `mcp/server.mjs` | stdio JSON-RPC，让任意 MCP 客户端的 LLM 直接当舞伴 |
 | 宿主补丁 | `host-patch/FilesPicker.kt.patch` | 只改 1 个文件 +33 行，把入口放到「语音通话 / 视频通话 / 红包 / 转账」旁边 |
 
@@ -24,10 +24,10 @@
 > 而宿主 `PluginScanner.findManifest()` 只查**根目录和一级子目录**，
 > 导入必然报 **「导入失败: 找不到 manifest.json」**。
 
-**唯一可导入的文件**：`dist/orangechat-masquerade-1.0.0.zip`
+**唯一可导入的文件**：`dist/orangechat-masquerade-1.2.0.zip`
 
-- 一键下载（已实测返回 `application/zip`、135415 字节）：
-  <https://raw.githubusercontent.com/yuny6617/orangechat/feature/masquerade-integration/plugins/masquerade/dist/orangechat-masquerade-1.0.0.zip>
+- 一键下载（本地产物 169109 字节，`Content-Type: application/zip`）：
+  <https://raw.githubusercontent.com/yuny6617/orangechat/feature/masquerade-integration/plugins/masquerade/dist/orangechat-masquerade-1.2.0.zip>
 - 或在仓库文件列表进入 `plugins/masquerade/dist/`，点该 `.zip` → `View raw` / `Download`；**不要**点页面顶部的 `Code → Download ZIP`
 - 或直接使用对话中提供的附件卡片保存
 
@@ -49,13 +49,13 @@
 
 ```bash
 node scripts/build.mjs
-# → dist/orangechat-masquerade-1.0.0.zip
+# → dist/orangechat-masquerade-1.2.0.zip
 ```
 
 零第三方依赖，只需要 Node ≥ 18。构建脚本自带 CRC 回读校验，也可用 Python 交叉验证：
 
 ```bash
-python -c "import zipfile; z=zipfile.ZipFile('dist/orangechat-masquerade-1.0.0.zip'); print(z.testzip(), len(z.namelist()))"
+python -c "import zipfile; z=zipfile.ZipFile('dist/orangechat-masquerade-1.2.0.zip'); print(z.testzip(), len(z.namelist()))"
 ```
 
 ### 2. 让入口出现在聊天页加号里（可选补丁）
@@ -83,6 +83,16 @@ node mcp/server.mjs
 
 ---
 
+## 先配置模型（唯一入口在宿主）
+
+到橘瓣 **设置 → 插件管理 → 假面舞会** 填写 `模型 API Key`、`接口地址`、`模型 ID`，或选好 `备用模型`，保存后重新打开插件页。插件页「模型接入」只**只读展示状态**，不提供第二套配置，避免改了这边、那边还是旧值。
+
+剧中台词与落幕压缩**共用这一个模型通道**（不额外引入第二个模型），仅 HTTPS + 域名白名单，密钥由宿主密码字段保存、永不回显。
+
+> **没配置模型会怎样**：请柬仍能送进聊天、前端助手仍能应邀（这一步不依赖插件模型），但 `roleplay_turn` 会硬拦截并返回 `MODEL_NOT_CONFIGURED`，**不会生成任何剧中台词**，也不会编造「牛头不对马嘴」的回复。落幕压缩会明确降级标注为「本地摘录」，而不是假装是模型压的。
+
+---
+
 ## 一场假面时刻的流程
 
 ```
@@ -91,29 +101,35 @@ idle ──masquerade_invite──▶ invited ──masquerade_accept──▶ a
                               └── 未应邀就收回：cancelled（不写记忆、不发聊天卡）      └── 可再开一场
 ```
 
-1. **递请柬**：选一张角色卡、写开场场景和自己戴的面具 → `invited`。
-2. **等应邀**：页面用 `Bridge.callAI` 只生成一句应邀台词（不承载角色扮演主循环）。
-3. **启幕**：`masquerade_accept` → `active`。此时把一张「【假面时刻 · 启幕】」专属卡片送进主聊天上下文，并附一次性说明。
-4. **剧中**：`roleplay_turn` 的每句台词只写插件内部 `dataStore` 的 `mb:transcript:*`，**不进主聊天历史、不写长期记忆**。
-5. **落幕**：`masquerade_end` 生成落幕说明，四条通道同时生效（见下）。
+1. **递请柬**：选一张角色卡、写开场场景和自己戴的面具 → `invited`。请柬作为可见消息经 `Bridge.sendChatMessage` 发进主聊天（宿主内部以 `answer=true` 提交，会触发一次助手回复），**前端对话框里的助手就在那里应邀**；也可以在聊天里直接对助手说「我们玩一场假面舞会吧」，它会调用 `masquerade_invite` 工具应邀（由 `promptTemplate` 引导）。
+2. **启幕**：`masquerade_accept` → `active`，把「【假面时刻 · 启幕】」卡片送进主聊天，并附一次性说明。
+3. **剧中**：`roleplay_turn` 的每句台词只写插件内部 `dataStore` 的 `mb:transcript:*`，**不进主聊天历史、不写长期记忆**。
+4. **落幕**：`masquerade_end` 用内置模型把整场戏压成一段**压缩概要**，作为落幕卡的**可见文本**送进助手最新有对话的会话；同时写档案、写一条游戏记忆，四条通道同时生效（见下）。
 
 ### 落幕后助手为什么一定知道「刚才是游戏」
 
 | 通道 | 内容 | 生效范围 |
 |---|---|---|
-| 主聊天落幕卡 | `【假面时刻 · 落幕】…` | 用户可见 |
+| 主聊天落幕卡（可见文本） | `【假面时刻 · 落幕】` + **压缩概要** + 「这是虚构游戏」标注 | **永久写入会话历史**，后续对话可见 |
 | `transientSystemPrompt` | 完整落幕说明，经 `Bridge.sendChatMessage(id, text, hiddenContext)` 注入 | 本轮请求 |
 | `memoryBank.save` | 同一份落幕说明，整场只写 **1 条** | 长期 |
-| `promptTemplate` | 「假面舞会是游戏；落幕后不要把剧中设定当真实事实；平时仍是真实关系」 | 每次对话（需 `inject_as_prompt=true`，默认开启） |
+| `promptTemplate` | 解释落幕卡里的概要只是虚构游戏剧情，不要当真实事实 | 每次对话（需 `inject_as_prompt=true`，默认开启） |
+
+宿主 `sendChatMessage` 的可见文本会永久落进该会话历史，而 `hiddenContext` 只作用本轮，所以**压缩概要必须放在可见文本里**才能真正进入助手上下文。落幕卡只放概要、绝不放逐字台词，并自带 **「不是真实发生的事」「完整台词不进入本对话」** 标注。会话 ID 由 `listConversations()` 取 `messageCount > 0` 且 `updateAt` 最新的一条（宿主不把 `conversationId` 传进 WebView）。
 
 落幕说明明确包含三句关键语义：**「角色扮演游戏」**、**「不是真实发生的事」**、**「平时依旧是原本的真实情感关系」**，并要求之后不沿用剧中人设、不把剧情当真实经历。
+
+### 演绎档案
+
+每场落幕都会把完整逐轮台词、压缩概要、压缩来源与落幕说明存进插件私有 `dataStore`（最多 20 场）。插件页第 4 个 tab「演绎档案」可列表回看、导出 JSON、二次确认删除。档案**不进主聊天、不写长期记忆**，列表摘要也不含逐字台词。
 
 ---
 
 ## 内置能力
 
 - **角色卡**（参考 Mufy）：身份、性格、小剧场 / 场景、开场白、世界观、样例对话、边界、标签、可见性。内置 3 张示例卡，支持增删改查与 JSON 导入导出。
-- **模型接入**：`api_base`（OpenAI 兼容，到 `/v1`）、`api_key`（宿主密码字段保存，页面不回显）、`model_id`、`chat_model`、`max_turns`。仅 HTTPS + 域名白名单。
+- **模型接入**：`api_base`（OpenAI 兼容，到 `/v1`）、`api_key`、`model_id`、`chat_model`、`max_turns`，全部在宿主插件详情页配置。仅 HTTPS + 域名白名单；`get_model_config` 只读脱敏。
+- **落幕压缩 + 演绎档案**：压缩用插件内置的那个模型；模型不可用时降级本地摘录并明确标注。
 - **少女感专属 UI**：玫瑰粉 / 香槟金 / 象牙白 / 深莓色，本地打包的 CC0 / MIT / OFL 素材与自绘金色假面，运行时不请求外部 CDN。来源见 [plugin/ui/assets/ATTRIBUTION.md](plugin/ui/assets/ATTRIBUTION.md)。
 
 ---
@@ -121,8 +137,8 @@ idle ──masquerade_invite──▶ invited ──masquerade_accept──▶ a
 ## 验证
 
 ```bash
-node --test tests/*.test.mjs     # 23 个用例：状态机、隔离、密钥、XSS、契约、MCP 冒烟
-node scripts/build.mjs           # ZIP 构建 + CRC 回读
+node --test tests/*.test.mjs     # 41 个用例：状态机、隔离、密钥、XSS、契约、MCP、压缩、档案
+node scripts/build.mjs           # ZIP 构建 + CRC 回读（可复现）
 node audit/audit.mjs             # 三轮安全审计 / 代码审查，生成 audit/AUDIT_REPORT.md
 node scripts/verify-package.mjs  # 宿主同款流式导入自检；也可传入任意 ZIP 路径排障
 npm run verify                   # 以上全部

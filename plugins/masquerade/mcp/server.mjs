@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAIN = path.join(ROOT, 'plugin', 'main.js');
-const SERVER_INFO = { name: 'orangechat-masquerade', version: '1.0.0' };
+const SERVER_INFO = { name: 'orangechat-masquerade', version: '1.2.0' };
 const PROTOCOL = '2024-11-05';
 const MAX_LINE = 1024 * 1024;
 
@@ -80,6 +80,35 @@ vm.runInContext(fs.readFileSync(MAIN, 'utf8'), sandbox, { filename: 'main.js' })
 
 const api = Object.assign({}, sandbox.exports);
 
+/*
+ * MCP 形态由客户端 LLM 亲自扮演舞伴，不需要插件侧 API Key。
+ * 静态覆写配置状态，避免把「未配置模型」的宿主指引误报给 MCP 客户端。
+ */
+api.get_model_config = function () {
+  return {
+    success: true,
+    configured: true,
+    modelStatus: 'mcp-client',
+    isDemo: false,
+    configSource: 'mcp-client',
+    configNote: 'MCP server 不联网、不读取 API Key；剧中台词由客户端 LLM 按 stagePrompt 生成，落幕压缩为本地摘录。',
+    setupHint: null,
+    error: null,
+  };
+};
+
+/* MCP 不需要插件侧模型：去掉宿主「未配置模型」的告警，避免误报。 */
+const baseAccept = api.masquerade_accept;
+api.masquerade_accept = function (params) {
+  const r = baseAccept(params);
+  if (r && r.success) {
+    r.modelStatus = 'mcp-client';
+    r.modelWarning = null;
+    r.modelNote = 'MCP 客户端 LLM 就是舞伴，不需要插件侧模型配置。';
+  }
+  return r;
+};
+
 /* MCP 专属：记录用户台词，把剧中提示词交给客户端 LLM，由它来演。 */
 api.roleplay_turn = function (params) {
   const p = params || {};
@@ -125,13 +154,16 @@ const TOOLS = [
   { name: 'update_role_card', description: '按 ID 更新角色卡', inputSchema: schema({ card_id: S('角色卡 ID'), card: O('角色卡对象') }, ['card_id', 'card']) },
   { name: 'delete_role_card', description: '删除角色卡', inputSchema: schema({ card_id: S('角色卡 ID') }, ['card_id']) },
   { name: 'masquerade_status', description: '查询当前假面时刻状态', inputSchema: schema({}) },
-  { name: 'masquerade_invite', description: '递出假面请柬，进入 invited', inputSchema: schema({ card_id: S('角色卡 ID'), scene: S('开场情境'), user_mask: S('用户戴的面具') }, ['card_id']) },
+  { name: 'masquerade_invite', description: '递出假面请柬，进入 invited；card_id 可省略（自动用内置示例卡）', inputSchema: schema({ card_id: S('角色卡 ID'), scene: S('开场情境'), user_mask: S('用户戴的面具'), source: S('page 或 chat') }) },
   { name: 'masquerade_accept', description: '助手应邀，启幕进入 active，返回专属舞台数据', inputSchema: schema({ assistant_reply: S('助手应邀台词') }) },
   { name: 'roleplay_context', description: '读取当前这场戏的剧中系统提示词与边界', inputSchema: schema({}) },
   { name: 'roleplay_turn', description: '记录用户台词，返回剧中提示词；由客户端 LLM 以角色身份回复', inputSchema: schema({ line: S('用户台词') }, ['line']) },
   { name: 'record_stage_line', description: '记录一条剧中台词（role=assistant 时推进轮次）', inputSchema: schema({ line: S('台词'), role: S('user 或 assistant') }, ['line']) },
-  { name: 'masquerade_end', description: '落幕：生成必须让助手知道「刚才是角色扮演游戏」的说明，并写入游戏记忆', inputSchema: schema({ reason: S('落幕原因') }) },
-  { name: 'get_model_config', description: '读取模型接入状态（脱敏）', inputSchema: schema({}) },
+  { name: 'masquerade_end', description: '落幕：生成「刚才是角色扮演游戏」的说明、写入游戏记忆，并用本地摘录压出剧情概要（MCP 形态不联网，不调用模型）并存档', inputSchema: schema({ reason: S('落幕原因') }) },
+  { name: 'get_model_config', description: '读取模型接入状态（脱敏、只读）', inputSchema: schema({}) },
+  { name: 'list_masquerade_archives', description: '列出已落幕的演绎档案摘要（最多 20 场）', inputSchema: schema({}) },
+  { name: 'get_masquerade_archive', description: '读取一场演绎的完整档案与逐轮台词', inputSchema: schema({ session_id: S('档案 session_id') }, ['session_id']) },
+  { name: 'delete_masquerade_archive', description: '删除一场演绎档案', inputSchema: schema({ session_id: S('档案 session_id') }, ['session_id']) },
 ];
 
 const RESOURCES = [

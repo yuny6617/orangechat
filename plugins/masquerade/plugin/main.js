@@ -25,12 +25,53 @@ var ALLOWED_HOSTS = [
   'api.x.ai', 'api.minimax.chat', 'api.hunyuan.cloud.tencent.com'
 ];
 
+/*
+ * 配置只有一个来源：宿主插件详情页渲染的 manifest.config。
+ * 宿主没有 setPluginConfig 桥接方法，插件页也不再提供第二套配置，
+ * 避免「宿主里改了、页面里旧值覆盖」这种两个配置源打架的问题。
+ */
+var MAX_ARCHIVES = 20;          /* 演绎档案最多保留场次，防止 dataStore 无限膨胀 */
+var ARCHIVE_PREFIX = PREFIX + 'archive:';
+var ARCHIVE_INDEX = PREFIX + 'archive:index';
+var MAX_COMPRESS_LINES = 40;   /* 压缩时最多喂给模型的台词条数 */
+var MAX_COMPRESSED = 600;      /* 压缩概要最大字数 */
+
 var idSeq = 0;
 
 function cfg() { return (typeof config === 'undefined' || !config) ? {} : config; }
 function ds() { return (typeof dataStore === 'undefined' || !dataStore) ? null : dataStore; }
 function mb() { return (typeof memoryBank === 'undefined' || !memoryBank) ? null : memoryBank; }
 function log(msg) { if (typeof console !== 'undefined' && console.warn) console.warn('[masquerade] ' + msg); }
+
+/*
+ * 模型可用性三态：
+ *   configured — 宿主配置里有可用凭据，剧中台词与落幕压缩都走插件内置模型通道
+ *   demo       — 浏览器交互预览（boot.js 显式注入 demo:true），走本地演示剧本
+ *   none       — 未配置模型：绝不编造回复、绝不假装压缩，硬拦截并给出配置指引
+ */
+function modelAvailability() {
+  var c = cfg();
+  /*
+   * demo 只在浏览器预览垫片里成立：宿主 QuickJS 沙箱没有 window，
+   * 且 config 由宿主按 manifest.config 注入、不含 demo 字段，双重门槛无法被伪造。
+   */
+  if (c.demo === true && !c.api_key && typeof window !== 'undefined') return 'demo';
+  var cred = resolveCredentials();
+  return cred.key ? 'configured' : 'none';
+}
+
+/*
+ * 预览演示剧本：明确标注「非真实模型」，并引用用户这一轮的话，
+ * 不再用固定 6 句轮转造成牛头不对马嘴的观感。
+ */
+function demoRoleplayReply(line) {
+  var quote = sanitizeText(line, 40);
+  return '（演示剧本 · 不是真实模型回复）你刚才说「' + quote + '」——' +
+    '我记下了。预览页不联网、不调用模型；要在橘瓣里真正演出，请在宿主插件详情页配置模型。';
+}
+
+var MODEL_SETUP_HINT = '尚未配置模型：请到「设置 → 插件管理 → 假面舞会」填写模型 API Key（或选好备用模型），' +
+  '保存后重新打开插件。未配置时不会生成任何剧中台词，也不会假装压缩概要。';
 
 function nowIso() {
   try { return new Date().toISOString(); } catch (e) { return '1970-01-01T00:00:00.000Z'; }
@@ -252,6 +293,48 @@ function maxTurns() {
   return Math.floor(n);
 }
 
+/* ---------- 主聊天请柬：邀请必须发生在对话框里 ---------- */
+
+function defaultCard() {
+  var ids = ensureSeedCards();
+  for (var i = 0; i < ids.length; i++) {
+    var c = readCard(ids[i]);
+    if (c) return c;
+  }
+  return null;
+}
+
+function buildInviteCard(session) {
+  var c = session.cardSnapshot || {};
+  return '【假面时刻 · 请柬】🎭\n' +
+    '今夜的假面舞会，我留了一个位子。\n' +
+    '舞台：' + sanitizeText(session.scene || '', 200) + '\n' +
+    '想邀你以「' + sanitizeText(c.name || '假面舞伴', 60) + '」的身份赴约；我戴上「' +
+    sanitizeText(session.userMask || '', 60) + '」这副面具。\n' +
+    '说好了：这只是我们约好一起演的一场戏，天亮时面具归还，我们还是我们。\n\n' +
+    '愿意陪我跳这一支吗？';
+}
+
+function buildInviteNote(session) {
+  var c = session.cardSnapshot || {};
+  return '【假面时刻 · 请柬说明｜仅本轮有效】\n' +
+    '用户在聊天里递来一张「假面舞会」请柬，邀请你进入一段共同约定的角色扮演游戏。' +
+    '这不是真实生活，不是关系变化，也不改变你与用户平时的真实情感关系。\n' +
+    '请用一句温柔的话应邀，表示你愿意一起玩这场游戏；可以轻轻点一下舞台身份「' +
+    sanitizeText(c.name || '假面舞伴', 60) + '」，但不要开始长篇角色扮演，不要把剧中身份带进后续对话。\n' +
+    '用户确认开始后，请调用 masquerade_accept 工具，并把返回的 chatCardText 原样输出给用户。';
+}
+
+var INVITE_ASSISTANT_INSTRUCTION = '这张请柬邀请你参加一场共同约定的角色扮演游戏（不是真实关系变化）。' +
+  '请用一句温柔的话应邀，表示愿意一起玩；不要解释规则、不要开始长篇角色扮演、不要沿用剧中身份。' +
+  '若用户确认开始，调用 masquerade_accept 并把返回的 chatCardText 原样输出给用户。';
+
+var ACCEPT_ASSISTANT_INSTRUCTION = '请把返回的 chatCardText 原样输出给用户（不要改写），' +
+  '再用一句你原本语气的话表示舞台已备好。不要在当前聊天里开始角色扮演，剧中台词只在专属舞台里进行。';
+
+var END_ASSISTANT_INSTRUCTION = '请把返回的 chatCardText 原样输出给用户。' +
+  '这场戏已经结束，之后请用原本的真实关系与语气对话，不要沿用剧中人设，不要把剧情当成真实发生过的事。';
+
 /* ---------- 提示词 / 落幕说明 ---------- */
 
 function buildStageSystemPrompt(session) {
@@ -313,6 +396,21 @@ function buildChatCard(kind, session, extra) {
     '我还是你认识的那个我。';
 }
 
+/*
+ * 落幕卡 = 可见文本，会被 Bridge.sendChatMessage 永久写进会话历史。
+ * 因此这里只放「压缩概要」，绝不倒完整台词；且概要必须自带「这是虚构游戏」的标注，
+ * 避免后续对话把它当成真实经历。压缩模型就是插件内置的同一个模型通道。
+ */
+function buildClosingChatCard(session, compressed) {
+  var by = compressed.compressedBy === 'model' ? '插件内置模型压缩' : '本地摘录（模型未配置/不可用）';
+  return '【假面时刻 · 落幕】🎭\n' +
+    '面具摘下了，灯也亮了。刚才那支舞，是我们一起演的一场戏。\n\n' +
+    '【本场剧情概要 · ' + by + '】\n' + compressed.summary + '\n\n' +
+    '⚠️ 以上只是一段虚构角色扮演游戏的剧情概要，不是真实发生的事，' +
+    '剧中的身份、称呼与承诺都不代表任何真实关系变化；完整台词只保存在插件「演绎档案」里，不进入本对话。\n' +
+    '我还是你认识的那个我，之后请按我们原本的真实关系与语气继续聊。';
+}
+
 function transcriptOf(sessionId) {
   var t = storeGet(PREFIX + 'transcript:' + sessionId, []);
   return (t && typeof t.length === 'number') ? t : [];
@@ -333,6 +431,7 @@ function resolveCredentials() {
   var base = sanitizeText(c.api_base, 200) || 'https://api.openai.com/v1';
   var key = sanitizeText(c.api_key, 300);
   var model = sanitizeText(c.model_id, 120) || 'gpt-4o-mini';
+  /* 备用模型来自宿主模型选择器（type: model），同样是宿主配置，不是页面私设。 */
   var m = c.chat_model;
   if (!key && m && typeof m === 'object' && m.apiKey) {
     key = sanitizeText(m.apiKey, 300);
@@ -347,20 +446,23 @@ function hostOf(base) {
   return rest.split('/')[0].split(':')[0].toLowerCase();
 }
 
-function callRoleplayModel(systemPrompt, history, line) {
+/*
+ * 唯一的模型调用出口：剧中台词、落幕压缩都走这里，共用同一份凭据、
+ * HTTPS 校验、域名白名单与响应解析。不额外引入第二个模型。
+ */
+function callModel(systemPrompt, turns, maxTokens) {
   var cred = resolveCredentials();
-  if (!cred.key) return fail('NO_API_KEY', '尚未接入模型：请在「模型接入」里填写 API Key，或选择宿主的备用模型。');
+  if (!cred.key) return fail('NO_API_KEY', MODEL_SETUP_HINT);
   if (!/^https:\/\//.test(cred.base)) return fail('INSECURE_BASE_URL', '模型接口必须使用 HTTPS，避免密钥明文外泄。');
   if (ALLOWED_HOSTS.indexOf(hostOf(cred.base)) < 0) {
     return fail('HOST_NOT_ALLOWED', '域名不在插件网络白名单内；请把域名加入 manifest.allowedHosts 后重新导入插件。');
   }
   var messages = [{ role: 'system', content: systemPrompt }];
-  var start = history.length > 12 ? history.length - 12 : 0;
-  for (var i = start; i < history.length; i++) {
-    messages.push({ role: history[i].role === 'user' ? 'user' : 'assistant', content: history[i].text });
+  for (var i = 0; i < turns.length; i++) {
+    messages.push({ role: turns[i].role === 'user' ? 'user' : 'assistant',
+      content: sanitizeText(turns[i].content, 1200) });
   }
-  messages.push({ role: 'user', content: sanitizeText(line, 1200) });
-  var body = JSON.stringify({ model: cred.model, messages: messages, temperature: 0.85, max_tokens: 500 });
+  var body = JSON.stringify({ model: cred.model, messages: messages, temperature: 0.85, max_tokens: maxTokens });
   var response;
   try {
     response = fetch(cred.base.replace(/\/+$/, '') + '/chat/completions', {
@@ -380,6 +482,16 @@ function callRoleplayModel(systemPrompt, history, line) {
     payload.choices[0].message.content;
   if (!text) return fail('EMPTY_REPLY', '模型没有返回内容。');
   return ok(sanitizeText(text, 1200));
+}
+
+function callRoleplayModel(systemPrompt, history, line) {
+  var turns = [];
+  var start = history.length > 12 ? history.length - 12 : 0;
+  for (var i = start; i < history.length; i++) {
+    turns.push({ role: history[i].role === 'user' ? 'user' : 'assistant', content: history[i].text });
+  }
+  turns.push({ role: 'user', content: line });
+  return callModel(systemPrompt, turns, 500);
 }
 
 /* ---------- 工具实现 ---------- */
@@ -440,18 +552,169 @@ function delete_role_card(params) {
   return { success: true, deleted: id, error: null };
 }
 
+/* 只读：宿主插件详情页是唯一配置入口，这里只展示状态并给出配置指引。 */
 function get_model_config(params) {
   var c = resolveCredentials();
+  var host = cfg();
+  var inject = host.inject_as_prompt;
+  var availability = modelAvailability();
   return {
     success: true,
     configured: !!c.key,
     hasKey: !!c.key,
+    modelStatus: availability,
+    isDemo: availability === 'demo',
     baseUrl: c.base,
     modelId: c.model,
+    maxTurns: maxTurns(),
+    injectAsPrompt: inject === true || inject === 'true',
+    configSource: 'host',
+    setupHint: availability === 'none' ? MODEL_SETUP_HINT : null,
     allowedHosts: ALLOWED_HOSTS.slice(0),
-    /* apiKey 永不返回 */
+    /* apiKey 永不返回，也绝不写日志 / 角色卡 / 档案 / 导出文件 */
     error: null
   };
+}
+
+/* ---------- 落幕压缩：用插件内置的那个模型把整场戏压成概要 ---------- */
+
+var COMPRESS_SYSTEM_PROMPT = '你是「假面舞会」剧情归档助手。用户会给你一场角色扮演游戏的完整台词记录。\n' +
+  '请把它压缩成一段不超过 300 字的中文剧情概要：写清舞台设定、双方身份、主要情节走向与结局，\n' +
+  '保留关键情节但不要逐句复述台词，不要添加原文没有的情节，不要评价，不要写标题或条目符号。\n' +
+  '必须记住：这只是一场虚构的角色扮演游戏，不是真实发生的事；概要里不得出现「我们真的」「现实中的你」这类会把剧情当真的措辞。';
+
+/* 无模型时的确定性兜底：只做摘录，不假装是模型压缩的。 */
+function localCompressedSummary(session, transcript) {
+  var c = session.cardSnapshot || {};
+  var bits = [];
+  for (var i = 0; i < transcript.length && bits.length < 3; i++) {
+    var t = sanitizeText(transcript[i].text, 30);
+    if (t) bits.push((transcript[i].role === 'user' ? '来客：' : '舞伴：') + t);
+  }
+  var raw = '舞台「' + sanitizeText(session.scene || '', 60) + '」，你以「' +
+    sanitizeText(c.name || '假面舞伴', 40) + '」的身份赴约，共演出 ' + session.turns + ' 轮' +
+    (bits.length ? '；片段：' + bits.join(' / ') : '') + '。';
+  return { summary: raw.substring(0, MAX_COMPRESSED), compressedBy: 'local', degraded: true };
+}
+
+/*
+ * 压缩与剧中台词共用同一个模型通道（resolveCredentials + fetch + 白名单校验），
+ * 即「插件内置的那个模型」，不额外引入第二个模型，也不调用宿主 callAI。
+ */
+function compressTranscript(session, transcript) {
+  if (!transcript.length) {
+    return { summary: shortSummary(session, transcript), compressedBy: 'local', degraded: true, error: 'EMPTY_TRANSCRIPT' };
+  }
+  if (modelAvailability() !== 'configured') {
+    return localCompressedSummary(session, transcript);
+  }
+  var lines = [];
+  var start = transcript.length > MAX_COMPRESS_LINES ? transcript.length - MAX_COMPRESS_LINES : 0;
+  for (var i = start; i < transcript.length; i++) {
+    lines.push((transcript[i].role === 'user' ? '来客' : '舞伴') + '：' +
+      sanitizeText(transcript[i].text, 300));
+  }
+  var result = callModel(COMPRESS_SYSTEM_PROMPT,
+    [{ role: 'user', content: '这场角色扮演游戏的舞台设定：' + sanitizeText(session.scene || '', 200) +
+      '\n\n台词记录：\n' + lines.join('\n') }], 600);
+  if (!result.success) {
+    var fallback = localCompressedSummary(session, transcript);
+    fallback.error = result.error;
+    return fallback;
+  }
+  var clean = sanitizeText(result.data, MAX_COMPRESSED);
+  if (!clean) return localCompressedSummary(session, transcript);
+  return { summary: clean, compressedBy: 'model', degraded: false, error: null };
+}
+
+/* ---------- 演绎档案：落幕后仍可回看整场记录 ---------- */
+
+function archiveIndex() {
+  var idx = storeGet(ARCHIVE_INDEX, []);
+  return (idx && typeof idx.length === 'number') ? idx : [];
+}
+
+var ARCHIVE_ID_RE = /^[A-Za-z0-9_]{1,80}$/;
+function validArchiveId(id) { return typeof id === 'string' && ARCHIVE_ID_RE.test(id); }
+/*
+ * 严格 ID：原始值必须是字符串；正则自带 1-80 长度与字符集限制，
+ * 因此超长、路径穿越、带坏 toString 的对象、数字都会明确拒绝，不静默转换或截断。
+ */
+function parseArchiveId(params) {
+  var raw = asObject(params).session_id;
+  return (typeof raw === 'string' && ARCHIVE_ID_RE.test(raw)) ? raw : null;
+}
+
+function saveArchive(session, transcript, compressed, closingNote) {
+  var idx = archiveIndex();
+  var record = {
+    sessionId: session.id,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    endReason: session.endReason || '',
+    scene: sanitizeText(session.scene || '', 200),
+    userMask: sanitizeText(session.userMask || '', 60),
+    partner: sanitizeText((session.cardSnapshot || {}).name || '', 60),
+    partnerEmoji: sanitizeText((session.cardSnapshot || {}).emoji || '', 8),
+    turns: session.turns,
+    isGame: true,
+    compressedSummary: compressed.summary,
+    compressedBy: compressed.compressedBy,
+    compressedDegraded: compressed.degraded,
+    closingNote: closingNote,
+    transcript: transcript.slice(-MAX_TRANSCRIPT)
+  };
+  storeSet(ARCHIVE_PREFIX + session.id, record);
+  var out = [session.id];
+  for (var i = 0; i < idx.length && out.length < MAX_ARCHIVES; i++) {
+    if (idx[i] !== session.id) out.push(idx[i]);
+  }
+  /* 凡是没进入新索引的旧档案，连数据一起删，避免私有存储无限增长。 */
+  for (var j = 0; j < idx.length; j++) {
+    if (validArchiveId(idx[j]) && out.indexOf(idx[j]) < 0) storeDel(ARCHIVE_PREFIX + idx[j]);
+  }
+  storeSet(ARCHIVE_INDEX, out);
+  return record;
+}
+
+function list_masquerade_archives(params) {
+  var idx = archiveIndex();
+  var list = [];
+  for (var i = 0; i < idx.length; i++) {
+    if (!validArchiveId(idx[i])) continue;
+    var r = storeGet(ARCHIVE_PREFIX + idx[i], null);
+    if (!r || typeof r !== 'object') continue;
+    list.push({
+      sessionId: r.sessionId, startedAt: r.startedAt, endedAt: r.endedAt,
+      partner: r.partner, partnerEmoji: r.partnerEmoji, scene: r.scene,
+      turns: r.turns, compressedSummary: r.compressedSummary,
+      compressedBy: r.compressedBy, isGame: true
+    });
+  }
+  return { success: true, total: list.length, archives: list, error: null };
+}
+
+function get_masquerade_archive(params) {
+  var id = parseArchiveId(params);
+  if (!id) return fail('BAD_ID', '档案编号不合法。');
+  var r = storeGet(ARCHIVE_PREFIX + id, null);
+  if (!r || typeof r !== 'object') return fail('NOT_FOUND', '找不到这场演绎记录。');
+  return {
+    success: true, archive: r, isGame: true,
+    notice: '这是一场角色扮演游戏的记录，剧中身份与情节都不是真实发生的事。',
+    error: null
+  };
+}
+
+function delete_masquerade_archive(params) {
+  var id = parseArchiveId(params);
+  if (!id) return fail('BAD_ID', '档案编号不合法。');
+  var idx = archiveIndex();
+  var out = [];
+  for (var i = 0; i < idx.length; i++) if (idx[i] !== id) out.push(idx[i]);
+  storeDel(ARCHIVE_PREFIX + id);
+  storeSet(ARCHIVE_INDEX, out);
+  return { success: true, deleted: id, error: null };
 }
 
 function masquerade_status(params) {
@@ -477,13 +740,15 @@ function masquerade_invite(params) {
   var p = asObject(params);
   var next = nextStatus(currentStatus(), 'invite');
   if (!next) return fail('BAD_STATE', '已经有一场进行中的假面时刻，请先落幕。');
+  /* 主聊天助手直接调用工具时不知道角色卡 ID：不传 card_id 就自动用内置示例卡。 */
   var cardId = sanitizeText(p.card_id, 80);
-  var card = readCard(cardId);
-  if (!card) return fail('NOT_FOUND', '请先选择或创建一张角色卡。');
+  var card = cardId ? readCard(cardId) : defaultCard();
+  if (!card) return fail('NOT_FOUND', '找不到角色卡；请先创建一张，或不传 card_id 使用内置示例卡。');
+  var source = sanitizeText(p.source, 20) === 'chat' ? 'chat' : 'page';
   var session = {
     id: newId('mask'),
     status: next,
-    cardId: cardId,
+    cardId: cardId || card.id,
     cardSnapshot: card,
     scene: sanitizeText(p.scene, 200) || card.scenario || '午夜的玻璃花房，灯刚好熄了一半。',
     userMask: sanitizeText(p.user_mask, 60) || '一位不愿透露姓名的来客',
@@ -503,6 +768,12 @@ function masquerade_invite(params) {
     success: true, sessionId: session.id, status: next,
     partner: { name: card.name, emoji: card.emoji, opening: card.opening },
     invitation: invitation,
+    /* 页面把下面三样送进主聊天，助手才真的在对话框里被邀请并回应。 */
+    chatInviteCard: buildInviteCard(session),
+    chatHiddenContext: buildInviteNote(session),
+    assistantInstruction: INVITE_ASSISTANT_INSTRUCTION,
+    chatSource: source,
+    isGame: true,
     rules: '剧中身份与承诺都不是真实关系；随时可以摘下面具。',
     error: null
   };
@@ -517,11 +788,15 @@ function masquerade_accept(params) {
   s.status = 'active';
   s.acceptedAt = nowIso();
   s.assistantReply = sanitizeText(p.assistant_reply, 300);
+  s.modelStatus = modelAvailability();
   storeSet(PREFIX + 'session', s);
   var opening = s.cardSnapshot.opening || s.assistantReply || '……我应邀。这一支，与你跳。';
   appendTranscript(s.id, 'assistant', opening);
   return {
     success: true, status: 'active', sessionId: s.id,
+    /* 邀请不依赖插件模型；但没配模型时剧中台词会被硬拦截，页面要提前警示。 */
+    modelStatus: s.modelStatus,
+    modelWarning: s.modelStatus === 'none' ? MODEL_SETUP_HINT : null,
     stage: {
       kind: 'masquerade_stage',
       title: '假面时刻 · 已启幕',
@@ -534,6 +809,7 @@ function masquerade_accept(params) {
     },
     chatCardText: buildChatCard('open', s, s.assistantReply),
     chatHiddenContext: buildStageOpeningNote(s),
+    assistantInstruction: ACCEPT_ASSISTANT_INSTRUCTION,
     error: null
   };
 }
@@ -557,12 +833,28 @@ function roleplay_turn(params) {
   var line = sanitizeText(p.line, 1200);
   if (!line) return fail('EMPTY_LINE', '这一轮还没有台词。');
   if (s.turns >= maxTurns()) return fail('MAX_TURNS', '这一场已经到最大轮次，该落幕了。');
+
+  /*
+   * 没配模型时绝不编造回复：旧版在预览垫片里塞了伪 api_key，导致 SCRIPTED
+   * 固定剧本轮转，用户说什么都答非所问。这里按可用性三态硬拦截。
+   */
+  var availability = modelAvailability();
+  if (availability === 'none') {
+    return {
+      success: false, error: 'MODEL_NOT_CONFIGURED', message: MODEL_SETUP_HINT,
+      status: 'active', turns: s.turns, isGame: true, modelStatus: 'none'
+    };
+  }
+
   var history = appendTranscript(s.id, 'user', line);
-  var result = callRoleplayModel(buildStageSystemPrompt(s), history.slice(0, history.length - 1), line);
+  var isDemo = availability === 'demo';
+  var result = isDemo
+    ? ok(demoRoleplayReply(line))
+    : callRoleplayModel(buildStageSystemPrompt(s), history.slice(0, history.length - 1), line);
   if (!result.success) {
     return {
       success: false, error: result.error, message: result.message,
-      status: 'active', turns: s.turns, isGame: true
+      status: 'active', turns: s.turns, isGame: true, modelStatus: availability
     };
   }
   appendTranscript(s.id, 'assistant', result.data);
@@ -570,7 +862,9 @@ function roleplay_turn(params) {
   storeSet(PREFIX + 'session', s);
   return {
     success: true, reply: result.data, turn: s.turns,
-    maxTurns: maxTurns(), isGame: true, error: null
+    maxTurns: maxTurns(), isGame: true, modelStatus: availability,
+    /* demo 只在浏览器预览出现，明确标注，避免被误当成真实模型回复 */
+    isDemo: isDemo, error: null
   };
 }
 
@@ -596,7 +890,12 @@ function masquerade_end(params) {
   var closingNote = buildClosingNote(s, transcript);
   s.contextNote = closingNote;
   s.summary = shortSummary(s, transcript);
+  /* 压缩用插件内置的那个模型；没配置时降级为本地摘录并明确标注，绝不假装有模型。 */
+  var compressed = compressTranscript(s, transcript);
+  s.compressedSummary = compressed.summary;
+  s.compressedBy = compressed.compressedBy;
   storeSet(PREFIX + 'session', s);
+  var archive = saveArchive(s, transcript, compressed, closingNote);
   var bank = mb();
   var memoryWritten = false;
   if (bank && bank.save) {
@@ -609,11 +908,19 @@ function masquerade_end(params) {
     success: true, status: 'ended', sessionId: s.id,
     summary: s.summary,
     closingNote: closingNote,
-    chatCardText: buildChatCard('close', s, s.summary),
+    compressedSummary: compressed.summary,
+    compressedBy: compressed.compressedBy,
+    compressedDegraded: compressed.degraded,
+    archiveId: archive.sessionId,
+    archiveCount: archiveIndex().length,
+    /* 可见文本：只有压缩概要进入对话历史，完整台词只在演绎档案里 */
+    chatCardText: buildClosingChatCard(s, compressed),
     chatHiddenContext: closingNote,
+    chatCardPurpose: 'latest_active_conversation',
+    assistantInstruction: END_ASSISTANT_INSTRUCTION,
     memoryWritten: memoryWritten,
     isGame: true,
-    /* 由页面负责：Bridge.sendChatMessage(conversationId, chatCardText, chatHiddenContext) */
+    /* 由页面负责：Bridge.sendChatMessage(最新有对话的 conversationId, chatCardText, chatHiddenContext) */
     error: null
   };
 }
@@ -624,6 +931,9 @@ exports.create_role_card = create_role_card;
 exports.update_role_card = update_role_card;
 exports.delete_role_card = delete_role_card;
 exports.get_model_config = get_model_config;
+exports.list_masquerade_archives = list_masquerade_archives;
+exports.get_masquerade_archive = get_masquerade_archive;
+exports.delete_masquerade_archive = delete_masquerade_archive;
 exports.masquerade_status = masquerade_status;
 exports.masquerade_invite = masquerade_invite;
 exports.masquerade_accept = masquerade_accept;

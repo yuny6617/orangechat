@@ -107,6 +107,10 @@ function selfTest() {
     ['innerHtmlSafe', detectors.innerHtmlSafe('grid.innerHTML = items.map(function (c) {\n  var safeHtml = esc(c.name);\n  return "<b>" + safeHtml + "</b>";\n}).join("");'), true],
     ['noExternalRefs', detectors.noExternalRefs('<script src="https://cdn.example.com/a.js"></script>'), false],
     ['noExternalRefs', detectors.noExternalRefs('<script src="app.js"></script>'), true],
+    /* 预览垫片里塞任何写死的伪密钥都必须被抓到（本轮真机反馈的根因）。 */
+    ['hardcodedSecret', detectors.hardcodedSecret("api_key: 'studio-demo-1234567890'"), false],
+    ['hardcodedSecret', detectors.hardcodedSecret('demo: true'), true],
+    ['es5Only', detectors.es5Only('var ARCHIVE_ID_RE = /^[A-Za-z0-9_]{1,80}$/;'), true],
   ];
   const bad = cases.filter(([name, actual, expected]) => actual !== expected);
   return {
@@ -195,7 +199,7 @@ const ROUND_1 = [
   }),
   check('R1-05', '权限声明最小化', () => {
     const p = [...manifest.permissions].sort().join(',');
-    return { ok: p === 'ai_chat,conversation_sync', detail: 'permissions = ' + p + '；未申请 provider_credentials' };
+    return { ok: p === 'conversation_sync', detail: 'permissions = ' + p + '；邀请改走主聊天后 ai_chat 已移除；未申请 provider_credentials' };
   }),
   check('R1-06', '剧中对话不污染长期记忆，落幕只写一条游戏声明', () => {
     const s = sandbox({ api_key: 'sk-abcdefghijklmnopqrstuvwxyz' });
@@ -263,6 +267,69 @@ const ROUND_1 = [
       detail: files.length + ' 个本地素材非空，许可覆盖 CC0 / MIT / OFL' +
         (missingTokens.length ? '；缺许可标识：' + missingTokens.join(', ') : '') +
         (emptyFiles.length ? '；空文件：' + emptyFiles.join(', ') : ''),
+    };
+  }),
+  check('R1-13', '配置只有一个来源：不存在第二套页面配置或内置预设', () => {
+    const src = mainSrc;
+    const boot = read('plugin/ui/boot.js');
+    const html = read('plugin/ui/index.html');
+    const ui = read('plugin/ui/app.js');
+    const leftovers = [/\bset_model_config\b/, /\blist_model_presets\b/, /\beffectiveConfig\b/,
+      /\bPROVIDER_PRESETS\b/, /\bOVERRIDABLE_KEYS\b/, /\bCONFIG_PREFIX\b/];
+    const hits = leftovers.filter((r) => r.test(src));
+    const formLeft = ['cfg-preset', 'cfg-base', 'cfg-key', 'btn-save-config', 'btn-clear-key']
+      .filter((id) => html.includes('id="' + id + '"'));
+    const fakeKey = /api_key\s*:/.test(boot);
+    const pageWrite = /\bset_model_config\b/.test(ui);
+    const declared = manifest.config.some((c) => c.name === 'provider_preset');
+    return {
+      ok: hits.length === 0 && formLeft.length === 0 && !fakeKey && !pageWrite && !declared,
+      detail: hits.length || formLeft.length || fakeKey || pageWrite || declared
+        ? '残留：' + [hits.length ? '覆盖层符号 x' + hits.length : '', formLeft.join(','),
+          fakeKey ? '伪 API Key' : '', pageWrite ? '页面写配置' : '', declared ? '预设下拉' : ''].filter(Boolean).join('；')
+        : '配置只由宿主 manifest.config 提供；预览垫片不注入任何密钥字段',
+    };
+  }),
+  check('R1-14', '未配置模型时硬拦截：零回复、零网络请求、压缩不假装成模型', () => {
+    const s = sandbox();
+    play(s.api);
+    const turn = s.api.roleplay_turn({ line: '你好' });
+    const end = s.api.masquerade_end({});
+    return {
+      ok: turn.success === false && turn.error === 'MODEL_NOT_CONFIGURED' && turn.reply === undefined &&
+        s.requests.length === 0 && end.compressedBy === 'local' && end.compressedDegraded === true &&
+        end.chatCardText.includes('本地摘录'),
+      detail: '无模型：剧中台词被拒、无网络请求；落幕概要标注为本地摘录而非模型压缩',
+    };
+  }),
+  check('R1-15', '落幕卡只含压缩概要，不把逐字台词倒进主聊天', () => {
+    const s = sandbox({ api_key: 'sk-abcdefghijklmnopqrstuvwxyz' });
+    play(s.api);
+    const secretLine = '只有舞台里才该出现的这句台词';
+    s.api.roleplay_turn({ line: secretLine });
+    const end = s.api.masquerade_end({});
+    const card = end.chatCardText;
+    return {
+      ok: card.includes('本场剧情概要') && !card.includes(secretLine) &&
+        card.includes('不是真实发生的事') && card.includes('不进入本对话') &&
+        end.chatHiddenContext === end.closingNote,
+      detail: '概要作为可见文本永久入会话史，但自带虚构标注；完整台词只在档案与剧本里',
+    };
+  }),
+  check('R1-16', '演绎档案只落插件私有存储，且 demo 标记无法在真机伪造', () => {
+    const s = sandbox({ api_key: 'sk-abcdefghijklmnopqrstuvwxyz' });
+    play(s.api);
+    s.api.roleplay_turn({ line: '一段只属于舞台的台词' });
+    const before = s.memory.length;
+    const end = s.api.masquerade_end({});
+    const archived = end.archiveId && end.archiveId.length > 0;
+    const keyPresent = Array.from(s.map.keys()).some((k) => k.indexOf('mb:archive:') === 0);
+    /* QuickJS 沙箱没有 window：即便 config 被塞 demo:true 也必须判为 none */
+    const forged = sandbox({ demo: true }).api;
+    const forgedStatus = forged.get_model_config({}).modelStatus;
+    return {
+      ok: archived && keyPresent && before === 0 && s.memory.length === 1 && forgedStatus === 'none',
+      detail: '档案只写 dataStore；落幕仍只写 1 条游戏记忆；伪造 demo 在真机三态里无效',
     };
   }),
 ];
@@ -346,13 +413,70 @@ const ROUND_2 = [
         '用仓库内原始快照重跑，输出与产物逐字一致；diff 仅含 FilesPicker.kt；入口由插件 ID + isEnabled 条件渲染；无中间文件残留',
     };
   }),
-  check('R2-09', '测试覆盖关键不变量（隔离/密钥/XSS/状态机）', () => {
+  check('R2-09', '测试覆盖 8 类关键不变量（含本轮新增语义）', () => {
     const files = fs.readdirSync(R('tests')).filter((f) => f.endsWith('.test.mjs'));
     const all = files.map((f) => read('tests/' + f)).join('\n');
-    const keys = ['角色扮演游戏', 'NO_API_KEY', 'escapeHtml', 'MAX_TURNS', 'MCP'];
-    return { ok: files.length >= 3 && keys.every((k) => all.includes(k)), detail: files.length + ' 个测试文件，覆盖 5 类关键不变量' };
+    const keys = ['角色扮演游戏', 'MODEL_NOT_CONFIGURED', 'INSECURE_BASE_URL', 'escapeHtml',
+      'MAX_TURNS', 'MCP', 'compressedBy', 'messageCount'];
+    const missing = keys.filter((k) => !all.includes(k));
+    return {
+      ok: files.length >= 3 && missing.length === 0,
+      detail: files.length + ' 个测试文件，覆盖 ' + keys.length + ' 类不变量' +
+        (missing.length ? '；缺：' + missing.join(', ') : ''),
+    };
   }),
   check('R2-10', '检测器自身无假阴性（正反样本自测）', selfTest),
+  check('R2-11', '档案 ID 严格校验与超量裁剪（本轮真实缺陷回归）', () => {
+    const s = sandbox();
+    const badIds = ['../evil', 'a/b', '', 'x'.repeat(200), { toString: null }, null, 12345];
+    const rejected = badIds.every((id) => s.api.get_masquerade_archive({ session_id: id }).error === 'BAD_ID' &&
+      s.api.delete_masquerade_archive({ session_id: id }).error === 'BAD_ID');
+    for (let i = 0; i < 25; i++) {
+      s.api.masquerade_invite({ source: 'chat' });
+      s.api.masquerade_accept({});
+      s.api.masquerade_end({});
+    }
+    const total = s.api.list_masquerade_archives({}).total;
+    const stored = Array.from(s.map.keys()).filter((k) => k.indexOf('mb:archive:') === 0 && k !== 'mb:archive:index').length;
+    return {
+      ok: rejected && total === 20 && stored === 20,
+      detail: badIds.length + ' 组畸形 ID 全被拒；25 场后索引与数据都裁到 20（旧实现残留 25 份数据）',
+    };
+  }),
+  check('R2-12', '压缩与剧中台词共用同一模型通道，不引入第二个模型', () => {
+    const s = sandbox({ api_key: 'sk-abcdefghijklmnopqrstuvwxyz' });
+    play(s.api);
+    s.api.roleplay_turn({ line: '第一支舞' });
+    const end = s.api.masquerade_end({});
+    const urls = s.requests.map((r) => r.url);
+    const sameChannel = urls.length === 2 && urls.every((u) => u === 'https://api.openai.com/v1/chat/completions');
+    const compressUsedModel = urls.length === 2 &&
+      JSON.parse(s.requests[1].opts.body).messages[0].content.includes('剧情归档助手');
+    return {
+      ok: sameChannel && compressUsedModel && end.compressedBy === 'model' &&
+        /function compressTranscript[\s\S]*?callModel\(/.test(mainSrc) &&
+        /function callRoleplayModel[\s\S]*?callModel\(/.test(mainSrc),
+      detail: '一轮台词 + 一次压缩，都走 callModel / 同一凭据与白名单',
+    };
+  }),
+  check('R2-13', '主聊天邀请链路与「最新有对话会话」选择', () => {
+    const ui = read('plugin/ui/app.js');
+    const s = sandbox();
+    const inv = s.api.masquerade_invite({ source: 'chat' });
+    const cond = [
+      /syncToChat\(r\.chatInviteCard, r\.chatHiddenContext\)/.test(ui),
+      !/\bBridge\.callAI\s*\(/.test(ui),
+      /Number\(c\.messageCount\) > 0/.test(ui),
+      /withMessages\.length \? withMessages\[0\]/.test(ui),
+      /Bridge\.listConversations\(\)/.test(ui),
+      !/location\.search/.test(ui),
+      inv.success === true && inv.chatSource === 'chat' && inv.chatHiddenContext.includes('角色扮演游戏'),
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '请柬走 sendChatMessage 触发前端助手应邀；会话按 messageCount>0 + updateAt 倒序选取，不假设 URL query 有 ID',
+    };
+  }),
 ];
 
 function runTests() {
@@ -404,10 +528,13 @@ const ROUND_3 = [
     }
     return { ok: missing.length === 0, detail: missing.length ? '缺失：' + missing.join(', ') : '无占位符 URL，引用全部命中本地文件' };
   }),
-  check('R3-05', '专属 UI 四个状态视图与三个功能区齐全', () => {
+  check('R3-05', '专属 UI 四个状态视图与四个功能区齐全', () => {
     const html = read('plugin/ui/index.html');
-    const ids = ['pane-idle', 'pane-invited', 'pane-active', 'pane-ended', 'view-ball', 'view-cards', 'view-model',
-      'btn-invite', 'btn-accept', 'btn-send-line', 'btn-end', 'btn-save-card'];
+    const ids = ['pane-idle', 'pane-invited', 'pane-active', 'pane-ended',
+      'view-ball', 'view-cards', 'view-archive', 'view-model',
+      'btn-invite', 'btn-accept', 'btn-send-line', 'btn-end', 'btn-save-card',
+      'archive-list', 'archive-detail', 'archive-transcript', 'compressed-summary',
+      'btn-view-archive', 'btn-archive-export', 'btn-archive-delete', 'model-alert', 'model-status'];
     const missing = ids.filter((i) => !html.includes('id="' + i + '"'));
     return { ok: missing.length === 0, detail: ids.length + ' 个关键节点齐全，缺：' + (missing.join(', ') || '无') };
   }),
@@ -453,6 +580,41 @@ const ROUND_3 = [
       detail: '复刻 ZipInputStream 流式读取 + findManifest + validateManifest；5 组正反样本证明源码包/缺清单包必被判失败',
     };
   }),
+  check('R3-11', '版本与文档口径一致：1.2.0、宿主配置指引、压缩与档案说明', () => {
+    const pkg = JSON.parse(read('package.json'));
+    const docs = ['README.md', 'PULL_REQUEST.md', 'host-patch/README.md', 'mcp/README.md']
+      .map((f) => ({ f, s: read(f) }));
+    const versionOk = pkg.version === manifest.version && manifest.version === '1.2.0';
+    const stale = docs.filter((d) => /1\.1\.0|1\.0\.0\.zip/.test(d.s));
+    const readme = read('README.md');
+    const arch = read('ARCHITECTURE.md');
+    const sec = read('SECURITY.md');
+    const hints = ['设置 → 插件管理 → 假面舞会', '演绎档案', '压缩概要', 'MODEL_NOT_CONFIGURED'];
+    const docHints = hints.filter((h) => !readme.includes(h) && !arch.includes(h) && !sec.includes(h));
+    return {
+      ok: versionOk && stale.length === 0 && docHints.length === 0,
+      detail: 'v' + manifest.version + ' 全局一致' +
+        (stale.length ? '；旧版本残留：' + stale.map((d) => d.f).join(', ') : '') +
+        (docHints.length ? '；文档缺口径：' + docHints.join(', ') : '；四类新语义均已写入文档'),
+    };
+  }),
+  check('R3-12', '落幕压缩概要与演绎档案在页面里真实可见', () => {
+    const html = read('plugin/ui/index.html');
+    const ui = read('plugin/ui/app.js');
+    const cond = [
+      html.includes('id="view-archive"'),
+      html.includes('id="compressed-summary"'),
+      /text\(\$\('#compressed-summary'\), r\.compressedSummary/.test(ui),
+      /text\(\$\('#compressed-by'\)/.test(ui),
+      /function openArchive\(/.test(ui) && /get_masquerade_archive/.test(ui),
+      /function exportArchive\(/.test(ui) && /function deleteArchive\(/.test(ui),
+      /btn-view-archive[\s\S]*?switchTab\('archive'\)/.test(ui),
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '落幕页展示压缩概要与压缩来源；档案 tab 可列表、详情回放完整台词、导出与删除',
+    };
+  }),
 ];
 
 const ROUNDS = [
@@ -474,6 +636,13 @@ const FINDINGS = [
   { round: 3, item: 'R3-09 / 许可合规', text: '远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。' },
   { round: 3, item: 'R3-02 / 宿主可插拔性', text: '初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。' },
   { round: 3, item: 'R3-10 / 真机导入失败「找不到 manifest.json」', text: '真机导入报该错后回读宿主 `PluginScanner.kt`：unzip() 用 `ZipInputStream` 流式读取本地文件头，findManifest() 只查根目录与一级子目录。插件包本身根目录就有 manifest.json，经独立流式复刻（11 个 entry 全部可读）与线上 raw 直链下载 sha256 比对（与本地完全一致）确认产物无误；根因是误把 GitHub 的 `Code → Download ZIP` 仓库源码包（清单在第 4 层）当成插件包导入，已用反证样本复现同一报错。修复：新增 `scripts/verify-package.mjs` 完整复刻宿主导入链路，可检查任意 ZIP 并输出人话诊断，含 5 组正反样本自测；纳入 `npm run verify` 与新增的 R3-10；README 置顶正确的 raw 直链、下载后自检步骤与错误对照。此前的 Python zipfile / Node 中央目录回读走的是另一条路径，无法覆盖真机的流式解析，这是原有验证链的盲区。' },
+  { round: 1, item: 'R1-14 / 未配置模型仍给出牛头不对马嘴的回复', text: '真机反馈：没配置模型却仍能开始扮演并收到回复，且答非所问。根因是预览垫片 `boot.js` 注入了写死的伪 `api_key` 与 6 句固定 SCRIPTED 剧本，`callRoleplayModel` 因此误判「已配置」，用户输入被无视而按调用次数轮转台词。修复：彻底移除伪密钥与 mock fetch，改为显式 `demo:true` 且要求 `typeof window !== "undefined"` 的双重门槛（宿主 QuickJS 沙箱没有 window，config 也不含 demo 字段，无法伪造）；新增 `modelAvailability()` 三态，生产环境 `none` 时 `roleplay_turn` 硬拦截返回 `MODEL_NOT_CONFIGURED`、零回复零网络请求；预览 demo 的回复引用用户这一轮的话并明确标注「不是真实模型回复」。' },
+  { round: 1, item: 'R1-13 / 两个配置源打架', text: '上一轮误判宿主没有配置入口，额外做了页面配置表单、内置供应商预设与 dataStore 覆盖层；用户指出宿主插件详情页本来就有。两个配置源会造成「宿主里改了、页面旧值覆盖」的经典缺陷。本轮撤销 `PROVIDER_PRESETS` / `effectiveConfig` / `set_model_config` / `list_model_presets` 与整张表单，`get_model_config` 回归纯只读脱敏；配置统一走 `manifest.config`，模型页改为状态展示 + 宿主配置路径指引，并在首页显著提示未配置。' },
+  { round: 1, item: 'R1-15 / 压缩概要必须作为可见文本才能进入助手上下文', text: '回读宿主 `PluginWebViewPage.kt` / `ChatService.kt` 确认：`sendChatMessage` 的可见文本会作为 USER 消息永久写入会话历史，而 `hiddenContext` 只映射为本轮 `transientSystemPrompt`、不落库。因此把压缩概要放进落幕卡的**可见文本**，而不是只塞隐藏上下文；同时严格限定只放概要、不放逐字台词，并自带「虚构游戏 / 不是真实发生的事」标注与长期记忆说明。' },
+  { round: 1, item: 'R1-16 / conversationId 契约误判', text: '宿主补丁说明曾写「conversationId 会一并传给 WebView 页面」，与源码不符：`Screen.PluginWebView` 的该参数只用于宿主选择 callAI 模型与标题栏，页面 URL 是纯 `file://` 且 bridgeJavascript 只替换 pageToken。唯一通道是 `listConversations()`（按 updateAt 倒序，含 messageCount）。已把会话选择改为优先 `messageCount>0` 的最新一条，精确对应「助手最新有对话的上下文」；文档改为逐条列出源码依据。' },
+  { round: 2, item: 'R2-11 / 档案超量裁剪与 ID 边界', text: '新增回归用例实跑发现两个真实缺陷：超量裁剪循环从 `out.length` 起遍历，导致最旧一份档案数据永远删不掉（25 场后残留 25 份而非 20 份）；`sanitizeText(...,80)` 会先把超长 ID 截成另一个合法 ID、数字 ID 也会被 `safeString` 转成字符串，于是报 NOT_FOUND 而非明确拒绝。已改为「凡是没进新索引的旧档案一律删」，并把 ID 校验收紧为原始值必须是字符串且匹配 `^[A-Za-z0-9_]{1,80}$`。' },
+  { round: 2, item: 'R2-09 / 审查规则自身过时', text: '关键字表写死 `NO_API_KEY`，而本轮把无模型语义改为 `MODEL_NOT_CONFIGURED`，导致审查项 FAIL。这不是产品缺陷但属于规则失真：已把关键字表升级为 8 类不变量（含 `MODEL_NOT_CONFIGURED` / `compressedBy` / `messageCount`），并新增 R2-11~R2-13、R1-13~R1-16、R3-11~R3-12 共 13 条覆盖本轮需求的实跑检查。' },
+  { round: 3, item: 'R3-11 / 落幕后无处查看演绎记录', text: '用户反馈结束后看不到整场戏。新增最多 20 场的演绎档案（`mb:archive:*` + 索引），落幕时写入完整台词、压缩概要、压缩来源与落幕说明；插件页新增第 4 个 tab，可列表、回看逐轮台词、导出 JSON、二次确认删除。档案只存插件私有 dataStore，不进主聊天、不写长期记忆；列表摘要不含逐字台词。' },
 ];
 
 function buildReport(results, allOk) {

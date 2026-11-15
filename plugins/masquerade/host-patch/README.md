@@ -13,7 +13,9 @@
 
 **可插拔的关键**：按钮由 `installedPlugins.any { id == "com.orangechat.masquerade" && isEnabled }` 决定。没装插件、装了没启用、或卸载插件，加号里都不会多出这个按钮；宿主里没有任何剧情逻辑，只有一句 ID 判断和一次导航。
 
-`conversationId` 会一并传给 WebView 页面，插件用它把启幕卡 / 落幕卡通过 `Bridge.sendChatMessage` 送回当前聊天，并附上一次性 `transientSystemPrompt`。
+**宿主契约（已核对 `PluginWebViewPage.kt`）**：`Screen.PluginWebView` 的 `conversationId` 只用于宿主自己选择 `callAI` 的模型与标题栏文案，**不会传进 WebView**（页面 URL 是纯 `file://` 绝对路径，无 query，`bridgeJavascript` 只替换 pageToken）。插件页拿会话 ID 的唯一通道是 `await Bridge.listConversations()`（需 `conversation_sync` 权限），宿主按 `updateAt` 倒序返回 `{id, title, messageCount, updatedAt}`；插件优先选 `messageCount > 0` 的最新一条，即「助手最新有对话的上下文」。
+
+`sendChatMessage` 的可见文本会作为一条 USER 消息**永久写入该会话历史**（`ChatService` 的 `createQueuedMessageJob` → `saveConversationWithOwnership`），后续对话能看见；`hiddenContext` 映射为 `transientSystemPrompt`，只作用本轮生成、不落库。`answer=true` 会触发一次助手回复。因此落幕卡的压缩概要必须放在可见文本里，才能真正进入助手上下文。
 
 ## 应用方式
 
@@ -55,8 +57,8 @@ rm host-patch/FilesPicker.kt.before
 
 ## 完整接入顺序
 
-1. 构建插件包：`npm run build` → `dist/orangechat-masquerade-1.0.0.zip`
-2. 橘瓣里：设置 → 插件管理 → 导入 ZIP → 确认 `ai_chat` / `conversation_sync` 权限与网络白名单 → 安装并启用
+1. 构建插件包：`npm run build` → `dist/orangechat-masquerade-1.2.0.zip`
+2. 橘瓣里：设置 → 插件管理 → 导入 ZIP → 确认 `conversation_sync` 权限与网络白名单 → 安装并启用
 3. 应用本补丁并编译橘瓣
 4. 回聊天页点加号，四个按钮旁边会出现「🎭 假面舞会」
 

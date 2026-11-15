@@ -1,7 +1,8 @@
 /*
  * 启动垫片：让同一份 main.js 既能被宿主 QuickJS 加载，也能在浏览器预览页里跑。
  * 生产（存在 window.Bridge）时不注入任何凭据，页面一律走 Bridge.callTool。
- * 仅预览模式（无 Bridge）注入内存数据层与「演示剧本」，不发起任何真实网络请求。
+ * 仅预览模式（无 Bridge）注入本地数据层与 demo:true 标记；
+ * 预览页绝不注入伪 API Key，剧中台词由 main.js 的 demoRoleplayReply 明确标注为演示剧本。
  */
 (function () {
   'use strict';
@@ -24,12 +25,13 @@
     }
   };
   window.config = {
+    /* demo 只在这里注入：宿主 QuickJS 沙箱没有 window，config 也不含 demo 字段。 */
+    demo: true,
     inject_as_prompt: true,
     api_base: 'https://api.openai.com/v1',
-    /* 仅为让演示走通本地剧本分支；不是真实凭据，也不会写进插件配置。 */
-    api_key: 'studio-demo',
     model_id: 'gpt-4o-mini',
     max_turns: 40
+    /* 刻意不提供任何密钥字段：预览页不联网、不调用任何真实模型 */
   };
   window.memoryBank = {
     save: function (t) {
@@ -44,25 +46,5 @@
     search: function () { return []; },
     delete: function () {}
   };
-
-  var SCRIPTED = [
-    '（他把面具往灯下抬了抬）……你来得正好，第三支曲子还没开始。',
-    '「不必告诉我你是谁。今夜，名字只是另一副面具。」',
-    '（烛火晃了一下）我记下这句了。等天亮，我们都不提。',
-    '「再跳一支？……好，就一支。」',
-    '（他替你把披风拢好）风从露台那边来，别站太久。',
-    '「面具摘下之前，还有一句话想留给你——就留在舞台上吧。」'
-  ];
-  /* 同步 mock：与宿主 QuickJS 的 fetch 返回结构一致，绝不联网。 */
-  window.fetch = function (url, options) {
-    var count = 0;
-    try { count = JSON.parse(options.body).messages.length; } catch (e) { count = 0; }
-    var content = SCRIPTED[count % SCRIPTED.length];
-    var body = JSON.stringify({ choices: [{ message: { content: content } }] });
-    return {
-      ok: true, status: 200, body: body,
-      json: function () { return JSON.parse(this.body); },
-      text: function () { return this.body; }
-    };
-  };
+  /* 预览页不注入 fetch：真有代码误调模型也会直接失败，不会拿到伪造回复。 */
 })();

@@ -82,8 +82,8 @@ test('manifest 网络白名单与 main.js 内置白名单一致，且无通配�
   for (const h of manifest.allowedHosts) assert.match(h, /^[a-z0-9.-]+$/);
 });
 
-test('权限最小化：只用 ai_chat 与 conversation_sync', () => {
-  assert.deepEqual([...manifest.permissions].sort(), ['ai_chat', 'conversation_sync']);
+test('权限最小化：邀请改走主聊天后不再需要 ai_chat', () => {
+  assert.deepEqual([...manifest.permissions].sort(), ['conversation_sync']);
   assert.equal(manifest.permissions.includes('provider_credentials'), false);
   assert.equal(manifest.permissions.includes('*'), false);
 });

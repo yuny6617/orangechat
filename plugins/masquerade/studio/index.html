@@ -29,7 +29,7 @@
   </header>
 
   <div class="preview-bar">
-    <span><strong>演示模式</strong>：使用本地剧本，不联网、不调用真实模型；数据只存在浏览器 localStorage。左侧界面与打包进橘瓣的插件完全一致。</span>
+    <span><strong>演示模式</strong>：台词是本地演示剧本（会明确标注「不是真实模型回复」），不联网、不调用任何模型；数据只存在浏览器 localStorage。左侧界面与打包进橘瓣的插件完全一致。真机上请在宿主插件详情页配置模型。</span>
     <button id="reset" class="btn btn-ghost reset-btn" type="button">重置演示</button>
   </div>
 
@@ -40,13 +40,13 @@
         <span class="panel-corner br"></span>
         <p class="eyebrow">Chat Context</p>
         <h2 class="section-title" style="font-size:23px">聊天上下文</h2>
-        <p class="hint">启幕与落幕时，插件会把专属卡片送进这里；同时附上一次性说明，让助手知道刚才只是游戏。</p>
+        <p class="hint">请柬会发进这里，<strong>助手就在对话框里应邀</strong>；落幕时送进来的是一段<strong>压缩概要</strong>（完整台词只在插件「演绎档案」里），并附一次性说明让助手知道刚才只是游戏。</p>
         <div id="chat-stream" class="chat-stream">
           <div class="stream-head">— 与助手的对话 —</div>
           <div class="chat-msg ai">今天想聊点什么？</div>
           <div class="chat-msg me">有点想玩点不一样的……</div>
         </div>
-        <p class="studio-note">在左侧选一张角色卡 → 递出请柬 → 助手应邀 → 在舞台上说几句 → 落幕，就能看到这里出现两张卡片。</p>
+        <p class="studio-note">在左侧选一张角色卡 → 递出请柬（右侧出现请柬卡与助手应邀）→ 启幕 → 在舞台上说几句 → 落幕（右侧出现带压缩概要的落幕卡）。完整台词可在左侧「演绎档案」里回看。</p>
       </div>
     </aside>
   </div>

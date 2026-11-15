@@ -219,14 +219,17 @@ test('模型通道：拒绝明文 HTTP、拒绝非白名单域名、密钥只进
   assert.equal(JSON.stringify(r3).includes('sk-test-secret'), false);
 });
 
-test('未配置模型时给出可操作错误，不抛异常', () => {
+test('未配置模型时硬拦截，绝不编造剧中回复', () => {
   const { core } = load();
   playToActive(core);
-  core.masquerade_accept({});
+  const acc = core.masquerade_accept({});
+  assert.equal(acc.modelStatus, 'none');
+  assert.ok(acc.modelWarning.includes('插件管理'));
   const r = core.roleplay_turn({ line: '你好' });
   assert.equal(r.success, false);
-  assert.equal(r.error, 'NO_API_KEY');
-  assert.ok(r.message.includes('模型接入'));
+  assert.equal(r.error, 'MODEL_NOT_CONFIGURED');
+  assert.equal(r.reply, undefined, '没模型时一个字都不能编');
+  assert.ok(r.message.includes('插件管理'));
 });
 
 test('单场轮次上限生效', () => {
