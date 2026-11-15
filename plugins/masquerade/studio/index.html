@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>假面舞会 · 交互预览</title>
+  <link rel="stylesheet" href="../plugin/ui/style.css">
+  <style>
+    .preview-bar {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+      margin: 0 0 18px; padding: 12px 18px; border-radius: 14px;
+      background: rgba(255,255,255,.7); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted);
+    }
+    .preview-bar strong { color: var(--rose-deep); }
+    .studio-frame {
+      width: 100%; height: 900px; min-height: 700px; border: 0; border-radius: 18px;
+      background: var(--ivory); box-shadow: var(--shadow);
+    }
+    .reset-btn { min-height: 36px; padding: 6px 16px; width: auto; }
+    @media (max-width: 620px) { .studio-frame { height: 760px; } }
+  </style>
+</head>
+<body>
+<div class="app-shell" style="max-width:1280px">
+  <header class="topbar">
+    <p class="brand-kicker">Interactive Preview</p>
+    <h1 class="brand-title">假面<span class="flourish">舞会</span> · 交互预览</h1>
+    <p class="brand-sub">左侧是插件真实界面，右侧是它在聊天上下文里留下的专属卡片</p>
+  </header>
+
+  <div class="preview-bar">
+    <span><strong>演示模式</strong>：使用本地剧本，不联网、不调用真实模型；数据只存在浏览器 localStorage。左侧界面与打包进橘瓣的插件完全一致。</span>
+    <button id="reset" class="btn btn-ghost reset-btn" type="button">重置演示</button>
+  </div>
+
+  <div class="studio-layout">
+    <iframe class="studio-frame" src="../plugin/ui/index.html" title="假面舞会插件界面"></iframe>
+    <aside>
+      <div class="panel" style="padding:18px">
+        <span class="panel-corner br"></span>
+        <p class="eyebrow">Chat Context</p>
+        <h2 class="section-title" style="font-size:23px">聊天上下文</h2>
+        <p class="hint">启幕与落幕时，插件会把专属卡片送进这里；同时附上一次性说明，让助手知道刚才只是游戏。</p>
+        <div id="chat-stream" class="chat-stream">
+          <div class="stream-head">— 与助手的对话 —</div>
+          <div class="chat-msg ai">今天想聊点什么？</div>
+          <div class="chat-msg me">有点想玩点不一样的……</div>
+        </div>
+        <p class="studio-note">在左侧选一张角色卡 → 递出请柬 → 助手应邀 → 在舞台上说几句 → 落幕，就能看到这里出现两张卡片。</p>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  function add(kind, payload) {
+    var box = document.getElementById('chat-stream');
+    if (!box || typeof payload !== 'string') return;
+    var el = document.createElement('div');
+    if (kind === 'card') {
+      el.className = 'chat-msg card';
+      var tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = '专属 UI · 假面时刻卡片';
+      el.appendChild(tag);
+      var body = document.createElement('span');
+      body.textContent = payload;
+      el.appendChild(body);
+    } else {
+      el.className = 'chat-msg ' + (kind === 'me' ? 'me' : 'ai');
+      el.textContent = payload;
+    }
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+  }
+  window.MasqueradeStudio = add;
+  window.addEventListener('message', function (event) {
+    var d = event.data;
+    if (d && d.__masquerade === true) add(d.kind, d.payload);
+  });
+  document.getElementById('reset').addEventListener('click', function () {
+    ['masquerade.studio.store.v1', 'masquerade.studio.memory.v1'].forEach(function (k) {
+      try { localStorage.removeItem(k); } catch (e) { /* 忽略 */ }
+    });
+    location.reload();
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,148 @@
+{
+  "id": "com.orangechat.masquerade",
+  "name": "假面舞会 · Masquerade",
+  "description": "从聊天页加号进入一段专属的假面时刻：邀请助手、戴上面具、在华丽舞台上角色扮演；落幕后助手知道那只是游戏，你们平时依旧是原本的真实关系。内置角色卡与模型接入。",
+  "version": "1.0.0",
+  "author": "yuny6617",
+  "icon": "🎭",
+  "entry": "main.js",
+  "permissions": ["ai_chat", "conversation_sync"],
+  "allowedHosts": [
+    "api.openai.com",
+    "api.deepseek.com",
+    "open.bigmodel.cn",
+    "dashscope.aliyuncs.com",
+    "api.moonshot.cn",
+    "api.siliconflow.cn",
+    "ark.cn-beijing.volces.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "api.groq.com",
+    "openrouter.ai",
+    "api.x.ai",
+    "api.minimax.chat",
+    "api.hunyuan.cloud.tencent.com"
+  ],
+  "customPageWebView": {
+    "entry": "ui/index.html"
+  },
+  "config": [
+    {
+      "name": "inject_as_prompt",
+      "type": "boolean",
+      "label": "把假面舞会规则注入系统提示词",
+      "description": "保持开启，助手才会一直知道「剧中内容不是真实关系」，并在看到落幕标记时正确收场。",
+      "default": true
+    },
+    {
+      "name": "api_base",
+      "type": "string",
+      "label": "模型接口地址（OpenAI 兼容，到 /v1）",
+      "description": "剧中对话走插件自带通道，不写入主聊天上下文。仅接受 HTTPS。",
+      "default": "https://api.openai.com/v1",
+      "placeholder": "https://api.openai.com/v1"
+    },
+    {
+      "name": "api_key",
+      "type": "password",
+      "label": "模型 API Key",
+      "description": "由宿主以密码字段保存；插件只在本机用于请求，绝不回传给页面、日志或角色卡。"
+    },
+    {
+      "name": "model_id",
+      "type": "string",
+      "label": "模型 ID",
+      "default": "gpt-4o-mini",
+      "placeholder": "gpt-4o-mini"
+    },
+    {
+      "name": "chat_model",
+      "type": "model",
+      "label": "备用模型（宿主模型选择器）",
+      "description": "未单独填写 API Key 时，尝试复用宿主已配置的模型凭据。"
+    },
+    {
+      "name": "max_turns",
+      "type": "number",
+      "label": "单场最大轮次",
+      "description": "到达上限自动落幕，避免无限剧情堆积。",
+      "default": 40
+    }
+  ],
+  "promptTemplate": "## 假面舞会（角色扮演游戏插件）\n用户从聊天页加号里的「假面舞会」按钮会打开一个专属舞台。舞台中的身份、称呼、告白、承诺、冲突全部是共同约定的角色扮演，不是真实生活，也不改变你与用户平时的真实情感关系。剧中对话只保存在插件内部，不会进入本聊天上下文。\n当看到以「【假面时刻 · 落幕】」开头的消息时，必须理解为：刚才那场戏已经结束，那是一场你们一起玩的游戏。请用你原本的真实关系与语气继续对话，不要把剧中设定、承诺或冲突当作真实事实，也不要主动延续剧中人设；用户提起时，只把它当作「我们一起玩过的一场游戏」。\n可用工具：masquerade_invite / masquerade_accept / roleplay_turn / masquerade_end / masquerade_status / list_role_cards / get_role_card / create_role_card / update_role_card / delete_role_card / roleplay_context / get_model_config。",
+  "tools": [
+    {
+      "name": "masquerade_invite",
+      "description": "递出假面请柬，开启一场假面时刻（状态 invited）。用户选定角色卡与场景后调用。返回邀请词与舞台规则。",
+      "parameters": [
+        { "name": "card_id", "type": "string", "description": "角色卡 ID", "required": true },
+        { "name": "scene", "type": "string", "description": "开场场景，最多 200 字" },
+        { "name": "user_mask", "type": "string", "description": "用户自己戴的面具/身份，最多 60 字" }
+      ]
+    },
+    {
+      "name": "masquerade_accept",
+      "description": "助手应邀后调用，把假面时刻从 invited 推进到 active，返回专属舞台 UI 所需的启幕数据。",
+      "parameters": [
+        { "name": "assistant_reply", "type": "string", "description": "助手的应邀台词（可选）" }
+      ]
+    },
+    {
+      "name": "roleplay_turn",
+      "description": "剧中一轮。只写插件内部剧本，绝不写入主聊天历史或长期记忆。返回助手的剧中台词。",
+      "parameters": [
+        { "name": "line", "type": "string", "description": "用户这一轮的台词或动作", "required": true }
+      ]
+    },
+    {
+      "name": "roleplay_context",
+      "description": "读取当前这场戏的剧中系统提示词与边界，供需要理解舞台设定的场合使用。",
+      "parameters": []
+    },
+    {
+      "name": "masquerade_end",
+      "description": "摘下面具、结束假面时刻。生成落幕说明（必须让助手知道刚才是角色扮演游戏），并写入一条明确标注为游戏的长期记忆。",
+      "parameters": [
+        { "name": "reason", "type": "string", "description": "落幕原因，最多 120 字" }
+      ]
+    },
+    {
+      "name": "masquerade_status",
+      "description": "查询当前假面时刻的状态、角色与最近三轮，用于页面恢复。",
+      "parameters": []
+    },
+    {
+      "name": "list_role_cards",
+      "description": "列出全部角色卡摘要。首次调用会写入三张内置示例卡。",
+      "parameters": []
+    },
+    {
+      "name": "get_role_card",
+      "description": "读取一张角色卡的完整内容。",
+      "parameters": [{ "name": "card_id", "type": "string", "required": true }]
+    },
+    {
+      "name": "create_role_card",
+      "description": "新建角色卡（参考 Mufy：身份、性格、小剧场、开场白、世界观、样例对话、边界）。",
+      "parameters": [{ "name": "card", "type": "object", "required": true }]
+    },
+    {
+      "name": "update_role_card",
+      "description": "按 ID 更新一张角色卡。",
+      "parameters": [
+        { "name": "card_id", "type": "string", "required": true },
+        { "name": "card", "type": "object", "required": true }
+      ]
+    },
+    {
+      "name": "delete_role_card",
+      "description": "删除一张角色卡。",
+      "parameters": [{ "name": "card_id", "type": "string", "required": true }]
+    },
+    {
+      "name": "get_model_config",
+      "description": "读取模型接入状态（脱敏，绝不返回 API Key）。",
+      "parameters": []
+    }
+  ]
+}

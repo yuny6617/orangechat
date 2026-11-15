@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#fff8f3">
+  <title>假面舞会 · Masquerade</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <p class="brand-kicker">A Masquerade Moment</p>
+    <h1 class="brand-title">假面<span class="flourish">舞会</span></h1>
+    <p class="brand-sub">戴上面具，演一场只属于我们的戏 ✦ 摘下面具，我们还是我们</p>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="假面舞会功能区">
+    <button class="tab" type="button" role="tab" data-view="ball" aria-selected="true">✦ 舞会</button>
+    <button class="tab" type="button" role="tab" data-view="cards" aria-selected="false">✦ 角色卡</button>
+    <button class="tab" type="button" role="tab" data-view="model" aria-selected="false">✦ 模型接入</button>
+  </nav>
+
+  <main>
+    <!-- ============ 舞会 ============ -->
+    <section id="view-ball" class="view is-active" role="tabpanel">
+      <!-- 待邀 -->
+      <div id="pane-idle" class="panel">
+        <span class="panel-corner tl"></span><span class="panel-corner br"></span>
+        <div class="invite-grid">
+          <div class="mask-figure">
+            <img src="assets/mask.svg" alt="金色假面" />
+            <div class="caption">Une invitation</div>
+          </div>
+          <div>
+            <p class="eyebrow">The Invitation</p>
+            <h2 class="section-title">递出一张假面请柬</h2>
+            <p class="hint">选好今夜的身份，写一句开场的情境。助手应邀之后，舞台才会亮灯。</p>
+            <div class="form-grid">
+              <div class="field span-2">
+                <label for="invite-card">今夜的角色 <span class="sub">· 可在「角色卡」里新建</span></label>
+                <select id="invite-card"></select>
+              </div>
+              <div class="field span-2">
+                <label for="invite-scene">开场情境</label>
+                <input id="invite-scene" type="text" maxlength="200" placeholder="午夜十二点，玻璃花房的灯恰好熄灭一半" />
+              </div>
+              <div class="field span-2">
+                <label for="invite-mask">我戴的面具</label>
+                <input id="invite-mask" type="text" maxlength="60" placeholder="一位不愿透露姓名的来客" />
+              </div>
+            </div>
+            <div class="game-note">
+              <span class="seal">🎭</span>
+              <span>说好了：这是一场共同约定的角色扮演游戏。剧中的身份、告白与承诺都不作数，摘下面具后我们依旧是原本的真实关系。</span>
+            </div>
+            <div class="btn-row">
+              <button id="btn-invite" class="btn btn-primary" type="button">递出假面请柬 ✦</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 已邀，等助手同意 -->
+      <div id="pane-invited" class="panel" hidden>
+        <span class="panel-corner tl"></span><span class="panel-corner br"></span>
+        <p class="eyebrow">Waiting for the answer</p>
+        <h2 class="section-title">请柬已递出</h2>
+        <p class="hint">下面的话是给助手的邀请。等它应邀，舞台才会亮灯。</p>
+        <p id="invitation-text" class="invite-copy"></p>
+        <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> ANSWER <img src="assets/ornament-cc0.svg" alt="" /></div>
+        <div class="game-note">
+          <span class="seal">🕯️</span>
+          <span id="assistant-consent">正在等待助手回应……</span>
+        </div>
+        <div class="btn-row">
+          <button id="btn-accept" class="btn btn-gold" type="button">助手应邀 · 启幕 ✦</button>
+          <button id="btn-cancel-invite" class="btn btn-quiet" type="button">收回请柬</button>
+        </div>
+      </div>
+
+      <!-- 专属舞台 -->
+      <div id="pane-active" hidden>
+        <div class="stage">
+          <span class="petal" style="left:8%;animation-delay:0s"></span>
+          <span class="petal" style="left:26%;animation-delay:1.8s"></span>
+          <span class="petal" style="left:48%;animation-delay:3.4s"></span>
+          <span class="petal" style="left:68%;animation-delay:2.6s"></span>
+          <span class="petal" style="left:86%;animation-delay:4.6s"></span>
+          <div class="stage-head">
+            <div class="kicker">The Masquerade Moment</div>
+            <h2 id="stage-title">假面时刻 · 已启幕</h2>
+            <p id="stage-scene" class="scene"></p>
+            <div class="stage-badge" id="stage-badge">🎭 这是一场游戏 · 面具之下都不是真的</div>
+          </div>
+          <div class="stage-body">
+            <div id="transcript" class="transcript" aria-live="polite"></div>
+            <div class="composer">
+              <textarea id="line-input" rows="2" maxlength="1200" placeholder="写一句台词，或轻轻描述一个动作……"></textarea>
+              <button id="btn-send-line" class="btn btn-primary" type="button">说出口 ✦</button>
+            </div>
+          </div>
+          <div class="stage-foot">
+            <span id="turn-counter">第 0 轮 · 随时可以摘下面具</span>
+            <button id="btn-end" class="btn btn-gold" type="button">摘下面具 · 落幕</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 落幕 -->
+      <div id="pane-ended" class="panel" hidden>
+        <span class="panel-corner tl"></span><span class="panel-corner br"></span>
+        <div class="curtain">
+          <img class="mask-small" src="assets/mask.svg" alt="" />
+          <p class="eyebrow">The curtain falls</p>
+          <h2>灯亮了，面具归还</h2>
+          <p>刚才那支舞，是我们一起演的一场戏。</p>
+          <p id="closing-summary" class="hint"></p>
+          <div id="sync-state" class="sync-state">正在同步落幕说明给助手……</div>
+          <div class="game-note" style="text-align:left">
+            <span class="seal">🕯️</span>
+            <span id="closing-note-preview"></span>
+          </div>
+          <div class="btn-row" style="justify-content:center">
+            <button id="btn-again" class="btn btn-primary" type="button">再开一场 ✦</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 角色卡 ============ -->
+    <section id="view-cards" class="view" role="tabpanel">
+      <div class="panel">
+        <span class="panel-corner br"></span>
+        <p class="eyebrow">Character Cards</p>
+        <h2 class="section-title">角色卡 · 造一个今夜的身份</h2>
+        <p class="hint">参考 Mufy 的角色卡：身份设定、性格、小剧场、开场白、世界观、样例对话与边界，都可以自己写。</p>
+        <div class="btn-row" style="margin-top:0;margin-bottom:8px">
+          <button id="btn-new-card" class="btn btn-gold" type="button">＋ 新建角色卡</button>
+          <button id="btn-export-cards" class="btn btn-ghost" type="button">导出 JSON</button>
+          <button id="btn-import-cards" class="btn btn-ghost" type="button">导入 JSON</button>
+          <input id="import-file" type="file" accept="application/json,.json" hidden />
+        </div>
+        <div id="cards-grid" class="cards-grid"></div>
+      </div>
+
+      <div id="card-editor" class="panel" style="margin-top:18px" hidden>
+        <p class="eyebrow">Atelier</p>
+        <h2 id="editor-title" class="section-title">新建角色卡</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="f-name">角色名 *</label>
+            <input id="f-name" data-field="name" type="text" maxlength="40" placeholder="蔷薇公爵" />
+          </div>
+          <div class="field">
+            <label for="f-emoji">标记</label>
+            <input id="f-emoji" data-field="emoji" type="text" maxlength="8" placeholder="🌹" />
+          </div>
+          <div class="field span-2">
+            <label for="f-tags">标签 <span class="sub">· 逗号分隔，最多 10 个</span></label>
+            <input id="f-tags" data-field="tags" type="text" maxlength="300" placeholder="宫廷, 温柔, 慢热" />
+          </div>
+          <div class="field span-2">
+            <label for="f-identity">身份设定 *</label>
+            <textarea id="f-identity" data-field="identity" maxlength="400" placeholder="舞会主人，掌管整座玻璃花房……"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-personality">性格描述 *</label>
+            <textarea id="f-personality" data-field="personality" maxlength="600" placeholder="温柔克制，习惯用提问代替回答……"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-scenario">小剧场 / 场景</label>
+            <textarea id="f-scenario" data-field="scenario" maxlength="600" placeholder="午夜十二点，钟声第三响时……"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-opening">开场白</label>
+            <textarea id="f-opening" data-field="opening" maxlength="800" placeholder="你来得比请柬上写的时间晚了一点……"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-worldview">世界观 / 情节设定</label>
+            <textarea id="f-worldview" data-field="worldview" maxlength="800" placeholder="假面舞会每晚只开一场，天亮前所有身份都会归还。"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-speechSample">样例对话 & 文风</label>
+            <textarea id="f-speechSample" data-field="speechSample" maxlength="800" placeholder="「不必告诉我你是谁……」"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-boundaries">边界设定 <span class="sub">· 写清「不要把剧情当真」</span></label>
+            <textarea id="f-boundaries" data-field="boundaries" maxlength="400" placeholder="不把剧中称呼当作真实关系，不索取真实隐私。"></textarea>
+          </div>
+          <div class="field span-2">
+            <label for="f-visibility">可见性</label>
+            <select id="f-visibility" data-field="visibility">
+              <option value="private">私密 · 只有自己</option>
+              <option value="link">链接 · 持链接可见</option>
+              <option value="public">公开 · 所有人可见</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="btn-save-card" class="btn btn-primary" type="button">保存角色卡 ✦</button>
+          <button id="btn-delete-card" class="btn btn-quiet" type="button" hidden>删除这张卡</button>
+          <button id="btn-close-editor" class="btn btn-ghost" type="button">收起</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 模型接入 ============ -->
+    <section id="view-model" class="view" role="tabpanel">
+      <div class="panel">
+        <span class="panel-corner br"></span>
+        <p class="eyebrow">Model Connection</p>
+        <h2 class="section-title">给舞台接一盏自己的灯</h2>
+        <p class="hint">剧中对话走插件自带的模型通道，<strong>不写入主聊天上下文</strong>。这正是「平时还是真实关系」的关键。</p>
+        <dl id="model-kv" class="kv"></dl>
+        <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> HOW TO <img src="assets/ornament-cc0.svg" alt="" /></div>
+        <div class="game-note" style="text-align:left">
+          <span class="seal">🔑</span>
+          <span>API Key 由宿主以密码字段保存在「设置 → 插件管理 → 假面舞会」里。这个页面不会读取、显示或存储密钥；未填写时会尝试复用宿主模型选择器里已配置的备用模型。</span>
+        </div>
+        <p class="hint" style="margin-top:14px">自定义接口域名需要同时出现在 <code>manifest.allowedHosts</code> 与 <code>main.js</code> 的白名单里，改完重新导入插件即可。仅接受 HTTPS，避免密钥明文外泄。</p>
+        <div id="host-list" class="host-list"></div>
+        <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> ISOLATION <img src="assets/ornament-cc0.svg" alt="" /></div>
+        <p class="hint" style="margin:0">整场戏的台词只存在插件内部的剧本里。落幕时，插件会写一条明确标注「这是角色扮演游戏」的记忆，并把同一段说明作为本次请求的临时系统提示词送进聊天——助手因此知道刚刚是游戏，而这段规则不会永久改变它的语气。</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="boot.js"></script>
+<script src="../main.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

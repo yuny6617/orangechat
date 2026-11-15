@@ -1,0 +1,63 @@
+--- a/app/src/main/java/me/rerere/rikkahub/ui/components/ai/FilesPicker.kt
++++ b/app/src/main/java/me/rerere/rikkahub/ui/components/ai/FilesPicker.kt
+@@ -97,6 +97,9 @@
+ import me.rerere.rikkahub.ui.context.LocalNavController
+ import me.rerere.rikkahub.ui.context.LocalSettings
+ import me.rerere.rikkahub.ui.hooks.ChatInputState
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import me.rerere.rikkahub.plugin.manager.PluginManager
++import org.koin.compose.koinInject
+ 
+ private val LocalActionTileWidth = staticCompositionLocalOf { 80.dp }
+ private val LocalActionTileHeight = staticCompositionLocalOf { 56.dp }
+@@ -166,6 +169,12 @@
+ ) {
+     // settings 仍保留给 InjectionQuickConfigSheet -> ExtensionSelector 使用（它需要完整 Settings）
+     val toaster = LocalToaster.current
++    val pluginManager = koinInject<PluginManager>()
++    val installedPlugins by pluginManager.plugins.collectAsStateWithLifecycle()
++    /* 可插拔：只有装好并启用「假面舞会」插件，加号里才出现入口。 */
++    val masqueradeInstalled = installedPlugins.any {
++        it.manifest.id == "com.orangechat.masquerade" && it.isEnabled
++    }
+     val settings = LocalSettings.current
+     val currentChatModel = settings.getChatModelOf(conversation)
+     val mcpServers = LocalMcpServers.current
+@@ -224,6 +233,18 @@
+             }
+             BigIconTextButton(icon = { Icon(androidx.compose.ui.res.painterResource(R.drawable.action_red_packet), null) }, text = { Text("红包") }) { sendGift("red_packet") }
+             BigIconTextButton(icon = { Icon(androidx.compose.ui.res.painterResource(R.drawable.action_transfer), null) }, text = { Text("转账") }) { sendGift("transfer") }
++            if (masqueradeInstalled) {
++                MasqueradeButton(onClick = {
++                    onDismiss()
++                    navController.navigate(
++                        Screen.PluginWebView(
++                            pluginId = "com.orangechat.masquerade",
++                            entryPath = "ui/index.html",
++                            conversationId = conversation.id.toString()
++                        )
++                    )
++                })
++            }
+         }
+ 
+     }, actions = {
+@@ -440,6 +461,18 @@
+     }) {
+         onClick()
+     }
++}
++
++/** 假面舞会插件入口：宿主只负责导航，剧情与状态全在插件包里。 */
++@Composable
++fun MasqueradeButton(onClick: () -> Unit = {}) {
++    BigIconTextButton(icon = {
++        Text("🎭", fontSize = 26.sp)
++    }, text = {
++        Text("假面舞会")
++    }) {
++        onClick()
++    }
+ }
+ 
+ @Composable

@@ -1,0 +1,17 @@
+{
+  "name": "orangechat-masquerade",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "假面舞会 — 橘瓣 OrangeChat 可插拔插件 / MCP server",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node scripts/build.mjs",
+    "audit": "node audit/audit.mjs",
+    "verify": "node --test tests/*.test.mjs && node audit/audit.mjs && node scripts/build.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
