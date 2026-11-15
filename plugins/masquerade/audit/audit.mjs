@@ -368,12 +368,19 @@ const ROUND_3 = [
     const f = out.match(/# fail (\d+)/);
     return { ok: r.status === 0 && f && f[1] === '0', detail: 'pass=' + (m ? m[1] : '?') + ', fail=' + (f ? f[1] : '?') };
   }),
-  check('R3-02', '插件 ZIP 可构建并通过 CRC 回读', () => {
-    const r = spawnSync(process.execPath, [R('scripts/build.mjs')], { encoding: 'utf8', timeout: 60000 });
+  check('R3-02', '插件 ZIP 可构建、CRC 回读且可复现', () => {
     const zip = R('dist/orangechat-masquerade-' + manifest.version + '.zip');
+    const run = () => spawnSync(process.execPath, [R('scripts/build.mjs')], { encoding: 'utf8', timeout: 60000 });
+    const r1 = run();
+    const first = fs.existsSync(zip) ? fs.readFileSync(zip) : null;
+    const r2 = run();
+    const second = fs.existsSync(zip) ? fs.readFileSync(zip) : null;
+    const reproducible = !!first && !!second && first.equals(second);
     return {
-      ok: r.status === 0 && (r.stdout || '').includes('CRC 与内容回读校验通过') && fs.statSync(zip).size > 1000,
-      detail: 'dist/orangechat-masquerade-' + manifest.version + '.zip ' + (fs.existsSync(zip) ? fs.statSync(zip).size + ' B' : '缺失'),
+      ok: r1.status === 0 && r2.status === 0 && reproducible &&
+        (r1.stdout || '').includes('CRC 与内容回读校验通过') && first.length > 1000,
+      detail: 'dist/orangechat-masquerade-' + manifest.version + '.zip ' +
+        (first ? first.length + ' B' : '缺失') + '；连续两次构建字节' + (reproducible ? '完全一致' : '不一致'),
     };
   }),
   check('R3-03', 'ZIP 内容与必需文件齐全（独立解析器交叉验证）', () => {
@@ -453,6 +460,7 @@ const FINDINGS = [
   { round: 2, item: 'R2-01 / 状态机健壮性', text: '单测暴露两个真实缺陷：先建卡再列卡会丢三张内置卡（改为独立 seeded 哨兵）；进行中再次邀请先报「角色卡不存在」而非「已有进行中」（把状态检查提前）。两处均已修复并补回归用例。' },
   { round: 2, item: 'R2-04 / 畸形输入健壮性', text: '首轮审计实跑发现 4 次未捕获异常：`String({ toString: null })` 会抛 TypeError，`get_role_card` / `update_role_card` / `delete_role_card` / `masquerade_invite` 读到畸形 card_id 时直接崩。已新增 `safeString()` 只接受标量（对象/数组/坏 toString 一律当空值），并让 `escapeHtml` 复用；48 组异常输入复测 0 次未捕获异常，核心单测 13/13 仍通过。' },
   { round: 2, item: 'R2-08 / 补丁复现的隐藏依赖', text: '上传到宿主仓库时把补丁后文件覆盖到了本地参考副本，R2-08 随即 FAIL，暴露出真实问题：`generate.mjs` 默认源是仓库外的 `_ref/orangechat/...`，用户 clone 后 `npm run verify` 必然失败，审计结果不可复现。已把原始宿主文件快照 `FilesPicker.kt.orig` 随仓库提供作为默认输入，新增 `--out` 支持，并加入「输入已是补丁后版本」的显式报错；R2-08 改为在临时目录重生成后逐字比对产物，且失败时逐条报出问题而非硬编码「成功」。此外规则改为懒执行 `evaluate()`（`--round=1` 不再连带触发构建），生成脚本默认不留中间文件，`innerHTML` 检测器升级为括号/引号平衡抓取整条赋值语句。' },
+  { round: 3, item: 'R3-02 / 可复现构建', text: '从 GitHub 干净 sparse clone 后独立跑 `npm run verify` 全绿，但重建的 ZIP 由 135612 B 变成 137677 B：Windows checkout 把文本转成 CRLF，且 `build.mjs` 用当前时间写 DOS 时间戳，导致同一份源码产物漂移。已让 `collect()` 对文本类文件统一 LF、固定 ZIP 时间戳，并把 R3-02 升级为「连续两次构建字节必须完全一致」，同时另做了一次 clone 内构建与本地产物比对。' },
   { round: 3, item: 'R3-09 / 许可合规', text: '远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。' },
   { round: 3, item: 'R3-02 / 宿主可插拔性', text: '初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。' },
 ];

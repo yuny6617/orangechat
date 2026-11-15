@@ -56,7 +56,7 @@
 | 编号 | 检查项 | 结果 | 实际核对内容 |
 |---|---|---|---|
 | R3-01 | 全量单元测试通过 | PASS | pass=23, fail=0 |
-| R3-02 | 插件 ZIP 可构建并通过 CRC 回读 | PASS | dist/orangechat-masquerade-1.0.0.zip 135612 B |
+| R3-02 | 插件 ZIP 可构建、CRC 回读且可复现 | PASS | dist/orangechat-masquerade-1.0.0.zip 135415 B；连续两次构建字节完全一致 |
 | R3-03 | ZIP 内容与必需文件齐全（独立解析器交叉验证） | PASS | Python zipfile.testzip 通过，条目 11 |
 | R3-04 | 所有 HTML/CSS 本地引用真实存在 | PASS | 无占位符 URL，引用全部命中本地文件 |
 | R3-05 | 专属 UI 四个状态视图与三个功能区齐全 | PASS | 12 个关键节点齐全，缺：无 |
@@ -67,6 +67,7 @@
 
 ### 本轮发现与修复
 
+- **R3-02 / 可复现构建**：从 GitHub 干净 sparse clone 后独立跑 `npm run verify` 全绿，但重建的 ZIP 由 135612 B 变成 137677 B：Windows checkout 把文本转成 CRLF，且 `build.mjs` 用当前时间写 DOS 时间戳，导致同一份源码产物漂移。已让 `collect()` 对文本类文件统一 LF、固定 ZIP 时间戳，并把 R3-02 升级为「连续两次构建字节必须完全一致」，同时另做了一次 clone 内构建与本地产物比对。
 - **R3-09 / 许可合规**：远程回读宿主 `FilesPicker.kt` 时确认橘瓣基于 GNU AGPL v3，而子项目 LICENSE 初版只写「上游许可继续适用」，容易让人误以为补丁文件可按 MIT 任意使用。已明确区分：原创文件 MIT、`host-patch/` 衍生文件受 AGPL-3.0 约束、与宿主一起分发时组合作品遵循 AGPL-3.0，并把该声明纳入新增的 R3-09 自动检查。
 - **R3-02 / 宿主可插拔性**：初版加号按钮是硬编码常驻，不满足「装了插件才显示」。已改为读 PluginManager.plugins 并按插件 ID + isEnabled 条件渲染；生成脚本同时适配 CRLF 换行，避免整文件 diff。
 

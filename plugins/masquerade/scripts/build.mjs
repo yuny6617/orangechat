@@ -29,6 +29,13 @@ function crc32(buf) {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
+/* 文本文件统一 LF：Windows clone 常见 CRLF，若不归一化，同一份源码会打出不同的 ZIP。 */
+const TEXT_EXT = new Set(['.js', '.json', '.html', '.css', '.svg', '.md', '.txt']);
+function normalizeEol(name, buf) {
+  if (!TEXT_EXT.has(path.extname(name).toLowerCase())) return buf;
+  return Buffer.from(buf.toString('utf8').replace(/\r\n/g, '\n'), 'utf8');
+}
+
 function collect(dir, base) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -36,7 +43,7 @@ function collect(dir, base) {
     const rel = base ? base + '/' + entry.name : entry.name;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...collect(full, rel));
-    else if (entry.isFile()) out.push({ name: rel, data: fs.readFileSync(full) });
+    else if (entry.isFile()) out.push({ name: rel, data: normalizeEol(rel, fs.readFileSync(full)) });
   }
   return out;
 }
@@ -49,7 +56,8 @@ function dosStamp(date) {
 }
 
 function buildZip(files) {
-  const stamp = dosStamp(new Date());
+  /* 固定 DOS 时间戳：配合 LF 归一化，保证同一份源码在不同机器/时间构建出完全相同的 ZIP。 */
+  const stamp = dosStamp(new Date(2026, 0, 1, 0, 0, 0));
   const locals = [];
   const centrals = [];
   let offset = 0;
