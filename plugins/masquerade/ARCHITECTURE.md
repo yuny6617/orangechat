@@ -100,21 +100,46 @@
 | 环节 | 实现 |
 |---|---|
 | 回执判定 | `sendOnce()` 只认 `r.success === true`；`undefined` / 空回执 / `success:false` 一律失败 |
-| 状态机 | `masquerade_invite` 写 `delivery=pending`；`masquerade_invite_delivery` 写 `delivered/failed`；`masquerade_invite_cancel` 把失败回滚到 `idle`（不写记忆、不删角色卡） |
+| 状态机 | `masquerade_invite` 写 `delivery=pending`；`masquerade_invite_delivery` 写 `delivered/failed`。**1.4.0 起失败不再回滚 `idle`**：邀请在插件内已成立，同步只是尽力而为的通知；`masquerade_invite_cancel` 仅用于「重试送达」前清理旧状态 |
 | 页面顺序 | **先发送、再切界面**；标题与「✓/✗ 送达状态」按真实回执渲染，没有写死的「已送到聊天里」 |
 | 降级重试 | 首次失败后去掉 `hiddenContext` 与卡片图、把文本压到 180 字内再发一次；成功标注「降级重试后送达」 |
 | 卡片载体 | 聊天里 = 请柬可见文字 + `buildInviteImage()` 用 Canvas 画的邀请函 PNG（走宿主 `uploadChatImage` 分块通道）；Canvas 不可用则纯文本；宿主 `UIMessagePart.Image` 可点击放大 |
 | 原生卡片为何不做 | 宿主红包/通话卡片是 `UIMessageAnnotation.ChatInteraction`，插件的 `sendChatMessage` 无法附加消息注解；为此改宿主消息渲染层会破坏「只改一个文件」的可插拔约束 |
-| 同意 / 婉拒 | 插件页内邀请函弹窗两个按钮，各有文风提示语；选择后把 `【假面时刻 · 应邀】`（合并启幕卡）或 `【假面时刻 · 婉拒】` 作为可见消息送进聊天，宿主 `answer=true` 让助手真的收到确认 |
+| 同意 / 婉拒 | 1.4.0 起弹窗撤销，两个按钮**平铺在页面**（真机 WebView 对 `min()` / `dvh` / 背景模糊滤镜支持不一致，曾把弹窗压成裁切胶囊）；选择后把 `【假面时刻 · 应邀】`（合并启幕卡）或 `【假面时刻 · 婉拒】` 作为可见消息送进聊天 |
 | 概要卡片 | `summaryCard` 只含压缩概要、角色、场景、轮次与 `archiveId`，**无 `transcript` 字段**；剧中具体内容不进入上下文，只能在插件档案里查看 |
 
 `tests/delivery-card.test.mjs` 用轻量 DOM stub + 模拟宿主 Bridge 在 `vm` 里真正执行 `app.js`，逐条核对 `sendChatMessage` 的调用参数与状态机回执，不是静态文本断言。
+
+## 4.4 主聊天助手调用工具应邀（1.4.0，主路径）
+
+**这才是「和助手玩」的正确通道，之前三轮都绕开了它。**
+
+| 宿主依据 | 结论 |
+|---|---|
+| `ToolSurfaceBuilder.kt:106` | `addAll(pluginToolProvider.getTools(...))` —— `manifest.tools` **本来就会注册进发给 LLM 的 tools 数组** |
+| `PluginToolProvider.createTool()` | `buildDescription()` 把 `toolDef.description` 原样发给模型（追加一行 `Provided by plugin: …`）；`needsApproval = true`，首次调用会出现批准框 |
+| `ToolNaming.buildPluginToolName()` | 工具名变成 `plg_<8位hash>_<原名>`，模型按 tools 定义里的实际名称调用，裸名对不上 |
+| `PluginToolProvider.getPluginPromptInjections()` | 只有 `plugin.config["inject_as_prompt"] == "true"` 才注入 `promptTemplate` |
+| `PluginManager.refreshPluginsInternal()` | `plugin.config` 来自 `savedSettings.configs[id]`（用户显式保存的覆盖值）；`manifest.config` 的 `default: true` **不会自动落库** |
+
+也就是说：宿主会自动注入一条「插件能力总览」，但**具体的假面舞会规则默认不进系统提示词**。旧版把规则只写在 `promptTemplate` 里，工具描述又写成说明书（「递出假面请柬」），助手于是只回自然语言「能看到」，从不调工具，邀约自然进不了对话。
+
+1.4.0 的修正：
+
+1. **把规则放进必然送达的通道**——`masquerade_invite` / `masquerade_accept` / `masquerade_end` 的 `description` 各写三段：【必须调用的场景】（列出用户真实措辞）、【调用后必须做什么】、【语义边界】。
+2. **给工具返回值加输出契约**——`replyToUser`（要原样输出的卡片文本）与 `replyInstruction`（「一字不改、不要输出 JSON、不要复述工具名」）。工具结果在橘瓣里是折叠的「调用工具」块，用户看得见的是助手的**回复文本**，所以这一步决定邀约是否真正进对话。
+3. **三拍链路**：用户说「我们玩一场假面舞会吧」→ 助手调 `masquerade_invite` 输出请柬卡 → 用户「我愿意」→ 调 `masquerade_accept` 输出启幕卡 → 用户「摘下面具」→ 调 `masquerade_end` 输出只含压缩概要的落幕卡。
+4. **`promptTemplate` 降级为辅助说明**：修正工具名前缀说明，去掉与 `replyToUser` 冲突的旧 `chatCardText` 契约；并明确「核心规则在工具描述里，即使本模板未注入也要遵守」。
+5. **不依赖开关**：用户若不打开 `inject_as_prompt`，主路径照常可用；打开并保存一次只是额外获得长期语义规则。
+6. **兜底**：插件页提供「复制请柬文本，贴进聊天」，用户手动粘贴后助手同样按工具描述应邀；页面自动同步失败也不回滚状态。
+
+`tests/chat-tool-invite.test.mjs` 模拟宿主按工具名调用，逐条核对触发措辞、`replyToUser` 与三拍输出，不依赖 `sendChatMessage`。
 
 ## 5. 让助手知道「刚才是游戏」的四条冗余通道
 
 任何一条单独失效都不足以误导模型，四条同时保证：
 
-1. `promptTemplate`（`inject_as_prompt` 默认 `true`）—— 宿主 `PluginToolProvider.getPluginPromptInjections()` 只在配置为 `true` 时注入，所以默认开启是硬要求。
+1. `promptTemplate` —— 宿主 `getPluginPromptInjections()` 只在用户**显式保存** `inject_as_prompt=true` 时注入，`default: true` 不会自动落库；因此 1.4.0 起核心触发条件与语义边界同时写进工具描述，**这一条不再是不可缺的硬要求**。
 2. 落幕 `closingNote` 作为 `Bridge.sendChatMessage` 的 `hiddenContext` → 宿主映射为 `transientSystemPrompt`，只对落幕那轮请求生效，不永久污染系统提示词。
 3. `memoryBank.save(closingNote)` —— 整场只写一条，明确标注「游戏 / 不是真实发生的事 / 平时依旧是原本的真实情感关系」。
 4. 用户可见的落幕卡 `【假面时刻 · 落幕】` —— 卡里带**压缩概要**和「不是真实发生的事 / 完整台词不进入本对话」标注，与 `promptTemplate` 里的识别标记一致，模型看到即知道收场。

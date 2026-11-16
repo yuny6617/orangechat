@@ -381,7 +381,8 @@ const ROUND_1 = [
       dec.cancelled === true && dec.memoryWritten === false,
       acc.consentLine !== dec.consentLine,
       /syncToChat\(combined, hidden/.test(ui) && /syncToChat\(r\.chatDeclineCard/.test(ui),
-      /btn-modal-accept/.test(ui) && /btn-modal-decline/.test(ui),
+      /btn-accept/.test(ui) && /btn-decline/.test(ui),
+      acc.replyToUser === acc.chatCardText && dec.replyToUser === dec.chatDeclineCard,
     ];
     return {
       ok: cond.every(Boolean),
@@ -406,6 +407,25 @@ const ROUND_1 = [
     return {
       ok: cond.every(Boolean),
       detail: '概要卡片与落幕可见文本都不带逐字台词；完整台词只能凭档案 ID 在插件内查看',
+    };
+  }),
+  check('R1-21', '主聊天工具自带触发条件与原样输出契约，不依赖 promptTemplate 注入', () => {
+    const names = ['masquerade_invite', 'masquerade_accept', 'masquerade_end'];
+    const defs = names.map((n) => manifest.tools.find((t) => t.name === n));
+    const descriptionsOk = defs.every((d) => d &&
+      d.description.includes('必须调用的场景') && d.description.includes('replyToUser') &&
+      d.description.includes('一字不改') && d.description.includes('角色扮演'));
+    const s = sandbox();
+    const inv = s.api.masquerade_invite({ scene: '雨夜' });
+    const acc = s.api.masquerade_accept({});
+    const end = s.api.masquerade_end({});
+    const replies = [inv, acc, end];
+    return {
+      ok: descriptionsOk && replies.every((r) =>
+        r.replyToUser === (r.chatInviteCard || r.chatCardText) &&
+        r.replyInstruction.includes('一字不改')),
+      detail: '宿主 getPluginPromptInjections() 只在用户显式保存 inject_as_prompt=true 时注入模板；' +
+        '关键规则已写进 toolDef.description（必然发给 LLM），返回值带 replyToUser 供助手原样输出',
     };
   }),
 ];
@@ -559,12 +579,14 @@ const ROUND_2 = [
       detail: '请柬投当前会话（含无消息的新会话）；落幕概要仍投 messageCount>0 的最新会话；权限回执严格校验',
     };
   }),
-  check('R2-14', '端到端链路测试真实执行 app.js 并逐条核对送达与选择', () => {
-    const r = spawnSync(process.execPath, ['--test', 'tests/delivery-card.test.mjs'], { cwd: ROOT, encoding: 'utf8' });
+  check('R2-14', '端到端链路测试真实执行 app.js 与工具调用链', () => {
+    const r = spawnSync(process.execPath,
+      ['--test', 'tests/delivery-card.test.mjs', 'tests/chat-tool-invite.test.mjs'],
+      { cwd: ROOT, encoding: 'utf8' });
     const out = (r.stdout || '') + (r.stderr || '');
     return {
-      ok: r.status === 0 && /# pass 14/.test(out) && /# fail 0/.test(out),
-      detail: '模拟宿主 Bridge 的 Promise 回调契约，实跑 14 条用例：送达 / 失败回滚 / 降级重试 / 同意 / 婉拒 / 隔离',
+      ok: r.status === 0 && /# pass 25/.test(out) && /# fail 0/.test(out),
+      detail: '模拟宿主 Bridge 回调与 LLM 按工具名调用，实跑 25 条：送达 / 失败标注 / 同意 / 婉拒 / replyToUser 输出契约',
     };
   }),
   check('R2-15', '新增卡片与弹窗代码仍满足转义、无外链与无动态执行约束', () => {
@@ -578,7 +600,17 @@ const ROUND_2 = [
       /function esc\(/.test(app) && /function text\(/.test(app),
       /function renderInviteCard\(/.test(app) && /function renderSummaryCard\(/.test(app),
     ];
-    return { ok: cond.every(Boolean), detail: '卡片与弹窗的动态内容一律 textContent / esc；无 eval、无外链资源' };
+    return { ok: cond.every(Boolean), detail: '邀请函与概要卡片的动态内容一律 textContent / esc；无 eval、无外链资源' };
+  }),
+  check('R2-16', '送达失败只标注不回滚，玩法不被同步链路阻断', () => {
+    const ui = read('plugin/ui/app.js');
+    const cond = [
+      !/masquerade_invite_cancel[\s\S]{0,200}showPane\('idle'\)/.test(ui),
+      ui.includes('请柬未送达聊天 · 仍可继续'),
+      ui.includes('也可以复制下面的请柬文本贴进聊天'),
+      /copyInviteText/.test(ui),
+    ];
+    return { ok: cond.every(Boolean), detail: '同步失败如实显示但状态保持 invited，用户仍可同意/婉拒或复制请柬贴进对话' };
   }),
 ];
 
@@ -683,23 +715,24 @@ const ROUND_3 = [
       detail: '复刻 ZipInputStream 流式读取 + findManifest + validateManifest；5 组正反样本证明源码包/缺清单包必被判失败',
     };
   }),
-  check('R3-11', '版本与文档口径一致：1.3.0、邀请函卡片、回执与隔离说明', () => {
+  check('R3-11', '版本与文档口径一致：1.4.0、工具触发契约、回执与隔离说明', () => {
     const pkg = JSON.parse(read('package.json'));
     const docs = ['README.md', 'PULL_REQUEST.md', 'host-patch/README.md', 'mcp/README.md']
       .map((f) => ({ f, s: read(f) }));
-    const versionOk = pkg.version === manifest.version && manifest.version === '1.3.0';
-    const stale = docs.filter((d) => /1\.1\.0|1\.0\.0\.zip|1\.2\.0\.zip/.test(d.s));
+    const versionOk = pkg.version === manifest.version && manifest.version === '1.4.0';
+    const stale = docs.filter((d) => /1\.1\.0|1\.0\.0\.zip|1\.2\.0\.zip|1\.3\.0\.zip/.test(d.s));
     const readme = read('README.md');
     const arch = read('ARCHITECTURE.md');
     const sec = read('SECURITY.md');
     const hints = ['设置 → 插件管理 → 假面舞会', '演绎档案', '压缩概要', 'MODEL_NOT_CONFIGURED',
-      '邀请函', '同意赴约', '婉拒', '送达回执', '具体内容不进入上下文'];
+      '邀请函', '同意赴约', '婉拒', '送达回执', '具体内容不进入上下文',
+      'replyToUser', '工具描述', 'inject_as_prompt'];
     const docHints = hints.filter((h) => !readme.includes(h) && !arch.includes(h) && !sec.includes(h));
     return {
       ok: versionOk && stale.length === 0 && docHints.length === 0,
       detail: 'v' + manifest.version + ' 全局一致' +
         (stale.length ? '；旧版本残留：' + stale.map((d) => d.f).join(', ') : '') +
-        (docHints.length ? '；文档缺口径：' + docHints.join(', ') : '；1.3.0 新语义均已写入文档'),
+        (docHints.length ? '；文档缺口径：' + docHints.join(', ') : '；1.4.0 工具链路口径均已写入文档'),
     };
   }),
   check('R3-12', '落幕压缩概要与演绎档案在页面里真实可见', () => {
@@ -719,25 +752,38 @@ const ROUND_3 = [
       detail: '落幕页展示压缩概要与压缩来源；档案 tab 可列表、详情回放完整台词、导出与删除',
     };
   }),
-  check('R3-13', '邀请函弹窗卡片、同意/拒绝按钮与落幕概要卡片在页面真实可见', () => {
+  check('R3-13', '无消息内弹窗：按钮平铺 + 可复制请柬兜底 + 概要卡片可见', () => {
     const html = read('plugin/ui/index.html');
     const css = read('plugin/ui/style.css');
     const ui = read('plugin/ui/app.js');
-    const ids = ['invite-card-preview', 'invite-modal', 'btn-modal-accept', 'btn-modal-decline',
-      'modal-accept-line', 'modal-decline-line', 'summary-card', 'summary-card-text',
+    const ids = ['invite-card-preview', 'btn-accept', 'btn-decline', 'btn-copy-invite',
+      'invite-copy-text', 'accept-line', 'decline-line', 'summary-card', 'summary-card-text',
       'btn-summary-archive', 'invite-delivery', 'btn-retry-delivery'];
+    const gone = ['invite-modal', 'btn-modal-accept', 'btn-modal-decline', 'btn-modal-close'];
     const cond = [
       ids.every((id) => html.includes('id="' + id + '"')),
-      /\.invitation-card\s*\{/.test(css) && /\.modal-sheet\s*\{/.test(css) && /\.summary-card\s*\{/.test(css),
+      gone.every((id) => !html.includes('id="' + id + '"')),
+      /\.invitation-card\s*\{/.test(css) && /\.choice-panel\s*\{/.test(css) && /\.summary-card\s*\{/.test(css),
+      !/\.modal-sheet\s*\{/.test(css) && !/backdrop-filter/.test(css),
       html.includes('同意赴约') && html.includes('婉拒'),
       /function renderInviteCard\(/.test(ui) && /function renderSummaryCard\(/.test(ui),
-      /function openInviteModal\(/.test(ui) && /function consentTo\(/.test(ui),
-      /buildInviteImage\(/.test(ui),
+      /function copyInviteText\(/.test(ui) && !/openInviteModal|closeInviteModal/.test(ui),
     ];
     return {
       ok: cond.every(Boolean),
-      detail: '邀请函卡片可点开弹窗、双按钮与文风提示语齐全；落幕概要卡片与聊天里的卡片图均有实现',
+      detail: '真机塌陷的全屏弹窗已彻底移除；同意/婉拒平铺、请柬可复制贴进聊天；概要卡片与卡片图仍在',
     };
+  }),
+  check('R3-14', '提示词与工具描述一致：工具名前缀、输出契约、无旧字段冲突', () => {
+    const t = manifest.promptTemplate;
+    const cond = [
+      t.includes('plg_') && t.includes('replyToUser') && t.includes('一字不改'),
+      !t.includes('把返回里的 `chatCardText` **原样输出**'),
+      /host|宿主/.test(read('ARCHITECTURE.md')),
+      read('SECURITY.md').includes('inject_as_prompt'),
+      read('README.md').includes('工具描述'),
+    ];
+    return { ok: cond.every(Boolean), detail: '文档说明宿主工具名前缀、inject_as_prompt 需显式保存，且工具描述才是主通道' };
   }),
 ];
 
@@ -773,6 +819,10 @@ const FINDINGS = [
   { round: 1, item: 'R1-20 / 落幕概要卡片与具体内容隔离', text: '新增 `summaryCard` 数据结构：只带压缩概要、角色、场景、轮次与档案 ID，**不含 transcript 字段**。页面用它渲染与邀请函同风格的落幕概要卡片，并给「在插件内查看完整演绎」入口跳档案 tab；聊天里仍只发 `buildClosingChatCard` 的可见概要文本。用带模型的沙箱真实写入一句剧中台词后验证：概要卡片、落幕可见文本都不含逐字台词，台词只存在于 `mb:archive:*`。' },
   { round: 2, item: 'R2-14 / 旧验证链只做静态文本断言，覆盖不到运行时链路', text: '上一轮的「送达」测试只检查 app.js 里有没有某段字符串，无法证明 `sendChatMessage` 真的被调用。本轮新增 `tests/delivery-card.test.mjs`：用轻量 DOM stub 与模拟宿主 Bridge（Promise 回调契约）在 `vm` 里真正执行 `plugin/ui/app.js`，14 条用例覆盖送达、误投会话、权限拒绝、降级重试、同意、婉拒、落幕隔离与卡片图降级。' },
   { round: 2, item: 'R2-06 / 文件规模阈值过时', text: '新增邀请函卡片、弹窗、回执链路与概要卡片后，`main.js` 1073 行、`app.js` 1024 行，超过旧的 1000 行阈值导致 R2-06 FAIL。这不是质量退化：阈值按实际上限调整为 1200 行并在检查项里明示上限来源，其余审查项（ES5、转义、无外链）仍逐条实跑。' },
+  { round: 1, item: 'R1-21 / 走错了通道：助手本来就能调用插件工具', text: '真机第三轮反馈：邀请函弹窗在 WebView 里塌成一条被裁切的胶囊，且邀约始终没进主聊天。回读宿主 `ToolSurfaceBuilder.kt:106` 确认 `PluginToolProvider.getTools()` **本来就把 manifest.tools 注册给主聊天 LLM**；但 `getPluginPromptInjections()` 只在 `plugin.config["inject_as_prompt"] == "true"` 时注入 `promptTemplate`，而 `PluginManager.refreshPluginsInternal()` 用的是用户显式保存的 `savedConfig`（默认 `default:true` 不会自动落库），所以规则大多没进系统提示词。更关键的是旧工具描述像说明书（「递出假面请柬」），没写何时必须调用、调用后要把哪段文本原样输出。助手于是只回自然语言「能看到」，从不调工具。本轮把触发条件、输出契约与语义边界全部写进 `toolDef.description`（`buildDescription()` 必然发给 LLM），并在返回值新增 `replyToUser` + `replyInstruction`；promptTemplate 改为辅助说明并修正工具名前缀 `plg_`。' },
+  { round: 1, item: 'R1-19 / 工具名前缀与输出契约', text: '宿主 `ToolNaming.buildPluginToolName()` 把插件工具改成 `plg_<8位hash>_<原名>`，旧 promptTemplate 里列的是裸名，助手对不上 tools 定义。已在模板里说明按 tools 实际名称调用；三个流程工具（invite/accept/end）各返回 `replyToUser`，要求助手「一字不改」作为回复输出，不输出 JSON / 不复述工具名。工具结果本身在 UI 里是折叠的「调用工具」块，只有助手的回复才是用户看得见的对话，所以这一步是邀约能否进对话的关键。' },
+  { round: 3, item: 'R3-13 / 消息内弹窗在真机塌陷，按用户要求撤销', text: '截图显示邀请函弹窗只显示一条被裁切的胶囊、背景模糊、内容完全看不到。根因是 `.modal-sheet` 用了 `width: min(450px,100%)`、`max-height: 92dvh` 与 `backdrop-filter: blur()`，真机 WebView 对这些较新 CSS 特性支持不一致；本地只做了静态断言、没做真机验证。用户明确「在消息里面弹窗那就不做了」。本轮彻底删除弹窗 DOM、CSS 与 JS（`openInviteModal`/`closeInviteModal`），把「同意赴约 / 婉拒」平铺在页面上，新增可复制请柬文本贴进聊天的兜底，并把 body / transcript 的 `dvh` 改成 `vh` 优先的双写。' },
+  { round: 2, item: 'R2-16 / 送达失败不该阻断玩法', text: '1.3.0 把「送达失败」绑定为回滚 idle，结果页面自动发请柬失败时用户连在插件里启幕都做不到。1.4.0 把「邀请成立」与「同步到聊天」解耦：失败如实标注 `✗ 未送达` 并保留 `invited`，用户仍可同意/婉拒，也可复制请柬贴进聊天让助手用工具应邀。既不假成功，也不把人卡住。' },
 ];
 
 function buildReport(results, allOk) {

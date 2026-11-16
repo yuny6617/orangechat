@@ -18,6 +18,8 @@
 | 请柬被投到错误的会话 | 目标拆分：`current`（含无消息的新会话）用于请柬/应邀/婉拒，`latestActive` 用于落幕概要；`listConversations` 返回 `success:false` 时明确报因 |
 | 同意 / 婉拒只在插件内自嗨，助手收不到 | 两种选择都生成可见确认消息送进聊天（宿主 `answer=true` 触发助手回复）；婉拒不写记忆、不产生剧情 |
 | 剧中具体内容泄漏进上下文 | `summaryCard` 无 `transcript` 字段；落幕可见文本只含压缩概要；完整台词只能凭档案 ID 在插件内查看 |
+| 助手该调工具却不调、邀约进不了对话 | 触发条件与「把 `replyToUser` 一字不改输出」写进 `toolDef.description`（必然发给 LLM），返回值再带一份 `replyInstruction`；不依赖 `promptTemplate` 是否注入 |
+| 插件工具名被前缀改写导致调用失败 | 宿主 `ToolNaming` 会加 `plg_<8位hash>_` 前缀；`promptTemplate` 已说明按 tools 实际名称调用，不在描述里写死裸名 |
 | 档案越权读 / 路径式 ID | `parseArchiveId()` 要求原始值为字符串且匹配 ID 正则，拒绝数字与带 `toString` 的对象；档案只读插件私有 `dataStore` |
 | WebView XSS | 所有动态渲染用 `textContent` 或 `esc()`；无 `eval` / `new Function`；无外链资源 |
 | MCP server 偷偷联网或读密钥 | 沙箱注入 `noNetworkFetch`；`config` 不含 `api_key`；无子进程 / `node:https` |
@@ -56,15 +58,15 @@
 ## 5. 自动审计
 
 ```bash
-node --test tests/*.test.mjs     # 55 个用例；其中 14 条端到端链路测试真正执行 app.js
-node audit/audit.mjs             # 三轮 48 项，逐条实跑
+node --test tests/*.test.mjs     # 66 个用例；其中 25 条端到端链路测试真正执行 app.js / 工具调用链
+node audit/audit.mjs             # 三轮 51 项，逐条实跑
 node scripts/verify-package.mjs  # 宿主同款导入自检（也可传入任意 ZIP 路径排障）
 node audit/audit.mjs --round=1   # 只跑某一轮（懒执行，不会连带触发构建副作用）
 ```
 
-- 第 1 轮：信任边界与数据隔离（20 项，新增送达回执、会话选择、同意/婉拒确认、概要卡片隔离）
-- 第 2 轮：契约、健壮性与工程规范（15 项，新增端到端链路实跑、卡片/弹窗转义与无外链约束）
-- 第 3 轮：可构建、可预览、可追溯（13 项，新增邀请函弹窗与落幕概要卡片可见性）
+- 第 1 轮：信任边界与数据隔离（21 项，新增 R1-21：工具描述自带触发条件与原样输出契约）
+- 第 2 轮：契约、健壮性与工程规范（16 项，新增 R2-16：送达失败只标注不回滚）
+- 第 3 轮：可构建、可预览、可追溯（14 项，新增 R3-14：提示词与工具描述一致、无旧字段冲突）
 
 检测器自带 20 组正反样本自测（`selfTest()`），故意构造硬编码密钥、通配符白名单、未转义 `innerHTML`、`map` 回调内的裸插值等坏样本，确保规则本身不会假阴性放行。任一检查 FAIL 即退出码 1。
 
@@ -72,7 +74,9 @@ node audit/audit.mjs --round=1   # 只跑某一轮（懒执行，不会连带触
 
 - 未在本地执行 **Gradle 编译**与 **Android 真机 WebView 运行**。宿主补丁只使用 `FilesPicker.kt` / `ChatDrawer.kt` 中已存在的 import 与 API，编译与 UI 落地由 PR 的 CI 与真机验收兜底。
 - 「压缩概要进入最新会话」依赖 `listConversations()` 的 `messageCount` 与 `updateAt` 排序（已按宿主源码核对），未做真机验证；若列表为空或全部 `messageCount === 0`，落幕卡会退回插件页面展示，不强行新建会话。
-- 聊天里的邀请函是「可见文字 + 本地生成的 PNG 卡片图」，**不是**宿主原生可点击互动卡片：宿主红包/通话卡片依赖 `UIMessageAnnotation.ChatInteraction`，插件桥接无法附加注解。带「同意 / 婉拒」按钮的邀请函弹窗在插件页面内；这一取舍保住了「宿主只改一个文件」的可插拔约束。
+- 聊天里的邀请函是「可见文字 + 本地生成的 PNG 卡片图」，**不是**宿主原生可点击互动卡片：宿主红包/通话卡片依赖 `UIMessageAnnotation.ChatInteraction`，插件桥接无法附加注解。1.4.0 起**全屏邀请函弹窗已撤销**（真机 WebView 兼容问题），同意 / 婉拒按钮平铺在插件页；这一取舍保住了「宿主只改一个文件」的可插拔约束。
+- 宿主 `getPluginPromptInjections()` 只读用户显式保存的 `inject_as_prompt` 配置，`manifest.config` 的 `default: true` 不会自动落库；因此长期语义规则默认可能不进系统提示词。核心触发条件与输出契约已全部放进工具描述，主路径不依赖该开关；若希望额外注入规则，需在宿主插件详情页打开开关并保存一次。
+- 插件工具 `needsApproval = true`，首次调用会出现批准框；LLM 是否按工具描述把 `replyToUser` 原样输出属于模型行为，本地只做了确定性契约与返回值验证，未在真机 LLM 上联调。
 - 邀请函 PNG 走宿主 `uploadChatImage` 分块通道（`bridge://` URL 传 base64 片段），真机上若分块失败会自动降级为纯文本请柬；该降级路径只在本地模拟过，未在真机 WebView 验证。
 - `Bridge.sendChatMessage` 的 `transientSystemPrompt` 「只对本次请求生效」来自宿主源码核对，未做真机验证。
 - 模型接口只做本地 mock 行为验证，**未对任何真实供应商发起请求**，不消耗额度、不接触真实密钥。

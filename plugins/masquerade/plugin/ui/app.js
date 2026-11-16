@@ -632,7 +632,7 @@
     if (line && rows < 2) g.fillText(line, x, y + rows * lineHeight);
   }
 
-  /* 邀请函卡片（插件页内）：可点开的全屏弹窗，与聊天里的请柬同源。 */
+  /* 邀请函卡片（插件页内纯展示，1.4.0 起不再有全屏弹窗）。 */
   function renderInviteCard(card) {
     if (!card) return;
     state.inviteCard = card;
@@ -642,22 +642,37 @@
     text($('#invite-card-scene'), card.scene || '');
     text($('#invite-card-mask'), card.userMask || '');
     text($('#invite-card-copy'), card.invitation || '');
-    text($('#modal-accept-line'), card.acceptLine || '');
-    text($('#modal-decline-line'), card.declineLine || '');
-    text($('#btn-modal-accept'), card.acceptLabel || '同意赴约');
-    text($('#btn-modal-decline'), card.declineLabel || '婉拒');
+    text($('#accept-line'), '✦ ' + (card.acceptLine || ''));
+    text($('#decline-line'), '✦ ' + (card.declineLine || ''));
+    /* 送不进聊天时，用户可以把这段请柬自己贴进对话框；助手会按工具描述应邀。 */
+    var box = $('#invite-copy-text');
+    if (box) box.value = card.chatInviteCard || card.invitation || '';
   }
 
-  function openInviteModal() {
-    var m = $('#invite-modal');
-    if (!m) return;
-    m.hidden = false;
-    document.body.classList.add('modal-open');
-  }
-  function closeInviteModal() {
-    var m = $('#invite-modal');
-    if (m) m.hidden = true;
-    document.body.classList.remove('modal-open');
+  /* 复制请柬：剪贴板不可用时明确提示手动长按复制，不假装成功。 */
+  function copyInviteText() {
+    var box = $('#invite-copy-text');
+    if (!box || !box.value) { toast('请先递出请柬'); return; }
+    var hint = $('#copy-hint');
+    function showHint(msg) {
+      if (hint) { hint.hidden = false; text(hint, msg); }
+      toast(msg);
+    }
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        Promise.resolve(navigator.clipboard.writeText(box.value)).then(function () {
+          showHint('✓ 已复制，回到聊天里粘贴发给助手即可。');
+        }).catch(function () {
+          box.focus(); box.select();
+          showHint('浏览器没有给剪贴板权限：请长按上面的文字手动复制。');
+        });
+        return;
+      }
+      box.focus(); box.select();
+      showHint('当前环境不支持自动复制：请长按上面的文字手动复制。');
+    } catch (e) {
+      showHint('当前环境不支持自动复制：请长按上面的文字手动复制。');
+    }
   }
 
   function setDeliveryText(el, s) {
@@ -701,23 +716,30 @@
             error: s.error || s.reason || ''
           }).then(function () {
             setBusy(false);
+            var card = r.inviteCard || {};
+            card.chatInviteCard = r.chatInviteCard;
+            renderInviteCard(card);
+            showPane('invited');
+            setDeliveryText($('#invite-delivery'), s);
             if (s.synced) {
-              renderInviteCard(r.inviteCard);
-              showPane('invited');
               text($('#invited-heading'), '请柬已送到聊天里');
               text($('#assistant-consent'),
-                '助手会在对话框里看到这张请柬并回应你。点开下面的邀请函，选择「同意赴约」或「婉拒」。');
-              setDeliveryText($('#invite-delivery'), s);
+                '助手会在对话框里看到这张请柬并回应你。下面直接选「同意赴约」或「婉拒」。');
               $('#btn-retry-delivery').hidden = true;
               $('#btn-retry-invited').hidden = true;
             } else {
-              return callTool('masquerade_invite_cancel', { error: s.error || s.reason || '' })
-                .then(function () {
-                  showPane('idle');
-                  setDeliveryText($('#delivery-error'), s);
-                  $('#btn-retry-delivery').hidden = false;
-                  toast('请柬没能送进聊天：' + (s.reason || '发送失败') + '。已回到待邀状态，可点「重试送达」。');
-                });
+              /*
+               * 1.4.0：送达失败不再回滚 idle。邀请在插件内已经成立，
+               * 用户仍可在这里同意/婉拒，也可以复制请柬贴进聊天让助手用工具应邀。
+               * 只把失败如实显示出来，不假装送达、也不把人卡在待邀状态。
+               */
+              text($('#invited-heading'), '请柬未送达聊天 · 仍可继续');
+              text($('#assistant-consent'),
+                '同步到聊天失败（' + (s.error || s.reason || '') + '）。你仍可在下面选「同意赴约」或「婉拒」；' +
+                '也可以复制下面的请柬文本贴进聊天，助手会调用假面舞会工具应邀。');
+              $('#btn-retry-delivery').hidden = false;
+              $('#btn-retry-invited').hidden = false;
+              toast('请柬没能自动送进聊天，已如实标注；可重试送达或复制请柬贴进对话。');
             }
           });
         });
@@ -743,7 +765,6 @@
    * 送进聊天（宿主 answer=true 会触发一次助手回复，助手因此确实收到确认）。
    */
   function consentTo(choice) {
-    closeInviteModal();
     setBusy(true);
     if (choice === 'decline') {
       return callTool('masquerade_end', { reason: '婉拒了这张请柬' }).then(function (r) {
@@ -897,7 +918,7 @@
             eyebrow: 'Une invitation', title: '谨邀你共赴一场假面舞会',
             partner: r.session ? r.session.partner : '假面舞伴', partnerEmoji: '🎭',
             scene: r.session ? r.session.scene : '', userMask: r.session ? r.session.userMask : '',
-            invitation: r.invitation, acceptLabel: '同意赴约', declineLabel: '婉拒',
+            invitation: r.invitation, chatInviteCard: r.invitation,
             acceptLine: '丝带已系好，面具已戴上。今夜第三支曲子，我赴约。',
             declineLine: '也好，把面具收回丝绒盒吧。等你想跳的那一夜，灯会再亮起。'
           });
@@ -960,22 +981,11 @@
     b.addEventListener('click', function () { switchTab(b.dataset.view); });
   });
   $('#btn-invite').addEventListener('click', doInvite);
-  $('#btn-accept').addEventListener('click', openInviteModal);
-  $('#invite-card-preview').addEventListener('click', openInviteModal);
-  $('#btn-modal-accept').addEventListener('click', function () { consentTo('accept'); });
-  $('#btn-modal-decline').addEventListener('click', function () { consentTo('decline'); });
-  $('#btn-modal-close').addEventListener('click', closeInviteModal);
-  $('#invite-modal').addEventListener('click', function (e) {
-    if (e.target === $('#invite-modal')) closeInviteModal();
-  });
+  $('#btn-accept').addEventListener('click', function () { consentTo('accept'); });
+  $('#btn-decline').addEventListener('click', function () { consentTo('decline'); });
+  $('#btn-copy-invite').addEventListener('click', copyInviteText);
   $('#btn-retry-delivery').addEventListener('click', retryDelivery);
   $('#btn-retry-invited').addEventListener('click', retryDelivery);
-  $('#invite-card-preview').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openInviteModal(); }
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !$('#invite-modal').hidden) closeInviteModal();
-  });
   $('#btn-summary-archive').addEventListener('click', function () {
     switchTab('archive');
     var id = state.lastArchiveId || (state.closing && state.closing.archiveId);

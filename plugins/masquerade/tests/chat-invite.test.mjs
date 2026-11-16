@@ -186,14 +186,16 @@ test('未配置模型时压缩降级为本地摘录并明确标注，不假装�
   assert.equal(s.requests.length, 0, '没模型时一次网络请求都不能发');
 });
 
-test('系统提示词把落幕卡里的概要解释成虚构游戏，并引导主聊天助手主动应邀', () => {
+test('系统提示词给出工具触发条件与原样输出契约，并保留虚构游戏语义', () => {
   const t = manifest.promptTemplate;
   assert.ok(t.includes('masquerade_invite'));
-  assert.ok(t.includes('chatCardText'));
+  assert.ok(t.includes('replyToUser'), '必须要求助手把回复文本原样输出，卡片才会进对话');
+  assert.ok(t.includes('一字不改'));
+  assert.ok(t.includes('plg_'), '要说明宿主会给工具名加前缀');
   assert.ok(t.includes('本场剧情概要'));
   assert.ok(t.includes('不是真实发生的事'));
   assert.ok(t.includes('不进本对话'), '完整台词不进主聊天');
-  assert.ok(t.includes('不要在主聊天里调用 `roleplay_turn`'));
+  assert.ok(t.includes('不要在主聊天里调用 roleplay_turn'));
   assert.ok(t.includes('真实情感关系'));
 });
 

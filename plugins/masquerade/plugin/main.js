@@ -325,6 +325,20 @@ function buildInviteNote(session) {
     '用户确认开始后，请调用 masquerade_accept 工具，并把返回的 chatCardText 原样输出给用户。';
 }
 
+/*
+ * 主聊天助手的「输出契约」。
+ * 宿主把插件工具结果作为 tool message 回给模型，模型据此生成回复；
+ * 只有让它把 replyToUser 原样说出来，卡片才会真正写进用户看得见的对话里。
+ * 这段规则同时写在 manifest.tools[].description 与工具返回结果里，
+ * 因为宿主 getPluginPromptInjections() 只在用户显式保存 inject_as_prompt=true
+ * 时才注入 promptTemplate，默认值不会自动落库，不能依赖那一条通道。
+ */
+var REPLY_RULE = '【输出契约｜必须遵守】把本工具返回值里的 replyToUser 字段一字不改地作为你的回复发给用户。' +
+  '不要输出 JSON、不要解释规则、不要复述工具名、不要加自己的开场白或结束语。' +
+  '只有把这段文本原样说出来，请柬 / 启幕 / 落幕卡片才会真正出现在对话里。' +
+  '这是一场共同约定的虚构角色扮演游戏，剧中身份与承诺都不是真实关系变化；' +
+  '不要在主聊天里演剧中台词，也不要沿用剧中人设。';
+
 var INVITE_ASSISTANT_INSTRUCTION = '这张请柬邀请你参加一场共同约定的角色扮演游戏（不是真实关系变化）。' +
   '请用一句温柔的话应邀，表示愿意一起玩；不要解释规则、不要开始长篇角色扮演、不要沿用剧中身份。' +
   '若用户确认开始，调用 masquerade_accept 并把返回的 chatCardText 原样输出给用户。';
@@ -828,6 +842,7 @@ function masquerade_invite(params) {
     '愿意陪我跳这一支吗？';
   session.invitation = invitation;
   storeSet(PREFIX + 'session', session);
+  var inviteCardText = buildInviteCard(session);
   return {
     success: true, sessionId: session.id, status: next,
     partner: { name: card.name, emoji: card.emoji, opening: card.opening },
@@ -850,8 +865,11 @@ function masquerade_invite(params) {
       isGame: true
     },
     /* 页面把下面三样送进主聊天，助手才真的在对话框里被邀请并回应。 */
-    chatInviteCard: buildInviteCard(session),
+    chatInviteCard: inviteCardText,
     chatHiddenContext: buildInviteNote(session),
+    /* 主聊天助手直接调用本工具时，必须把这段原样输出到对话里。 */
+    replyToUser: inviteCardText,
+    replyInstruction: REPLY_RULE,
     assistantInstruction: INVITE_ASSISTANT_INSTRUCTION,
     chatSource: source,
     isGame: true,
@@ -924,6 +942,9 @@ function masquerade_accept(params) {
     },
     chatCardText: buildChatCard('open', s, s.assistantReply),
     chatHiddenContext: buildStageOpeningNote(s),
+    /* 主聊天助手调用本工具时，把启幕卡原样输出到对话里。 */
+    replyToUser: buildChatCard('open', s, s.assistantReply),
+    replyInstruction: REPLY_RULE,
     /*
      * 用户在邀请函上点「同意赴约」后，这条确认必须作为可见消息送进聊天：
      * answer=true 会让助手真的收到并回应，而不是只在插件里自嗨。
@@ -1000,11 +1021,14 @@ function masquerade_end(params) {
   /* 仅递出请柬、助手尚未应邀：收回即可，不写记忆、不往主聊天发落幕卡。 */
   if (s.status === 'invited') {
     storeSet(PREFIX + 'session', { id: s.id, status: 'idle', endedAt: nowIso(), turns: 0 });
+    var declineText = buildConsentChatCard('decline', s);
     return {
       success: true, status: 'idle', cancelled: true, isGame: true,
       /* 婉拒也要在聊天里留一句，助手才知道请柬被收回、这一场没有开始。 */
-      chatDeclineCard: buildConsentChatCard('decline', s),
+      chatDeclineCard: declineText,
       chatDeclineHiddenContext: buildConsentHiddenContext('decline'),
+      replyToUser: declineText,
+      replyInstruction: REPLY_RULE,
       consentLine: CONSENT_DECLINE_LINE,
       chatCardText: null, chatHiddenContext: null, memoryWritten: false, error: null
     };
@@ -1030,6 +1054,7 @@ function masquerade_end(params) {
   storeSet(PREFIX + 'lastClosing', {
     sessionId: s.id, contextNote: closingNote, createdAt: s.endedAt, consumed: false
   });
+  var closingCard = buildClosingChatCard(s, compressed);
   return {
     success: true, status: 'ended', sessionId: s.id,
     summary: s.summary,
@@ -1042,7 +1067,9 @@ function masquerade_end(params) {
     /* 插件内的概要卡片：只带压缩概要，绝不带逐字台词；具体内容只在档案里看。 */
     summaryCard: buildSummaryCard(s, compressed, archive.sessionId),
     /* 可见文本：只有压缩概要进入对话历史，完整台词只在演绎档案里 */
-    chatCardText: buildClosingChatCard(s, compressed),
+    chatCardText: closingCard,
+    replyToUser: closingCard,
+    replyInstruction: REPLY_RULE,
     chatHiddenContext: closingNote,
     chatCardPurpose: 'latest_active_conversation',
     assistantInstruction: END_ASSISTANT_INSTRUCTION,

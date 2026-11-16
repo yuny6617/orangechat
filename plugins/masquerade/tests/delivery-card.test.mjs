@@ -73,7 +73,7 @@ function makePage(core, opts = {}) {
     return nodes.get(sel);
   };
   /* 还原 index.html 里带 hidden 属性的初始节点，避免 stub 一律 false 造成假阳性。 */
-  ['#invite-modal', '#btn-retry-delivery', '#btn-retry-invited', '#delivery-error',
+  ['#btn-retry-delivery', '#btn-retry-invited', '#delivery-error', '#copy-hint',
     '#pane-invited', '#pane-active', '#pane-ended', '#archive-detail', '#card-editor',
     '#import-file', '#model-alert', '#model-status', '#archive-empty'].forEach((s) => {
     get(s).hidden = true;
@@ -184,37 +184,42 @@ test('请柬发到列表第一条（当前空会话），不再误投到别的�
   assert.equal(page.sent[0].id, 'conv-current', '旧实现会发到 conv-older，用户因此看不到请柬');
 });
 
-test('邀请函卡片在页面内与聊天请柬同源，且可点击打开', async () => {
+test('邀请函卡片纯展示，同意/婉拒直接平铺，且请柬文本可复制贴进聊天', async () => {
   const page = makePage(makeCore());
   await invite(page);
   assert.ok(page.get('#invite-card-partner').textContent.length > 0);
   assert.ok(page.get('#invite-card-scene').textContent.includes('雨夜'));
   assert.ok(page.get('#invite-card-copy').textContent.includes('愿意陪我跳这一支吗'));
-  assert.equal(page.get('#invite-modal').hidden, true);
-  await page.fire('#invite-card-preview');
-  assert.equal(page.get('#invite-modal').hidden, false, '点击卡片要打开邀请函弹窗');
-  assert.ok(page.get('#modal-accept-line').textContent.includes('赴约'));
-  assert.ok(page.get('#modal-decline-line').textContent.includes('丝绒盒'));
+  assert.ok(page.get('#accept-line').textContent.includes('赴约'));
+  assert.ok(page.get('#decline-line').textContent.includes('丝绒盒'));
+  assert.ok(page.get('#invite-copy-text').value.includes('【假面时刻 · 请柬】'),
+    '送不进聊天时用户可自行复制请柬贴进对话');
+  const html = read('plugin/ui/index.html');
+  assert.equal(html.includes('id="invite-modal"'), false, '1.4.0 起不再有全屏弹窗');
+  assert.equal(html.includes('id="btn-modal-accept"'), false);
 });
 
 /* ---------- 2. 送达失败不假成功 ---------- */
 
-test('权限被拒时明确报错、回滚 idle，不显示「已送到聊天里」', async () => {
+test('权限被拒时如实标注「未送达」，但不阻断在插件/聊天里继续玩', async () => {
   const core = makeCore();
   const page = makePage(core, {
     listResult: { success: false, error: 'Permission denied: conversation_sync permission not declared' },
   });
   await invite(page);
   assert.equal(page.sent.length, 0, '拿不到会话就不该发送');
-  assert.equal(page.get('#pane-invited').hidden, true, '绝不能显示已送达界面');
-  assert.ok(page.get('#delivery-error').textContent.includes('未送达'));
-  assert.ok(page.get('#delivery-error').textContent.includes('Permission denied'));
+  assert.ok(page.get('#invite-delivery').textContent.includes('未送达'), '绝不伪装成已送达');
+  assert.ok(page.get('#invite-delivery').textContent.includes('Permission denied'));
+  assert.ok(page.get('#invited-heading').textContent.includes('未送达'));
   assert.equal(page.get('#btn-retry-delivery').hidden, false, '要给出重试入口');
-  assert.equal(core.api.masquerade_status({}).status, 'idle', '状态必须回滚，不能卡在 invited');
+  /* 1.4.0：邀请在插件内已成立，同步失败不回滚 idle，用户仍能同意/婉拒或复制请柬。 */
+  assert.equal(page.get('#pane-invited').hidden, false);
+  assert.equal(core.api.masquerade_status({}).status, 'invited');
+  assert.equal(core.api.masquerade_status({}).delivery.status, 'failed');
   assert.equal(core.mem.length, 0);
 });
 
-test('sendChatMessage 返回失败：自动降级重试（去掉 hiddenContext / 图片），仍失败才回滚', async () => {
+test('sendChatMessage 返回失败：自动降级重试（去掉 hiddenContext / 图片），仍失败只标注不回滚', async () => {
   const core = makeCore();
   const page = makePage(core, { sendResult: () => ({ success: false, error: 'Conversation no longer accepts messages' }) });
   await invite(page);
@@ -223,8 +228,9 @@ test('sendChatMessage 返回失败：自动降级重试（去掉 hiddenContext /
   assert.equal(page.sent[1].hidden, '', '降级重试必须去掉长 hiddenContext');
   assert.equal(page.sent[1].image, null);
   assert.ok(page.sent[1].text.length < page.sent[0].text.length);
-  assert.equal(page.get('#pane-invited').hidden, true);
-  assert.equal(core.api.masquerade_status({}).status, 'idle');
+  assert.equal(page.get('#pane-invited').hidden, false, '同步失败不阻断玩法');
+  assert.equal(core.api.masquerade_status({}).status, 'invited');
+  assert.equal(core.api.masquerade_status({}).delivery.status, 'failed');
 });
 
 test('首次失败、降级重试成功：按真实回执标记送达（不误报也不漏报）', async () => {
@@ -244,7 +250,7 @@ test('会话列表为空时不静默当成功，明确给出 NO_CONVERSATION', a
   const page = makePage(makeCore(), { conversations: [] });
   await invite(page);
   assert.equal(page.sent.length, 0);
-  assert.ok(page.get('#delivery-error').textContent.includes('NO_CONVERSATION'));
+  assert.ok(page.get('#invite-delivery').textContent.includes('NO_CONVERSATION'));
 });
 
 /* ---------- 3. 同意 / 婉拒 ---------- */
@@ -253,7 +259,7 @@ test('同意赴约：应邀确认作为可见消息进聊天，助手确实收�
   const core = makeCore();
   const page = makePage(core);
   await invite(page);
-  await page.fire('#btn-modal-accept');
+  await page.fire('#btn-accept');
   await settle();
   const confirm = page.sent[page.sent.length - 1];
   assert.ok(confirm.text.includes('【假面时刻 · 应邀】'), '确认卡必须送进聊天');
@@ -262,14 +268,13 @@ test('同意赴约：应邀确认作为可见消息进聊天，助手确实收�
   assert.ok(confirm.hidden.includes('用户已在邀请函上点了「同意赴约」'));
   assert.equal(core.api.masquerade_status({}).status, 'active');
   assert.equal(page.get('#pane-active').hidden, false);
-  assert.equal(page.get('#invite-modal').hidden, true, '选择后弹窗应关闭');
 });
 
 test('婉拒：婉拒卡进聊天、状态回 idle、不写记忆、不产生剧情', async () => {
   const core = makeCore();
   const page = makePage(core);
   await invite(page);
-  await page.fire('#btn-modal-decline');
+  await page.fire('#btn-decline');
   await settle();
   const decline = page.sent[page.sent.length - 1];
   assert.ok(decline.text.includes('【假面时刻 · 婉拒】'));
@@ -305,7 +310,7 @@ test('落幕：压缩概要进聊天，剧中具体内容绝不进上下文，�
   const core = makeCoreWithModel();
   const page = makePage(core);
   await invite(page);
-  await page.fire('#btn-modal-accept');
+  await page.fire('#btn-accept');
   await settle();
   page.get('#line-input').value = '假如我此刻说喜欢你';
   await page.fire('#btn-send-line');
@@ -361,12 +366,15 @@ test('聊天里附邀请函卡片图，Canvas 不可用时自动降级为纯文�
   assert.ok(noCanvas.sent[0].text.includes('【假面时刻 · 请柬】'));
 });
 
-test('HTML / manifest 契约：弹窗双按钮、概要卡片、送达状态与新增工具齐全', () => {
+test('HTML / manifest 契约：无弹窗、双按钮平铺、概要卡片与工具输出契约齐全', () => {
   const html = read('plugin/ui/index.html');
-  for (const id of ['invite-modal', 'btn-modal-accept', 'btn-modal-decline', 'btn-modal-close',
+  for (const id of ['btn-accept', 'btn-decline', 'btn-copy-invite', 'invite-copy-text',
     'invite-card-preview', 'invite-delivery', 'delivery-error', 'btn-retry-delivery', 'btn-retry-invited',
-    'summary-card', 'summary-card-text', 'btn-summary-archive', 'modal-accept-line', 'modal-decline-line']) {
+    'summary-card', 'summary-card-text', 'btn-summary-archive', 'accept-line', 'decline-line']) {
     assert.ok(html.includes(`id="${id}"`), `缺少节点 ${id}`);
+  }
+  for (const gone of ['invite-modal', 'btn-modal-accept', 'btn-modal-decline', 'modal-sheet']) {
+    assert.equal(html.includes(`id="${gone}"`), false, `不应再有弹窗节点 ${gone}`);
   }
   assert.ok(html.includes('同意赴约') && html.includes('婉拒'));
   const names = manifest.tools.map((t) => t.name);
@@ -374,7 +382,12 @@ test('HTML / manifest 契约：弹窗双按钮、概要卡片、送达状态与�
   assert.ok(names.includes('masquerade_invite_cancel'));
   const core = makeCore();
   assert.deepEqual(Object.keys(core.api).sort(), names.slice().sort(), 'manifest.tools 与 exports 一一对应');
-  const t = manifest.promptTemplate;
-  assert.ok(t.includes('【假面时刻 · 应邀】') && t.includes('【假面时刻 · 婉拒】'));
-  assert.ok(t.includes('同意赴约'));
+  /* 1.4.0 核心：工具描述必须写清触发条件与原样输出契约，不依赖 promptTemplate 注入。 */
+  for (const name of ['masquerade_invite', 'masquerade_accept', 'masquerade_end']) {
+    const def = manifest.tools.find((t) => t.name === name);
+    assert.ok(def.description.includes('必须调用的场景'), `${name} 缺触发条件`);
+    assert.ok(def.description.includes('replyToUser'), `${name} 缺原样输出契约`);
+    assert.ok(def.description.includes('一字不改'), `${name} 缺原样输出的强约束`);
+  }
+  assert.ok(manifest.promptTemplate.includes('plg_'), '要说明宿主工具名前缀');
 });

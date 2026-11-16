@@ -9,7 +9,7 @@
 
 | 形态 | 产物 | 用途 |
 |---|---|---|
-| 橘瓣插件 | `dist/orangechat-masquerade-1.3.0.zip` | 装进 App，出现在聊天页加号面板，有专属 WebView UI |
+| 橘瓣插件 | `dist/orangechat-masquerade-1.4.0.zip` | 装进 App，出现在聊天页加号面板，有专属 WebView UI |
 | MCP server | `mcp/server.mjs` | stdio JSON-RPC，让任意 MCP 客户端的 LLM 直接当舞伴 |
 | 宿主补丁 | `host-patch/FilesPicker.kt.patch` | 只改 1 个文件 +33 行，把入口放到「语音通话 / 视频通话 / 红包 / 转账」旁边 |
 
@@ -24,10 +24,10 @@
 > 而宿主 `PluginScanner.findManifest()` 只查**根目录和一级子目录**，
 > 导入必然报 **「导入失败: 找不到 manifest.json」**。
 
-**唯一可导入的文件**：`dist/orangechat-masquerade-1.3.0.zip`
+**唯一可导入的文件**：`dist/orangechat-masquerade-1.4.0.zip`
 
-- 一键下载（本地产物 208245 字节，`Content-Type: application/zip`）：
-  <https://raw.githubusercontent.com/yuny6617/orangechat/feature/masquerade-integration/plugins/masquerade/dist/orangechat-masquerade-1.3.0.zip>
+- 一键下载（本地产物 211851 字节，`Content-Type: application/zip`）：
+  <https://raw.githubusercontent.com/yuny6617/orangechat/feature/masquerade-integration/plugins/masquerade/dist/orangechat-masquerade-1.4.0.zip>
 - 或在仓库文件列表进入 `plugins/masquerade/dist/`，点该 `.zip` → `View raw` / `Download`；**不要**点页面顶部的 `Code → Download ZIP`
 - 或直接使用对话中提供的附件卡片保存
 
@@ -49,13 +49,13 @@
 
 ```bash
 node scripts/build.mjs
-# → dist/orangechat-masquerade-1.3.0.zip
+# → dist/orangechat-masquerade-1.4.0.zip
 ```
 
 零第三方依赖，只需要 Node ≥ 18。构建脚本自带 CRC 回读校验，也可用 Python 交叉验证：
 
 ```bash
-python -c "import zipfile; z=zipfile.ZipFile('dist/orangechat-masquerade-1.3.0.zip'); print(z.testzip(), len(z.namelist()))"
+python -c "import zipfile; z=zipfile.ZipFile('dist/orangechat-masquerade-1.4.0.zip'); print(z.testzip(), len(z.namelist()))"
 ```
 
 ### 2. 让入口出现在聊天页加号里（可选补丁）
@@ -93,22 +93,37 @@ node mcp/server.mjs
 
 ---
 
-## 一场假面时刻的流程
+## 一场假面时刻的流程（1.4.0：直接在和助手聊天时玩）
 
 ```
-idle ──递请柬(真实送达)──▶ invited ──用户点「同意赴约」──▶ active ──落幕──▶ ended
-                              │                                              │
-                              └── 用户「婉拒」/ 送达失败 → idle（不写记忆）   └── 可再开一场
+聊天里说一句 ──▶ 助手调用 masquerade_invite ──▶ 请柬卡原样输出进对话（invited）
+                                                        │
+                         「我愿意」→ masquerade_accept → 启幕卡进对话（active）
+                         「摘下面具」→ masquerade_end → 落幕卡（只含压缩概要）进对话（ended）
 ```
 
-1. **递请柬**（回执驱动）：选角色卡、写开场场景和面具。`masquerade_invite` 先把状态置为 `invited / delivery=pending`，页面再调 `Bridge.sendChatMessage` 把**请柬文字 + 本地 Canvas 绘制的邀请函 PNG 卡片图**发进当前聊天；只有宿主明确返回 `success: true` 才把**送达回执**写回状态机并切到「已送达」界面。失败会自动降级重试一次（去掉长隐藏说明与图片），仍失败就回滚 `idle`、显示具体原因与「重试送达」，**绝不再出现「页面说已发送、聊天里其实没有」**。
-2. **打开邀请函**：插件页里有一张同款华丽邀请函卡片，点击打开全屏弹窗，含「**同意赴约**」「**婉拒**」两个按钮，各有符合插件文风的提示语（「丝带已系好，面具已戴上。今夜第三支曲子，我赴约。」／「也好，把面具收回丝绒盒吧。等你想跳的那一夜，灯会再亮起。」）。
-3. **同意 → 助手收到确认**：`masquerade_accept` 把状态推进 `active`，并把「【假面时刻 · 应邀】」+「【假面时刻 · 启幕】」作为**一条可见消息**送进聊天（宿主 `answer=true` 触发一次助手回复）。助手在对话框里真的收到「用户同意了」，而不是只有插件自己知道。
-4. **婉拒**：`masquerade_end` 收回请柬，把「【假面时刻 · 婉拒】」送进聊天并明确「这一场没有开始」，回到 `idle`；不写记忆、不产生任何剧情。
-5. **剧中**：`roleplay_turn` 的每句台词只写插件内部 `dataStore` 的 `mb:transcript:*`，**不进主聊天历史、不写长期记忆**。
-6. **落幕**：`masquerade_end` 用内置模型把整场戏压成一段**压缩概要**，作为落幕卡的**可见文本**送进助手最新有对话的会话；同时生成与 UI 同风格的**概要卡片**、写档案、写一条游戏记忆（见下）。
+### 主路径：让助手自己调工具应邀
 
-> **宿主限制（如实说明）**：宿主红包 / 通话卡片是 `UIMessageAnnotation.ChatInteraction` 消息注解，插件的 `sendChatMessage` 只能发文本与图片、无法附加注解，因此聊天里的请柬是「可见文字 + 邀请函卡片图」，点击放大查看；**可点开、带同意/拒绝按钮的邀请函弹窗在插件页面内**。这样既保证真实送达与可见，也不必为了一个插件去改宿主消息渲染层。
+宿主 `ToolSurfaceBuilder.kt` 会把插件 `manifest.tools` 注册给主聊天 LLM——助手**本来就能调用假面舞会工具**。1.4.0 把「什么时候必须调用」和「调用后必须把哪段文本原样输出」写进了**工具描述**（`PluginToolProvider.buildDescription()` 会把 `toolDef.description` 原样发给模型，这是最可靠、不依赖任何开关的通道）：
+
+| 你在聊天里说 | 助手必须做的事 |
+|---|---|
+| 「我们玩一场假面舞会吧 / 想邀请你进入假面时刻 / 戴上面具陪我演一场」 | 调用 `masquerade_invite`，把返回的 `replyToUser`（【假面时刻 · 请柬】）**一字不改**作为回复输出 |
+| 「我愿意 / 同意赴约 / 开始吧 / 启幕」 | 调用 `masquerade_accept`，把 `replyToUser`（【假面时刻 · 启幕】）**一字不改**输出 |
+| 「摘下面具 / 落幕 / 结束假面舞会」 | 调用 `masquerade_end`，把 `replyToUser`（落幕卡，只含压缩概要）**一字不改**输出 |
+| 「不要了 / 婉拒」 | 调用 `masquerade_end`，输出婉拒卡并明确「这一场没有开始」 |
+
+工具结果在橘瓣里是折叠的「调用工具 xxx」块，**用户看得见的是助手的回复文本**，所以只有让助手把 `replyToUser` 原样说出来，邀约才真正写进对话。工具描述同时禁止输出 JSON、复述工具名或改成「好呀 / 能看到」这类自然语言。三个工具的返回值都带 `replyToUser` 与 `replyInstruction`，双重约束。
+
+> **两个宿主细节**：① `ToolNaming.buildPluginToolName()` 会给工具名加 `plg_<8位hash>_` 前缀，助手按 tools 定义里的实际名称调用，`promptTemplate` 已写明；② 插件工具 `needsApproval = true`，首次调用会出现批准框，点允许即执行。
+>
+> **关于 `inject_as_prompt`**：宿主 `getPluginPromptInjections()` 只读 `plugin.config` 里**用户显式保存**的值（`PluginManager` 用的是 `savedConfig`，`manifest.config` 的 `default: true` 不会自动落库）。若想让长期语义规则也注入系统提示词，到宿主「设置 → 插件管理 → 假面舞会」把「把假面舞会规则注入系统提示词」打开**并保存一次**。**核心触发条件与输出契约全部放在工具描述里，不打开这个开关也能玩。**
+
+### 插件页面（可选，1.4.0 起不再有弹窗）
+
+真机截图显示全屏邀请函弹窗被压成一条裁切胶囊（`min()` / `dvh` / 背景模糊滤镜在 WebView 上兼容不一致），按反馈**彻底撤销**：弹窗 DOM、CSS、JS 全部删除，「同意赴约」「婉拒」两个按钮直接平铺在页面上，各有文风提示语。页面仍会尝试把请柬文字 + 邀请函 PNG 发进聊天（保留送达回执），但**同步失败不再回滚 `idle`**，只如实标注 `✗ 未送达` 并保留 `invited`——你仍可在页面里同意/婉拒，也可以点「复制请柬文本，贴进聊天」把请柬贴给助手，它会按上表调工具应邀。
+
+剧中台词仍只在插件专属舞台里进行（不进主聊天、不写长期记忆）；落幕时生成与 UI 同风格的**概要卡片**、写档案、写一条游戏记忆。
 
 ### 送达回执与会话选择
 
@@ -120,7 +135,7 @@ idle ──递请柬(真实送达)──▶ invited ──用户点「同意赴�
 | 落幕压缩概要 | `target=latestActive` → 取 `messageCount > 0` 的最新一条，即「助手最新有对话的上下文」 |
 | 失败可见 | 权限被拒、列表为空、发送被拒都带出原始原因；页面显示 `✗ 未送达：…` 与重试按钮 |
 
-1.2.0 的断点就在于先过滤 `messageCount>0` 再取第一条：从聊天页加号进入的是一个刚建的空会话，请柬被投到了另一个会话，用户在当前聊天里自然看不到。1.3.0 把两种目标拆开后修掉了这一条，并补了 14 条端到端链路测试（模拟宿主 Bridge 回调契约，真正执行 `app.js`）。
+1.2.0 的断点在于先过滤 `messageCount>0` 再取第一条：从聊天页加号进入的是一个刚建的空会话，请柬被投到了另一个会话，用户在当前聊天里自然看不到。1.3.0 把两种目标拆开修掉了这一条；1.4.0 进一步让「同步失败」不再阻断玩法，并补了 25 条端到端链路测试（模拟宿主 Bridge 回调与 LLM 按工具名调用，真正执行 `app.js` 与工具返回值）。
 
 ### 落幕后助手为什么一定知道「刚才是游戏」
 
@@ -149,18 +164,19 @@ idle ──递请柬(真实送达)──▶ invited ──用户点「同意赴�
 
 - **角色卡**（参考 Mufy）：身份、性格、小剧场 / 场景、开场白、世界观、样例对话、边界、标签、可见性。内置 3 张示例卡，支持增删改查与 JSON 导入导出。
 - **模型接入**：`api_base`（OpenAI 兼容，到 `/v1`）、`api_key`、`model_id`、`chat_model`、`max_turns`，全部在宿主插件详情页配置。仅 HTTPS + 域名白名单；`get_model_config` 只读脱敏。
-- **邀请函弹窗卡片**：聊天里发「文字 + 本地 Canvas 绘制的邀请函 PNG」，插件页内是可点开的华丽邀请函（金色双框、角饰、丝带、封蜡印章、柔光动效），含同意 / 婉拒与文风提示语。Canvas 不可用时自动降级纯文本，不影响送达。
+- **主聊天工具应邀**：三个流程工具的描述自带触发条件与 `replyToUser` 原样输出契约，助手能自己把请柬 / 启幕 / 落幕卡写进对话；不依赖 `inject_as_prompt` 注入。
+- **邀请函卡片（无弹窗）**：聊天里发「文字 + 本地 Canvas 绘制的邀请函 PNG」，插件页内是同款华丽邀请函（金色双框、角饰、丝带、封蜡印章、柔光动效），同意 / 婉拒按钮平铺，并支持一键复制请柬文本贴进聊天。Canvas 不可用时自动降级纯文本。
 - **落幕压缩 + 概要卡片 + 演绎档案**：压缩用插件内置的那个模型；模型不可用时降级本地摘录并明确标注。概要卡片只放概要，具体内容仅在插件内查看。
-- **少女感专属 UI**：玫瑰粉 / 香槟金 / 象牙白 / 深莓色，本地打包的 CC0 / MIT / OFL 素材与自绘金色假面，1.3.0 追加金线角饰、按钮流光、卡片层次与微光动效，运行时不请求外部 CDN。来源见 [plugin/ui/assets/ATTRIBUTION.md](plugin/ui/assets/ATTRIBUTION.md)。
+- **少女感专属 UI**：玫瑰粉 / 香槟金 / 象牙白 / 深莓色，本地打包的 CC0 / MIT / OFL 素材与自绘金色假面，金线角饰、按钮流光、卡片层次与微光动效；1.4.0 撤掉了真机上会塌陷的全屏弹窗，运行时不请求外部 CDN。来源见 [plugin/ui/assets/ATTRIBUTION.md](plugin/ui/assets/ATTRIBUTION.md)。
 
 ---
 
 ## 验证
 
 ```bash
-node --test tests/*.test.mjs     # 55 个用例：状态机、隔离、密钥、XSS、契约、MCP、压缩、档案、端到端送达
+node --test tests/*.test.mjs     # 66 个用例：状态机、隔离、密钥、XSS、契约、MCP、压缩、档案、端到端送达、工具输出契约
 node scripts/build.mjs           # ZIP 构建 + CRC 回读（可复现）
-node audit/audit.mjs             # 三轮 48 项安全审计 / 代码审查，生成 audit/AUDIT_REPORT.md
+node audit/audit.mjs             # 三轮 51 项安全审计 / 代码审查，生成 audit/AUDIT_REPORT.md
 node scripts/verify-package.mjs  # 宿主同款流式导入自检；也可传入任意 ZIP 路径排障
 npm run verify                   # 以上全部
 ```

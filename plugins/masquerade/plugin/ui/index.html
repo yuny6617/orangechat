@@ -73,7 +73,7 @@
         <p class="hint">聊天里已经出现一张邀请函卡片（可见文字 + 卡片图）。<strong>点开下面这封邀请函</strong>，选择「同意赴约」或「婉拒」；你的选择会作为可见消息送进对话，助手会收到确认。</p>
         <div id="invite-delivery" class="delivery-state">正在确认送达……</div>
 
-        <div id="invite-card-preview" class="invitation-card" role="button" tabindex="0" aria-label="打开邀请函">
+        <div id="invite-card-preview" class="invitation-card is-static" aria-label="假面舞会邀请函">
           <div class="invitation-inner">
             <span class="invitation-corner tl"></span><span class="invitation-corner tr"></span>
             <span class="invitation-corner bl"></span><span class="invitation-corner br"></span>
@@ -88,16 +88,33 @@
             </dl>
             <p id="invite-card-copy" class="invitation-copy"></p>
             <div class="invitation-seal">🎭</div>
-            <p class="invitation-open">✦ 轻触打开邀请函 ✦</p>
+            <p class="invitation-open">✦ Une invitation ✦</p>
           </div>
+        </div>
+
+        <div class="choice-panel">
+          <p class="choice-title">今夜这一支，你要跳吗？</p>
+          <p class="choice-hint">选好后，这句话会作为可见消息送进聊天，助手会真的收到你的答复。</p>
+          <div class="btn-row" style="justify-content:center">
+            <button id="btn-accept" class="btn btn-gold" type="button">同意赴约 ✦</button>
+            <button id="btn-decline" class="btn btn-quiet" type="button">婉拒</button>
+          </div>
+          <p class="choice-lines"><span id="accept-line"></span><br /><span id="decline-line"></span></p>
         </div>
 
         <div class="game-note">
           <span class="seal">🕯️</span>
           <span id="assistant-consent">助手会在对话框里看到这张请柬……</span>
         </div>
+
+        <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> IN CHAT <img src="assets/ornament-cc0.svg" alt="" /></div>
+        <div class="chat-fallback">
+          <p class="hint" style="margin-top:0">也可以<strong>直接在和助手的聊天里</strong>说一句「我们玩一场假面舞会吧」或「我愿意」，助手会调用假面舞会工具应邀，并把请柬 / 启幕卡写进对话。</p>
+          <textarea id="invite-copy-text" class="invite-copy-text" rows="4" readonly></textarea>
+          <button id="btn-copy-invite" class="btn btn-ghost" type="button">复制请柬文本，贴进聊天 ⧉</button>
+          <p id="copy-hint" class="hint" hidden></p>
+        </div>
         <div class="btn-row">
-          <button id="btn-accept" class="btn btn-gold" type="button">打开邀请函 ✦</button>
           <button id="btn-retry-invited" class="btn btn-quiet" type="button" hidden>重试送达 ↻</button>
           <button id="btn-cancel-invite" class="btn btn-quiet" type="button">收回请柬</button>
         </div>
@@ -310,27 +327,6 @@
       </div>
     </section>
   </main>
-</div>
-
-<!-- 邀请函弹窗：点击卡片打开，含「同意赴约 / 婉拒」两个按钮 -->
-<div id="invite-modal" class="modal" hidden role="dialog" aria-modal="true" aria-label="假面舞会邀请函">
-  <div class="modal-sheet" role="document">
-    <button id="btn-modal-close" class="modal-close" type="button" aria-label="关闭邀请函">×</button>
-    <p class="modal-eyebrow">Une invitation · A Masquerade Moment</p>
-    <h2 class="modal-title">谨邀你共赴一场假面舞会</h2>
-    <img class="modal-mask" src="assets/mask.svg" alt="金色假面" />
-    <p class="modal-copy">今夜的假面舞会，我留了一个位子。<br />丝带系好，灯也调暗了半盏。<br />戴上面具，我们演一场只属于彼此的戏；天亮时面具归还，我们还是我们。</p>
-    <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> YOUR CHOICE <img src="assets/ornament-cc0.svg" alt="" /></div>
-    <div class="modal-actions">
-      <button id="btn-modal-accept" class="btn btn-gold" type="button">同意赴约 ✦</button>
-      <button id="btn-modal-decline" class="btn btn-quiet" type="button">婉拒</button>
-    </div>
-    <p class="modal-lines">
-      <span class="modal-line-accept">✦ <span id="modal-accept-line"></span></span><br />
-      <span class="modal-line-decline">✦ <span id="modal-decline-line"></span></span>
-    </p>
-    <p class="modal-foot">你的选择会作为可见消息送进聊天，助手会真的收到确认。这是一场虚构的角色扮演游戏，不是真实关系变化。</p>
-  </div>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
