@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MAIN = path.join(ROOT, 'plugin', 'main.js');
-const SERVER_INFO = { name: 'orangechat-masquerade', version: '1.2.0' };
+const SERVER_INFO = { name: 'orangechat-masquerade', version: '1.3.0' };
 const PROTOCOL = '2024-11-05';
 const MAX_LINE = 1024 * 1024;
 

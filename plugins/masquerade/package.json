@@ -1,6 +1,6 @@
 {
   "name": "orangechat-masquerade",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "假面舞会 — 橘瓣 OrangeChat 可插拔插件 / MCP server",

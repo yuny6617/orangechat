@@ -66,10 +66,15 @@
 读宿主 `PluginWebViewPage.kt` / `PluginAiCall.kt` 后可以确认：`callAI` 的系统提示词由宿主写死为「你是一个阅读助手…」，插件无法替换成舞台设定。因此：
 
 - **角色扮演主循环**走 `plugin/main.js` 自带的 OpenAI 兼容通道（`api_base` / `api_key` / `model_id`），系统提示词由 `buildStageSystemPrompt()` 完全掌控；
-- **受邀这一步也不再调用 `callAI`**（1.1.0 曾用它生成一句应邀台词，导致「前端对话框里的助手其实没被邀请」）。1.2.0 起请柬作为可见消息经 `Bridge.sendChatMessage(conversationId, card, hiddenContext, true)` 发进主聊天，`answer=true` 让**主聊天里的那个助手自己回应**——它用的是宿主模型、宿主的上下文与人格，这才是用户真正在聊的那个「他」；
+- **受邀这一步也不再调用 `callAI`**（1.1.0 曾用它生成一句应邀台词，导致「前端对话框里的助手其实没被邀请」）。1.2.0 起请柬作为可见消息经 `Bridge.sendChatMessage` 发进主聊天；1.3.0 进一步改为回执驱动 + 邀请函卡片图，`answer=true` 让**主聊天里的那个助手自己回应**——它用的是宿主模型、宿主的上下文与人格，这才是用户真正在聊的那个「他」；
 - MCP 形态下连通道都不需要：`roleplay_turn` 直接把 `stagePrompt` 交给客户端 LLM，由它自己演，再用 `record_stage_line` 记回剧本。
 
-**会话 ID 的取得**：宿主 `Screen.PluginWebView` 的 `conversationId` 不会传进 WebView（页面是纯 `file://` 路径，无 query），唯一通道是 `listConversations()`。`resolveConversationId()` 取 `messageCount > 0` 且 `updateAt` 最新的一条，即「助手最新有对话的上下文」。
+**会话 ID 的取得**：宿主 `Screen.PluginWebView` 的 `conversationId` 不会传进 WebView（页面是纯 `file://` 路径，无 query，`SafeFileResolver.resolveInside` 还会把 query 当成文件名，所以不能塞进 `entryPath`），唯一通道是 `listConversations()`。1.3.0 把目标拆成两种：
+- `target=current`（请柬 / 应邀 / 婉拒）→ `list[0]`，宿主按 `updateAt` 倒序返回，**包含还没有消息的新会话**；
+- `target=latestActive`（落幕压缩概要）→ `messageCount > 0` 的最新一条，即「助手最新有对话的上下文」；
+- 若宿主将来暴露 `Bridge.getCurrentConversationId()`，优先精确命中，否则自动降级到列表。
+
+1.2.0 把两者混用同一个「先过滤 `messageCount>0`」的选择器，用户从聊天页加号进入一个刚建的空会话时，请柬被投到另一个会话，聊天里自然看不到——这是本轮真机反馈的直接根因。
 
 ## 4.1 模型三态与硬拦截
 
@@ -87,6 +92,23 @@
 - `compressTranscript()` 把整场逐轮台词交给模型压成概要；失败或无模型时走 `localDigest()`，返回值带 `compressedBy: "local"` 与 `compressedDegraded: true`，**不假装是模型压的**。
 - `mb:archive:<sessionId>` 保存完整台词 + 概要 + 压缩来源 + 落幕说明，`mb:archive:index` 保存索引，两者都只在你插件私有 `dataStore` 里；超过 20 场时索引与数据**同时**裁剪（旧实现只裁索引，会残留无主数据，审计 R2-11 是这条的回归测试）。
 - 档案 ID 必须是字符串且匹配白名单正则，`parseArchiveId()` 不做静默转换——`Number` / `{toString}` 之类的输入一律拒绝，避免「传 1 读到第 1 场」这种越权读。
+
+## 4.3 送达回执、邀请函卡片与同意 / 婉拒（1.3.0）
+
+`PluginWebViewPage.kt` 的 `bridgeCall` 是 Promise 回调式桥接，`handleConversationBridge` 在缺少 `conversation_sync` 权限时返回 `success:false`；`sendChatMessage` 内部 `answer=true`，会话正忙时也可能拒绝。因此「页面显示已发送」不等于「聊天里真的有消息」。
+
+| 环节 | 实现 |
+|---|---|
+| 回执判定 | `sendOnce()` 只认 `r.success === true`；`undefined` / 空回执 / `success:false` 一律失败 |
+| 状态机 | `masquerade_invite` 写 `delivery=pending`；`masquerade_invite_delivery` 写 `delivered/failed`；`masquerade_invite_cancel` 把失败回滚到 `idle`（不写记忆、不删角色卡） |
+| 页面顺序 | **先发送、再切界面**；标题与「✓/✗ 送达状态」按真实回执渲染，没有写死的「已送到聊天里」 |
+| 降级重试 | 首次失败后去掉 `hiddenContext` 与卡片图、把文本压到 180 字内再发一次；成功标注「降级重试后送达」 |
+| 卡片载体 | 聊天里 = 请柬可见文字 + `buildInviteImage()` 用 Canvas 画的邀请函 PNG（走宿主 `uploadChatImage` 分块通道）；Canvas 不可用则纯文本；宿主 `UIMessagePart.Image` 可点击放大 |
+| 原生卡片为何不做 | 宿主红包/通话卡片是 `UIMessageAnnotation.ChatInteraction`，插件的 `sendChatMessage` 无法附加消息注解；为此改宿主消息渲染层会破坏「只改一个文件」的可插拔约束 |
+| 同意 / 婉拒 | 插件页内邀请函弹窗两个按钮，各有文风提示语；选择后把 `【假面时刻 · 应邀】`（合并启幕卡）或 `【假面时刻 · 婉拒】` 作为可见消息送进聊天，宿主 `answer=true` 让助手真的收到确认 |
+| 概要卡片 | `summaryCard` 只含压缩概要、角色、场景、轮次与 `archiveId`，**无 `transcript` 字段**；剧中具体内容不进入上下文，只能在插件档案里查看 |
+
+`tests/delivery-card.test.mjs` 用轻量 DOM stub + 模拟宿主 Bridge 在 `vm` 里真正执行 `app.js`，逐条核对 `sendChatMessage` 的调用参数与状态机回执，不是静态文本断言。
 
 ## 5. 让助手知道「刚才是游戏」的四条冗余通道
 

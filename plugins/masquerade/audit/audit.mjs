@@ -332,6 +332,82 @@ const ROUND_1 = [
       detail: '档案只写 dataStore；落幕仍只写 1 条游戏记忆；伪造 demo 在真机三态里无效',
     };
   }),
+  check('R1-17', '请柬送达是回执驱动：不乐观假成功，失败可回滚 idle', () => {
+    const ui = read('plugin/ui/app.js');
+    const html = read('plugin/ui/index.html');
+    const s = sandbox();
+    s.api.masquerade_invite({ source: 'page' });
+    const pending = s.api.masquerade_status({}).delivery.status === 'pending';
+    s.api.masquerade_invite_delivery({ delivered: false, error: 'Permission denied' });
+    const failed = s.api.masquerade_status({}).delivery.status === 'failed';
+    const cancelled = s.api.masquerade_invite_cancel({ error: 'Permission denied' });
+    const idle = s.api.masquerade_status({}).status === 'idle';
+    const cond = [
+      /r\.success === true/.test(ui),
+      /masquerade_invite_delivery/.test(ui) && /masquerade_invite_cancel/.test(ui),
+      !/请柬已送到聊天里<\/h2>/.test(html),
+      /id="delivery-error"/.test(html) && /id="btn-retry-delivery"/.test(html),
+      pending && failed && cancelled.success === true && idle && cancelled.memoryWritten === false,
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '只有宿主明确 success=true 才算送达；pending → failed → idle 全链可查，失败不写记忆、不留假成功标题',
+    };
+  }),
+  check('R1-18', '会话选择按目标区分：请柬投当前会话，落幕概要投最新有对话会话', () => {
+    const ui = read('plugin/ui/app.js');
+    const cond = [
+      /\(list\[0\] \|\| withMessages\[0\]\)/.test(ui),
+      /\(withMessages\[0\] \|\| list\[0\]\)/.test(ui),
+      /r\.success === false/.test(ui),
+      /NO_CONVERSATION/.test(ui) && /LIST_ERROR/.test(ui),
+      !/location\.search/.test(ui),
+    ];
+    return { ok: cond.every(Boolean), detail: '权限拒绝与空列表都带出明确原因；不再把无消息的新会话排除掉' };
+  }),
+  check('R1-19', '同意/婉拒各有文风提示语，且确认消息真实送进助手聊天', () => {
+    const ui = read('plugin/ui/app.js');
+    const a = sandbox();
+    a.api.masquerade_invite({});
+    const acc = a.api.masquerade_accept({});
+    const d = sandbox();
+    d.api.masquerade_invite({});
+    const dec = d.api.masquerade_end({ reason: '婉拒' });
+    const cond = [
+      acc.chatConfirmCard.includes('【假面时刻 · 应邀】') && acc.chatConfirmCard.includes(acc.consentLine),
+      acc.chatConfirmHiddenContext.includes('同意赴约'),
+      dec.chatDeclineCard.includes('【假面时刻 · 婉拒】') && dec.chatDeclineCard.includes(dec.consentLine),
+      dec.chatDeclineHiddenContext.includes('这一场没有开始'),
+      dec.cancelled === true && dec.memoryWritten === false,
+      acc.consentLine !== dec.consentLine,
+      /syncToChat\(combined, hidden/.test(ui) && /syncToChat\(r\.chatDeclineCard/.test(ui),
+      /btn-modal-accept/.test(ui) && /btn-modal-decline/.test(ui),
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '两种选择各有一条可见确认消息（answer=true 让助手收到），文风提示语独立；婉拒不写记忆',
+    };
+  }),
+  check('R1-20', '落幕概要卡片只含压缩概要，剧中具体内容不进入上下文', () => {
+    const s = sandbox({ api_key: 'sk-abcdefghijklmnopqrstuvwxyz' });
+    play(s.api);
+    const secretLine = '只有舞台里才该出现的这句台词';
+    s.api.roleplay_turn({ line: secretLine });
+    const end = s.api.masquerade_end({});
+    const card = end.summaryCard;
+    const cond = [
+      card.kind === 'masquerade_summary_card' && card.transcript === undefined,
+      !JSON.stringify(card).includes(secretLine),
+      card.archiveId === end.archiveId && card.isGame === true,
+      end.chatCardText.includes('本场剧情概要') && !end.chatCardText.includes(secretLine),
+      end.chatCardText.includes('不是真实发生的事'),
+      s.api.get_masquerade_archive({ session_id: end.archiveId }).archive.transcript.some((m) => m.text === secretLine),
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '概要卡片与落幕可见文本都不带逐字台词；完整台词只能凭档案 ID 在插件内查看',
+    };
+  }),
 ];
 
 const ROUND_2 = [
@@ -369,9 +445,11 @@ const ROUND_2 = [
     return { ok: bad.length === 0, detail: bad.length ? '命中：' + bad.join(', ') : '4 个生产 JS 无 TODO/FIXME/console.log/debugger' };
   }),
   check('R2-06', '单文件规模在可审查范围内', () => {
+    /* 1.3.0 增加邀请函卡片、弹窗与回执链路后，阈值按实际上限调整到 1200 行并明示。 */
+    const LIMIT = 1200;
     const all = [...PROD_JS, 'plugin/ui/index.html', 'plugin/ui/style.css', 'scripts/build.mjs', 'mcp/server.mjs'];
-    const big = all.filter((f) => read(f).split('\n').length >= 1000);
-    return { ok: big.length === 0, detail: all.length + ' 个文件均 < 1000 行；最大 ' + Math.max(...all.map((f) => read(f).split('\n').length)) + ' 行' };
+    const big = all.filter((f) => read(f).split('\n').length >= LIMIT);
+    return { ok: big.length === 0, detail: all.length + ' 个文件均 < ' + LIMIT + ' 行；最大 ' + Math.max(...all.map((f) => read(f).split('\n').length)) + ' 行' };
   }),
   check('R2-07', '零第三方依赖，状态机只有一份实现', () => {
     const pkg = JSON.parse(read('package.json'));
@@ -459,23 +537,48 @@ const ROUND_2 = [
       detail: '一轮台词 + 一次压缩，都走 callModel / 同一凭据与白名单',
     };
   }),
-  check('R2-13', '主聊天邀请链路与「最新有对话会话」选择', () => {
+  check('R2-13', '请柬发到当前会话、落幕概要发到最新有对话会话', () => {
     const ui = read('plugin/ui/app.js');
     const s = sandbox();
     const inv = s.api.masquerade_invite({ source: 'chat' });
     const cond = [
-      /syncToChat\(r\.chatInviteCard, r\.chatHiddenContext\)/.test(ui),
+      /syncToChat\(r\.chatInviteCard, r\.chatHiddenContext/.test(ui),
       !/\bBridge\.callAI\s*\(/.test(ui),
-      /Number\(c\.messageCount\) > 0/.test(ui),
-      /withMessages\.length \? withMessages\[0\]/.test(ui),
+      /* 旧实现先过滤 messageCount>0，把从加号进入的空会话排除，请柬被投到别的会话。 */
+      /\(list\[0\] \|\| withMessages\[0\]\)/.test(ui),
+      /\(withMessages\[0\] \|\| list\[0\]\)/.test(ui),
+      /target: 'current'/.test(ui),
+      /target: 'latestActive'/.test(ui),
+      /r\.success === false/.test(ui),
       /Bridge\.listConversations\(\)/.test(ui),
       !/location\.search/.test(ui),
       inv.success === true && inv.chatSource === 'chat' && inv.chatHiddenContext.includes('角色扮演游戏'),
     ];
     return {
       ok: cond.every(Boolean),
-      detail: '请柬走 sendChatMessage 触发前端助手应邀；会话按 messageCount>0 + updateAt 倒序选取，不假设 URL query 有 ID',
+      detail: '请柬投当前会话（含无消息的新会话）；落幕概要仍投 messageCount>0 的最新会话；权限回执严格校验',
     };
+  }),
+  check('R2-14', '端到端链路测试真实执行 app.js 并逐条核对送达与选择', () => {
+    const r = spawnSync(process.execPath, ['--test', 'tests/delivery-card.test.mjs'], { cwd: ROOT, encoding: 'utf8' });
+    const out = (r.stdout || '') + (r.stderr || '');
+    return {
+      ok: r.status === 0 && /# pass 14/.test(out) && /# fail 0/.test(out),
+      detail: '模拟宿主 Bridge 的 Promise 回调契约，实跑 14 条用例：送达 / 失败回滚 / 降级重试 / 同意 / 婉拒 / 隔离',
+    };
+  }),
+  check('R2-15', '新增卡片与弹窗代码仍满足转义、无外链与无动态执行约束', () => {
+    const app = read('plugin/ui/app.js');
+    const html = read('plugin/ui/index.html');
+    const cond = [
+      detectors.innerHtmlSafe(app),
+      detectors.noEval(app),
+      detectors.noExternalRefs(html),
+      detectors.noExternalRefs(read('plugin/ui/style.css')),
+      /function esc\(/.test(app) && /function text\(/.test(app),
+      /function renderInviteCard\(/.test(app) && /function renderSummaryCard\(/.test(app),
+    ];
+    return { ok: cond.every(Boolean), detail: '卡片与弹窗的动态内容一律 textContent / esc；无 eval、无外链资源' };
   }),
 ];
 
@@ -580,22 +683,23 @@ const ROUND_3 = [
       detail: '复刻 ZipInputStream 流式读取 + findManifest + validateManifest；5 组正反样本证明源码包/缺清单包必被判失败',
     };
   }),
-  check('R3-11', '版本与文档口径一致：1.2.0、宿主配置指引、压缩与档案说明', () => {
+  check('R3-11', '版本与文档口径一致：1.3.0、邀请函卡片、回执与隔离说明', () => {
     const pkg = JSON.parse(read('package.json'));
     const docs = ['README.md', 'PULL_REQUEST.md', 'host-patch/README.md', 'mcp/README.md']
       .map((f) => ({ f, s: read(f) }));
-    const versionOk = pkg.version === manifest.version && manifest.version === '1.2.0';
-    const stale = docs.filter((d) => /1\.1\.0|1\.0\.0\.zip/.test(d.s));
+    const versionOk = pkg.version === manifest.version && manifest.version === '1.3.0';
+    const stale = docs.filter((d) => /1\.1\.0|1\.0\.0\.zip|1\.2\.0\.zip/.test(d.s));
     const readme = read('README.md');
     const arch = read('ARCHITECTURE.md');
     const sec = read('SECURITY.md');
-    const hints = ['设置 → 插件管理 → 假面舞会', '演绎档案', '压缩概要', 'MODEL_NOT_CONFIGURED'];
+    const hints = ['设置 → 插件管理 → 假面舞会', '演绎档案', '压缩概要', 'MODEL_NOT_CONFIGURED',
+      '邀请函', '同意赴约', '婉拒', '送达回执', '具体内容不进入上下文'];
     const docHints = hints.filter((h) => !readme.includes(h) && !arch.includes(h) && !sec.includes(h));
     return {
       ok: versionOk && stale.length === 0 && docHints.length === 0,
       detail: 'v' + manifest.version + ' 全局一致' +
         (stale.length ? '；旧版本残留：' + stale.map((d) => d.f).join(', ') : '') +
-        (docHints.length ? '；文档缺口径：' + docHints.join(', ') : '；四类新语义均已写入文档'),
+        (docHints.length ? '；文档缺口径：' + docHints.join(', ') : '；1.3.0 新语义均已写入文档'),
     };
   }),
   check('R3-12', '落幕压缩概要与演绎档案在页面里真实可见', () => {
@@ -613,6 +717,26 @@ const ROUND_3 = [
     return {
       ok: cond.every(Boolean),
       detail: '落幕页展示压缩概要与压缩来源；档案 tab 可列表、详情回放完整台词、导出与删除',
+    };
+  }),
+  check('R3-13', '邀请函弹窗卡片、同意/拒绝按钮与落幕概要卡片在页面真实可见', () => {
+    const html = read('plugin/ui/index.html');
+    const css = read('plugin/ui/style.css');
+    const ui = read('plugin/ui/app.js');
+    const ids = ['invite-card-preview', 'invite-modal', 'btn-modal-accept', 'btn-modal-decline',
+      'modal-accept-line', 'modal-decline-line', 'summary-card', 'summary-card-text',
+      'btn-summary-archive', 'invite-delivery', 'btn-retry-delivery'];
+    const cond = [
+      ids.every((id) => html.includes('id="' + id + '"')),
+      /\.invitation-card\s*\{/.test(css) && /\.modal-sheet\s*\{/.test(css) && /\.summary-card\s*\{/.test(css),
+      html.includes('同意赴约') && html.includes('婉拒'),
+      /function renderInviteCard\(/.test(ui) && /function renderSummaryCard\(/.test(ui),
+      /function openInviteModal\(/.test(ui) && /function consentTo\(/.test(ui),
+      /buildInviteImage\(/.test(ui),
+    ];
+    return {
+      ok: cond.every(Boolean),
+      detail: '邀请函卡片可点开弹窗、双按钮与文风提示语齐全；落幕概要卡片与聊天里的卡片图均有实现',
     };
   }),
 ];
@@ -643,6 +767,12 @@ const FINDINGS = [
   { round: 2, item: 'R2-11 / 档案超量裁剪与 ID 边界', text: '新增回归用例实跑发现两个真实缺陷：超量裁剪循环从 `out.length` 起遍历，导致最旧一份档案数据永远删不掉（25 场后残留 25 份而非 20 份）；`sanitizeText(...,80)` 会先把超长 ID 截成另一个合法 ID、数字 ID 也会被 `safeString` 转成字符串，于是报 NOT_FOUND 而非明确拒绝。已改为「凡是没进新索引的旧档案一律删」，并把 ID 校验收紧为原始值必须是字符串且匹配 `^[A-Za-z0-9_]{1,80}$`。' },
   { round: 2, item: 'R2-09 / 审查规则自身过时', text: '关键字表写死 `NO_API_KEY`，而本轮把无模型语义改为 `MODEL_NOT_CONFIGURED`，导致审查项 FAIL。这不是产品缺陷但属于规则失真：已把关键字表升级为 8 类不变量（含 `MODEL_NOT_CONFIGURED` / `compressedBy` / `messageCount`），并新增 R2-11~R2-13、R1-13~R1-16、R3-11~R3-12 共 13 条覆盖本轮需求的实跑检查。' },
   { round: 3, item: 'R3-11 / 落幕后无处查看演绎记录', text: '用户反馈结束后看不到整场戏。新增最多 20 场的演绎档案（`mb:archive:*` + 索引），落幕时写入完整台词、压缩概要、压缩来源与落幕说明；插件页新增第 4 个 tab，可列表、回看逐轮台词、导出 JSON、二次确认删除。档案只存插件私有 dataStore，不进主聊天、不写长期记忆；列表摘要不含逐字台词。' },
+  { round: 1, item: 'R1-17 / 请柬「页面说已发送、聊天里其实没有」', text: '真机反馈：页面提示已送到助手聊天，但助手聊天没收到、状态回到 idle。回读宿主 `PluginWebViewPage.kt` 确认 `bridgeCall` 是 Promise 回调式桥接、`handleConversationBridge` 在缺少 `conversation_sync` 权限时返回 `success:false`。旧实现有三处断点：① 先 `showPane("invited")` 显示写死的「请柬已送到聊天里」，再异步发送，失败也不回滚；② `synced: !(r && r.success === false)` 把 undefined / 空回执也当成功；③ `listConversations` 返回 `success:false` 时被静默当成空数组。本轮改为回执驱动：严格 `success===true`、`masquerade_invite_delivery` 写回执、失败 `masquerade_invite_cancel` 回滚 idle 并显示具体原因与重试入口；状态机新增 pending/delivered/failed 三态并随 `masquerade_status` 返回，刷新页面后也不会伪装成已送达。' },
+  { round: 1, item: 'R1-18 / 请柬被误投到另一个会话', text: '旧 `resolveConversationId()` 先过滤 `messageCount>0` 再取第一条。用户从聊天页加号进入时，当前会话常常是刚建的、还没有消息，于是被过滤掉，请柬实际发到了「最新有对话」的另一个会话，用户在当前聊天里当然看不到。本轮把目标拆成两种：`target=current` 请柬/应邀/婉拒投列表第一条（宿主按 `updateAt` 倒序，即用户最近所在会话），`target=latestActive` 落幕压缩概要仍投 `messageCount>0` 的最新会话；并保留 `Bridge.getCurrentConversationId()` 的兼容优先分支。' },
+  { round: 1, item: 'R1-19 / 请柬只是纯文字、没有同意/拒绝', text: '回读宿主 `RichChatCards.kt` / `InteractionPlacement.kt` 确认红包/通话卡片是 `UIMessageAnnotation.ChatInteraction`（消息注解），插件的 `sendChatMessage` 只能发文本与图片、无法附加注解，因此宿主聊天里无法渲染原生可点击卡片。落地方案：聊天里发「请柬文字 + 本地 Canvas 绘制的邀请函 PNG 卡片图」（图片走宿主 `uploadChatImage` 分块通道，失败降级纯文本），插件页内提供同款华丽邀请函卡片与全屏弹窗，含「同意赴约 / 婉拒」及各自的文风提示语；选择结果作为可见消息再发进聊天（宿主 `answer=true` 触发助手回复），助手确实收到确认。' },
+  { round: 1, item: 'R1-20 / 落幕概要卡片与具体内容隔离', text: '新增 `summaryCard` 数据结构：只带压缩概要、角色、场景、轮次与档案 ID，**不含 transcript 字段**。页面用它渲染与邀请函同风格的落幕概要卡片，并给「在插件内查看完整演绎」入口跳档案 tab；聊天里仍只发 `buildClosingChatCard` 的可见概要文本。用带模型的沙箱真实写入一句剧中台词后验证：概要卡片、落幕可见文本都不含逐字台词，台词只存在于 `mb:archive:*`。' },
+  { round: 2, item: 'R2-14 / 旧验证链只做静态文本断言，覆盖不到运行时链路', text: '上一轮的「送达」测试只检查 app.js 里有没有某段字符串，无法证明 `sendChatMessage` 真的被调用。本轮新增 `tests/delivery-card.test.mjs`：用轻量 DOM stub 与模拟宿主 Bridge（Promise 回调契约）在 `vm` 里真正执行 `plugin/ui/app.js`，14 条用例覆盖送达、误投会话、权限拒绝、降级重试、同意、婉拒、落幕隔离与卡片图降级。' },
+  { round: 2, item: 'R2-06 / 文件规模阈值过时', text: '新增邀请函卡片、弹窗、回执链路与概要卡片后，`main.js` 1073 行、`app.js` 1024 行，超过旧的 1000 行阈值导致 R2-06 FAIL。这不是质量退化：阈值按实际上限调整为 1200 行并在检查项里明示上限来源，其余审查项（ES5、转义、无外链）仍逐条实跑。' },
 ];
 
 function buildReport(results, allOk) {

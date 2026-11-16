@@ -411,6 +411,60 @@ function buildClosingChatCard(session, compressed) {
     '我还是你认识的那个我，之后请按我们原本的真实关系与语气继续聊。';
 }
 
+/*
+ * 邀请函的两个选择：文风与插件内文案保持一致（华丽、克制、温柔）。
+ * 同意 / 拒绝都要作为可见消息送进聊天，助手才真的「收到确认」。
+ */
+var CONSENT_ACCEPT_LINE = '丝带已系好，面具已戴上。今夜第三支曲子，我赴约。';
+var CONSENT_DECLINE_LINE = '也好，把面具收回丝绒盒吧。等你想跳的那一夜，灯会再亮起。';
+
+function buildConsentChatCard(choice, session) {
+  var c = (session && session.cardSnapshot) || {};
+  if (choice === 'accept') {
+    return '【假面时刻 · 应邀】🎭\n' + CONSENT_ACCEPT_LINE + '\n' +
+      '今夜的身份是「' + sanitizeText(c.name || '假面舞伴', 60) + '」，舞台在假面舞会里。\n' +
+      '这是一场共同约定的角色扮演游戏，不是真实关系变化；我们平时依旧是原本的真实关系。';
+  }
+  return '【假面时刻 · 婉拒】🎭\n' + CONSENT_DECLINE_LINE + '\n' +
+    '请柬就此收回，不必回应剧情；我们还是我们。';
+}
+
+function buildConsentHiddenContext(choice) {
+  if (choice === 'accept') {
+    return '【假面时刻 · 应邀说明｜仅本轮有效】用户已在邀请函上点了「同意赴约」，' +
+      '这场共同约定的角色扮演游戏正式开始。请温柔地回一句，表示舞台已经备好；' +
+      '不要在主聊天里开始角色扮演（剧中台词只在插件专属舞台里），不要沿用剧中身份，' +
+      '也不要把这场游戏当成真实关系变化。';
+  }
+  return '【假面时刻 · 婉拒说明｜仅本轮有效】用户在邀请函上点了「婉拒」，请柬已收回，' +
+    '这一场没有开始，也不存在任何剧情。请按原本的真实关系与语气温柔回应，不要沿用剧中身份，不要写记忆。';
+}
+
+/*
+ * 落幕概要卡片的数据（只给插件页面渲染，不进聊天）。
+ * 明确不带 transcript：具体内容只能在插件「演绎档案」里查看。
+ */
+function buildSummaryCard(session, compressed, archiveId) {
+  var c = (session && session.cardSnapshot) || {};
+  return {
+    kind: 'masquerade_summary_card',
+    title: '灯亮了，面具归还',
+    partner: sanitizeText(c.name || '假面舞伴', 60),
+    partnerEmoji: sanitizeText(c.emoji || '🎭', 8),
+    scene: sanitizeText(session.scene || '', 200),
+    userMask: sanitizeText(session.userMask || '', 60),
+    turns: session.turns || 0,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    compressedSummary: compressed.summary,
+    compressedBy: compressed.compressedBy,
+    compressedDegraded: !!compressed.degraded,
+    archiveId: archiveId,
+    isGame: true,
+    notice: '这是一段虚构角色扮演游戏的剧情概要，不是真实发生的事；完整台词只在插件内查看。'
+  };
+}
+
 function transcriptOf(sessionId) {
   var t = storeGet(PREFIX + 'transcript:' + sessionId, []);
   return (t && typeof t.length === 'number') ? t : [];
@@ -732,6 +786,9 @@ function masquerade_status(params) {
       partner: s.cardSnapshot ? s.cardSnapshot.name : '',
       partnerEmoji: s.cardSnapshot ? s.cardSnapshot.emoji : '🎭'
     },
+    /* 送达回执随状态一起返回：刷新页面后也能看清请柬到底进没进聊天。 */
+    delivery: s.delivery || { status: 'unknown', conversationId: '', attempts: 0, error: null },
+    invitation: s.invitation || null,
     recent: recent, error: null
   };
 }
@@ -755,7 +812,12 @@ function masquerade_invite(params) {
     turns: 0,
     startedAt: nowIso(),
     endedAt: null,
-    contextNote: null
+    contextNote: null,
+    /*
+     * 送达回执由页面在 sendChatMessage 真实返回后写回（masquerade_invite_delivery）。
+     * 初始 pending：页面刷新时不会把「没送达」伪装成「已送到聊天里」。
+     */
+    delivery: { status: 'pending', conversationId: '', attempts: 0, error: null }
   };
   storeSet(PREFIX + 'session', session);
   storeSet(PREFIX + 'transcript:' + session.id, []);
@@ -764,10 +826,29 @@ function masquerade_invite(params) {
     '你将以「' + card.name + '」的身份赴约；我戴上「' + session.userMask + '」这副面具。\n' +
     '说好了：这只是我们约好一起演的一场戏，天亮时面具归还，我们还是我们。\n\n' +
     '愿意陪我跳这一支吗？';
+  session.invitation = invitation;
+  storeSet(PREFIX + 'session', session);
   return {
     success: true, sessionId: session.id, status: next,
     partner: { name: card.name, emoji: card.emoji, opening: card.opening },
     invitation: invitation,
+    /* 页面用这份数据渲染可点开的邀请函卡片（插件内），与聊天里的请柬同源。 */
+    inviteCard: {
+      kind: 'masquerade_invite_card',
+      sessionId: session.id,
+      eyebrow: 'Une invitation',
+      title: '谨邀你共赴一场假面舞会',
+      partner: card.name,
+      partnerEmoji: card.emoji || '🎭',
+      scene: session.scene,
+      userMask: session.userMask,
+      invitation: invitation,
+      acceptLabel: '同意赴约',
+      declineLabel: '婉拒',
+      acceptLine: CONSENT_ACCEPT_LINE,
+      declineLine: CONSENT_DECLINE_LINE,
+      isGame: true
+    },
     /* 页面把下面三样送进主聊天，助手才真的在对话框里被邀请并回应。 */
     chatInviteCard: buildInviteCard(session),
     chatHiddenContext: buildInviteNote(session),
@@ -777,6 +858,40 @@ function masquerade_invite(params) {
     rules: '剧中身份与承诺都不是真实关系；随时可以摘下面具。',
     error: null
   };
+}
+
+/*
+ * 送达回执：页面在 Bridge.sendChatMessage 真实成功后才调用。
+ * 只有 status=delivered 才允许把 UI 切到「已送达」，杜绝乐观假成功。
+ */
+function masquerade_invite_delivery(params) {
+  var p = asObject(params);
+  var s = getSession();
+  if (!s || s.status !== 'invited') return fail('BAD_STATE', '当前没有等待送达的请柬。');
+  var ok = p.delivered === true;
+  s.delivery = {
+    status: ok ? 'delivered' : 'failed',
+    conversationId: sanitizeText(p.conversation_id, 80),
+    attempts: Number(p.attempts) > 0 ? Math.min(Number(p.attempts), 9) : 1,
+    error: ok ? null : sanitizeText(p.error, 160),
+    at: nowIso()
+  };
+  storeSet(PREFIX + 'session', s);
+  return { success: true, status: s.status, delivery: s.delivery, error: null };
+}
+
+/* 送达彻底失败：把状态退回 idle，用户可以直接重试，不会卡在「已邀」的假状态。 */
+function masquerade_invite_cancel(params) {
+  var s = getSession();
+  if (!s || s.status !== 'invited') return fail('BAD_STATE', '当前没有可撤销的请柬。');
+  var d = s.delivery || {};
+  storeSet(PREFIX + 'session', {
+    id: s.id, status: 'idle', endedAt: nowIso(), turns: 0,
+    delivery: { status: 'failed', conversationId: d.conversationId || '', attempts: d.attempts || 0,
+      error: d.error || sanitizeText(asObject(params).error, 160), at: nowIso() }
+  });
+  storeDel(PREFIX + 'transcript:' + s.id);
+  return { success: true, status: 'idle', cancelled: true, memoryWritten: false, error: null };
 }
 
 function masquerade_accept(params) {
@@ -809,6 +924,13 @@ function masquerade_accept(params) {
     },
     chatCardText: buildChatCard('open', s, s.assistantReply),
     chatHiddenContext: buildStageOpeningNote(s),
+    /*
+     * 用户在邀请函上点「同意赴约」后，这条确认必须作为可见消息送进聊天：
+     * answer=true 会让助手真的收到并回应，而不是只在插件里自嗨。
+     */
+    chatConfirmCard: buildConsentChatCard('accept', s),
+    chatConfirmHiddenContext: buildConsentHiddenContext('accept'),
+    consentLine: CONSENT_ACCEPT_LINE,
     assistantInstruction: ACCEPT_ASSISTANT_INSTRUCTION,
     error: null
   };
@@ -880,6 +1002,10 @@ function masquerade_end(params) {
     storeSet(PREFIX + 'session', { id: s.id, status: 'idle', endedAt: nowIso(), turns: 0 });
     return {
       success: true, status: 'idle', cancelled: true, isGame: true,
+      /* 婉拒也要在聊天里留一句，助手才知道请柬被收回、这一场没有开始。 */
+      chatDeclineCard: buildConsentChatCard('decline', s),
+      chatDeclineHiddenContext: buildConsentHiddenContext('decline'),
+      consentLine: CONSENT_DECLINE_LINE,
       chatCardText: null, chatHiddenContext: null, memoryWritten: false, error: null
     };
   }
@@ -913,6 +1039,8 @@ function masquerade_end(params) {
     compressedDegraded: compressed.degraded,
     archiveId: archive.sessionId,
     archiveCount: archiveIndex().length,
+    /* 插件内的概要卡片：只带压缩概要，绝不带逐字台词；具体内容只在档案里看。 */
+    summaryCard: buildSummaryCard(s, compressed, archive.sessionId),
     /* 可见文本：只有压缩概要进入对话历史，完整台词只在演绎档案里 */
     chatCardText: buildClosingChatCard(s, compressed),
     chatHiddenContext: closingNote,
@@ -936,6 +1064,8 @@ exports.get_masquerade_archive = get_masquerade_archive;
 exports.delete_masquerade_archive = delete_masquerade_archive;
 exports.masquerade_status = masquerade_status;
 exports.masquerade_invite = masquerade_invite;
+exports.masquerade_invite_delivery = masquerade_invite_delivery;
+exports.masquerade_invite_cancel = masquerade_invite_cancel;
 exports.masquerade_accept = masquerade_accept;
 exports.roleplay_context = roleplay_context;
 exports.roleplay_turn = roleplay_turn;

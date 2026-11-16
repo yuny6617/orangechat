@@ -117,17 +117,25 @@ test('主聊天邀请：不传 card_id 也能用内置示例卡，并把请柬�
   assert.ok(r.assistantInstruction.includes('应邀'));
 });
 
-test('请柬页把 chatInviteCard 交给 sendChatMessage，前端助手才能在对话框里应邀', () => {
+test('请柬页把 chatInviteCard 交给回执驱动的 sendChatMessage，助手才能在对话框里应邀', () => {
   const ui = read('plugin/ui/app.js');
-  assert.ok(ui.includes('syncToChat(r.chatInviteCard, r.chatHiddenContext)'));
+  assert.ok(ui.includes('syncToChat(r.chatInviteCard, r.chatHiddenContext'));
+  assert.ok(ui.includes("target: 'current'"), '请柬发到用户当前所在会话');
   assert.equal(/\bBridge\.callAI\s*\(/.test(ui), false, '独立的 AI 应邀请求必须已删除');
   assert.ok(!ui.includes('requestConsent('));
+  assert.ok(ui.includes('r.success === true'), '只有宿主明确返回 success=true 才算送达');
+  assert.ok(ui.includes('masquerade_invite_delivery'), '送达结果必须回报状态机');
+  assert.ok(ui.includes('masquerade_invite_cancel'), '送达失败必须能回滚 idle');
+  assert.ok(!ui.includes('请柬已送到聊天里</h2>'), '不能留写死的「已送达」静态标题');
 });
 
-test('会话选择精确命中「最新有对话」的那一条，而不是盲取第一条', () => {
+test('请柬发到当前会话、落幕概要发到最新有对话会话，且严格校验权限回执', () => {
   const ui = read('plugin/ui/app.js');
-  assert.ok(ui.includes('Number(c.messageCount) > 0'), '必须按 messageCount 过滤空会话');
-  assert.ok(ui.includes('withMessages.length ? withMessages[0]'), '优先取有消息的最新会话');
+  assert.ok(ui.includes("target === 'latestActive'"), '按目标区分会话选择');
+  assert.ok(ui.includes('(withMessages[0] || list[0])'), '落幕概要优先最新有对话会话');
+  assert.ok(ui.includes('(list[0] || withMessages[0])'), '请柬优先当前会话（含无消息的新会话）');
+  assert.ok(ui.includes('r.success === false'), '权限被拒 / 列表失败要带出明确原因');
+  assert.ok(ui.includes("target: 'current'") && ui.includes("target: 'latestActive'"));
   assert.ok(ui.includes('Bridge.listConversations()'), '宿主不传 conversationId，只能走列表');
   assert.ok(!ui.includes('location.search'), '不能假设 URL query 里有会话 ID');
 });

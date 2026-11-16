@@ -16,7 +16,8 @@
   var state = {
     status: 'idle', invitation: null, consent: '', stage: null,
     closing: null, cards: [], modelStatus: 'none', setupHint: '',
-    currentArchive: null, editingId: null, deleteArmed: false
+    currentArchive: null, editingId: null, deleteArmed: false,
+    inviteCard: null, lastInviteParams: null, lastArchiveId: null
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -399,24 +400,103 @@
   /* ---------- 主聊天同步（落幕告知的关键通道） ---------- */
 
   /*
-   * 宿主不把 conversationId 传进 WebView，唯一通道是 listConversations()：
-   * 返回 {id,title,messageCount,updatedAt} 且按 updateAt 倒序。
-   * 「最新有对话的上下文」= 优先 messageCount>0 且 updatedAt 最大的一条。
+   * 送达诊断：每次发送都记录目标会话、通道、尝试次数与失败原因。
+   * 页面把它显示出来，真机上「聊天里没收到」时能一眼看出断在哪一环。
    */
-  function resolveConversationId() {
-    if (!Bridge || typeof Bridge.listConversations !== 'function') return Promise.resolve(null);
+  var lastDelivery = { conversationId: '', channel: '', attempts: 0, error: null };
+
+  /*
+   * 根因修复（v1.3.0）：宿主不把 conversationId 传进 WebView，唯一通道是
+   * listConversations()（按 updateAt 倒序返回 {id,title,messageCount,updatedAt}）。
+   * 旧版先过滤 messageCount>0，把「从加号进入、还没有消息的新会话」排除掉，
+   * 请柬被发到另一个会话，用户在当前聊天里当然看不到。
+   *   target=current      请柬 / 应邀 / 婉拒 → 发到列表第一条（用户最近所在会话）
+   *   target=latestActive 落幕压缩概要     → 发到 messageCount>0 的最新一条
+   * 另严格校验 success===true：权限被拒、列表为空都会带出明确原因，不再静默当成功。
+   */
+  function fromConversationList(target) {
+    if (!Bridge || typeof Bridge.listConversations !== 'function') {
+      return Promise.resolve({ id: null, channel: 'list', error: 'NO_LIST_BRIDGE' });
+    }
     return Promise.resolve()
       .then(function () { return Bridge.listConversations(); })
       .then(parseBridge)
       .then(function (r) {
-        var list = (r && r.conversations) || [];
+        if (!r || r.success === false) {
+          return { id: null, channel: 'list',
+            error: (r && (r.error || r.message)) || 'LIST_FAILED' };
+        }
+        var list = r.conversations || [];
+        if (!list.length) return { id: null, channel: 'list', error: 'NO_CONVERSATION' };
         var withMessages = list.filter(function (c) {
           return c && c.id && Number(c.messageCount) > 0;
         });
-        var chosen = withMessages.length ? withMessages[0] : (list[0] || null);
-        return chosen && chosen.id ? chosen.id : null;
+        var chosen = target === 'latestActive'
+          ? (withMessages[0] || list[0])
+          : (list[0] || withMessages[0]);
+        return chosen && chosen.id
+          ? { id: String(chosen.id), channel: 'list', error: null }
+          : { id: null, channel: 'list', error: 'NO_CONVERSATION' };
       })
-      .catch(function () { return null; });
+      .catch(function (e) {
+        return { id: null, channel: 'list', error: 'LIST_ERROR: ' + String((e && e.message) || e) };
+      });
+  }
+
+  function resolveConversationId(target) {
+    if (!Bridge) return Promise.resolve({ id: null, channel: 'none', error: 'NO_BRIDGE' });
+    /* 宿主若未来暴露当前会话 ID，优先精确命中；不存在时自动降级到列表。 */
+    if (typeof Bridge.getCurrentConversationId === 'function') {
+      return Promise.resolve()
+        .then(function () { return Bridge.getCurrentConversationId(); })
+        .then(parseBridge)
+        .then(function (r) {
+          if (r && r.success === true && r.conversationId) {
+            return { id: String(r.conversationId), channel: 'current', error: null };
+          }
+          return fromConversationList(target);
+        })
+        .catch(function () { return fromConversationList(target); });
+    }
+    return fromConversationList(target);
+  }
+
+  /* 降级重试用的短文本：URL 过长或本轮请求冲突时，更短的消息更容易送达。 */
+  function compactCard(cardText) {
+    var lines = String(cardText || '').split('\n');
+    var out = [];
+    var total = 0;
+    for (var i = 0; i < lines.length && i < 5; i++) {
+      var line = lines[i].substring(0, 80);
+      if (total + line.length > 180) break;
+      out.push(line); total += line.length;
+    }
+    return out.join('\n');
+  }
+
+  function sendOnce(id, cardText, hiddenContext, image) {
+    var args = [id, cardText, hiddenContext];
+    if (image) args.push(image);
+    return Promise.resolve()
+      .then(function () { return Bridge.sendChatMessage.apply(Bridge, args); })
+      .then(parseBridge)
+      .then(function (r) {
+        if (r && r.success === true) return { synced: true, error: null };
+        return { synced: false, error: (r && (r.error || r.message)) || 'SEND_REJECTED' };
+      })
+      .catch(function (e) {
+        return { synced: false, error: 'SEND_ERROR: ' + String((e && e.message) || e) };
+      });
+  }
+
+  function deliveryResult(synced, reason, firstError) {
+    return {
+      synced: synced, reason: synced ? null : reason,
+      conversationId: lastDelivery.conversationId, channel: lastDelivery.channel,
+      attempts: lastDelivery.attempts, error: lastDelivery.error,
+      degraded: synced && lastDelivery.attempts > 1,
+      firstError: firstError || null
+    };
   }
 
   /* 预览页可能把插件装进 iframe：优先直接调用，跨源受限时退回 postMessage。 */
@@ -432,35 +512,163 @@
     } catch (e) { /* 无父窗口时静默 */ }
   }
 
-  function syncToChat(cardText, hiddenContext) {
-    if (!cardText || !hiddenContext) return Promise.resolve({ synced: false, reason: 'NO_CARD' });
+  /*
+   * 回执驱动的送达：只有 Bridge.sendChatMessage 明确返回 success===true 才算送达。
+   * 失败自动降级重试一次（去掉 hiddenContext 与图片），仍失败则把原因回显给页面。
+   */
+  function syncToChat(cardText, hiddenContext, opts) {
+    var o = opts || {};
+    var target = o.target || 'current';
+    var note = hiddenContext || '';
+    lastDelivery = { conversationId: '', channel: '', attempts: 0, error: null };
+    if (!cardText) return Promise.resolve(deliveryResult(false, 'NO_CARD'));
     if (studio) {
       studioEmit('card', cardText);
-      if (hiddenContext.indexOf('落幕') >= 0) {
+      if (note.indexOf('落幕') >= 0) {
         studioEmit('ai', '我知道啦——刚才那是一场角色扮演游戏。面具摘下，我们还是我们。');
-      } else if (hiddenContext.indexOf('请柬') >= 0) {
+      } else if (note.indexOf('婉拒') >= 0) {
+        studioEmit('ai', '好，面具我先收起来。等你想跳的那一夜，灯会再亮起。');
+      } else if (note.indexOf('应邀') >= 0) {
+        studioEmit('ai', '舞台备好了。这一支，我等你。');
+      } else if (note.indexOf('请柬') >= 0) {
         studioEmit('ai', '我愿意。面具借我，这一支与你跳——不过说好了，天亮要还给我。');
       }
-      return Promise.resolve({ synced: true, studio: true });
+      lastDelivery.channel = 'studio';
+      return Promise.resolve({ synced: true, studio: true, conversationId: '', channel: 'studio',
+        attempts: 1, error: null, degraded: false });
     }
-    return resolveConversationId().then(function (id) {
-      if (!id || typeof Bridge.sendChatMessage !== 'function') {
-        return { synced: false, reason: 'NO_CONVERSATION' };
+    return resolveConversationId(target).then(function (res) {
+      lastDelivery.conversationId = res.id || '';
+      lastDelivery.channel = res.channel;
+      if (!res.id) {
+        lastDelivery.error = res.error;
+        return deliveryResult(false, 'NO_CONVERSATION');
       }
-      return Promise.resolve()
-        .then(function () { return Bridge.sendChatMessage(id, cardText, hiddenContext); })
-        .then(parseBridge)
-        .then(function (r) { return { synced: !(r && r.success === false) }; })
-        .catch(function () { return { synced: false, reason: 'BRIDGE_ERROR' }; });
+      if (typeof Bridge.sendChatMessage !== 'function') {
+        lastDelivery.error = 'NO_SEND_BRIDGE';
+        return deliveryResult(false, 'NO_SEND_BRIDGE');
+      }
+      return sendOnce(res.id, cardText, note, o.image || null).then(function (first) {
+        lastDelivery.attempts = 1;
+        if (first.synced) { lastDelivery.error = null; return deliveryResult(true, null); }
+        return sendOnce(res.id, compactCard(cardText), '', null).then(function (second) {
+          lastDelivery.attempts = 2;
+          lastDelivery.error = second.synced ? null :
+            (String(first.error) + ' | ' + String(second.error)).substring(0, 200);
+          return deliveryResult(second.synced, second.synced ? null : 'SEND_FAILED', first.error);
+        });
+      });
     });
+  }
+
+  function deliveryLine(s) {
+    if (s.synced) {
+      return '✓ 请柬已真实送达聊天' + (s.channel === 'studio' ? '（预览流）' : '') +
+        (s.conversationId ? ' · 会话 ' + s.conversationId.substring(0, 8) + '…' : '') +
+        (s.degraded ? ' · 降级重试后送达' : '');
+    }
+    return '✗ 未送达：' + (s.reason || '') + (s.error ? '（' + s.error + '）' : '');
   }
 
   /* ---------- 舞会流程 ---------- */
 
   /*
-   * 关键：请柬由 Bridge.sendChatMessage 发进主聊天（answer=true 会触发一次助手回复），
-   * 助手就在用户看得见的对话框里应邀。旧版用一次独立的 AI 请求生成应邀台词，
-   * 主聊天助手全程没参与，这是「对话框里邀请不到助手」的根因。
+   * 聊天里的请柬卡片图：纯本地 Canvas 绘制，无外链、无网络请求。
+   * 宿主 sendChatMessage 的 image 参数会把它存成 UIMessagePart.Image，
+   * 于是对话里显示的是一张邀请函卡片而不是一段纯文字；绘制失败自动降级纯文本。
+   */
+  function buildInviteImage(card) {
+    try {
+      var cv = document.createElement('canvas');
+      cv.width = 480; cv.height = 660;
+      var g = cv.getContext('2d');
+      if (!g || typeof cv.toDataURL !== 'function') return null;
+      var bg = g.createLinearGradient(0, 0, 480, 660);
+      bg.addColorStop(0, '#fffaf6'); bg.addColorStop(0.52, '#ffeef3'); bg.addColorStop(1, '#f2d6e1');
+      g.fillStyle = bg; g.fillRect(0, 0, 480, 660);
+      g.strokeStyle = '#c9a24a'; g.lineWidth = 3; g.strokeRect(22, 22, 436, 616);
+      g.strokeStyle = 'rgba(201,162,74,.5)'; g.lineWidth = 1; g.strokeRect(32, 32, 416, 596);
+      var corners = [[32, 32, 1, 1], [448, 32, -1, 1], [32, 628, 1, -1], [448, 628, -1, -1]];
+      for (var k = 0; k < corners.length; k++) {
+        var p = corners[k];
+        g.beginPath(); g.strokeStyle = '#c9a24a'; g.lineWidth = 2;
+        g.moveTo(p[0] + 26 * p[2], p[1]); g.lineTo(p[0], p[1]); g.lineTo(p[0], p[1] + 26 * p[3]);
+        g.stroke();
+      }
+      g.textAlign = 'center';
+      g.fillStyle = '#b08a4a'; g.font = 'italic 16px serif';
+      g.fillText('Une invitation', 240, 96);
+      g.fillStyle = '#7d2f4f'; g.font = 'bold 38px serif';
+      g.fillText('假 面 舞 会', 240, 158);
+      g.fillStyle = '#c9a24a'; g.font = '20px serif';
+      g.fillText('❦', 240, 196);
+      g.fillStyle = '#8a3b5b'; g.font = '17px serif';
+      g.fillText('谨邀你共赴一场只属于我们的戏', 240, 244);
+      g.fillStyle = '#5c2740'; g.font = '15px serif';
+      wrapCanvasText(g, '舞台：' + (card.scene || ''), 240, 292, 380, 24);
+      wrapCanvasText(g, '你将以「' + (card.partner || '假面舞伴') + '」的身份赴约', 240, 340, 380, 24);
+      wrapCanvasText(g, '我戴上「' + (card.userMask || '') + '」这副面具', 240, 388, 380, 24);
+      g.fillStyle = '#a45f7a'; g.font = 'italic 14px serif';
+      g.fillText('说好了，天亮时面具归还，我们还是我们', 240, 470);
+      g.fillStyle = '#b08a4a'; g.font = '15px serif';
+      g.fillText('✦  愿 意 陪 我 跳 这 一 支 吗  ✦', 240, 528);
+      g.beginPath(); g.fillStyle = '#9e3557'; g.arc(240, 578, 24, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#fff3e6'; g.font = '22px serif'; g.fillText('🎭', 240, 586);
+      return cv.toDataURL('image/png');
+    } catch (e) { return null; }
+  }
+
+  function wrapCanvasText(g, value, x, y, maxWidth, lineHeight) {
+    var s = String(value || '');
+    var line = '';
+    var rows = 0;
+    for (var i = 0; i < s.length && rows < 2; i++) {
+      var test = line + s.charAt(i);
+      if (g.measureText(test).width > maxWidth && line) {
+        g.fillText(line, x, y + rows * lineHeight);
+        line = s.charAt(i); rows++;
+      } else line = test;
+    }
+    if (line && rows < 2) g.fillText(line, x, y + rows * lineHeight);
+  }
+
+  /* 邀请函卡片（插件页内）：可点开的全屏弹窗，与聊天里的请柬同源。 */
+  function renderInviteCard(card) {
+    if (!card) return;
+    state.inviteCard = card;
+    text($('#invite-card-eyebrow'), card.eyebrow || 'Une invitation');
+    text($('#invite-card-title'), card.title || '谨邀你共赴一场假面舞会');
+    text($('#invite-card-partner'), card.partnerEmoji + ' ' + card.partner);
+    text($('#invite-card-scene'), card.scene || '');
+    text($('#invite-card-mask'), card.userMask || '');
+    text($('#invite-card-copy'), card.invitation || '');
+    text($('#modal-accept-line'), card.acceptLine || '');
+    text($('#modal-decline-line'), card.declineLine || '');
+    text($('#btn-modal-accept'), card.acceptLabel || '同意赴约');
+    text($('#btn-modal-decline'), card.declineLabel || '婉拒');
+  }
+
+  function openInviteModal() {
+    var m = $('#invite-modal');
+    if (!m) return;
+    m.hidden = false;
+    document.body.classList.add('modal-open');
+  }
+  function closeInviteModal() {
+    var m = $('#invite-modal');
+    if (m) m.hidden = true;
+    document.body.classList.remove('modal-open');
+  }
+
+  function setDeliveryText(el, s) {
+    if (!el) return;
+    text(el, deliveryLine(s));
+    el.className = 'delivery-state ' + (s.synced ? 'ok' : 'bad');
+  }
+
+  /*
+   * 回执驱动的递请柬：先真实送达，再切界面。
+   * 送达失败：回报状态机 + 回滚 idle + 显示原因与「重试送达」，不再出现假成功标题。
    */
   function doInvite() {
     var cardId = $('#invite-card').value;
@@ -475,17 +683,103 @@
       if (!r.success) { setBusy(false); toast(failure(r)); return; }
       state.invitation = r;
       state.consent = '';
-      text($('#invitation-text'), r.chatInviteCard || r.invitation);
+      state.lastInviteParams = {
+        card_id: cardId,
+        scene: $('#invite-scene').value,
+        user_mask: $('#invite-mask').value,
+        source: 'page'
+      };
       text($('#assistant-consent'), '正在把请柬送进当前聊天……');
-      showPane('invited');
-      return syncToChat(r.chatInviteCard, r.chatHiddenContext).then(function (s) {
+      $('#assistant-consent').className = 'hint';
+      var image = buildInviteImage(r.inviteCard || {});
+      return syncToChat(r.chatInviteCard, r.chatHiddenContext,
+        { target: 'current', image: image }).then(function (s) {
+          return callTool('masquerade_invite_delivery', {
+            delivered: !!s.synced,
+            conversation_id: s.conversationId || '',
+            attempts: s.attempts || 0,
+            error: s.error || s.reason || ''
+          }).then(function () {
+            setBusy(false);
+            if (s.synced) {
+              renderInviteCard(r.inviteCard);
+              showPane('invited');
+              text($('#invited-heading'), '请柬已送到聊天里');
+              text($('#assistant-consent'),
+                '助手会在对话框里看到这张请柬并回应你。点开下面的邀请函，选择「同意赴约」或「婉拒」。');
+              setDeliveryText($('#invite-delivery'), s);
+              $('#btn-retry-delivery').hidden = true;
+              $('#btn-retry-invited').hidden = true;
+            } else {
+              return callTool('masquerade_invite_cancel', { error: s.error || s.reason || '' })
+                .then(function () {
+                  showPane('idle');
+                  setDeliveryText($('#delivery-error'), s);
+                  $('#btn-retry-delivery').hidden = false;
+                  toast('请柬没能送进聊天：' + (s.reason || '发送失败') + '。已回到待邀状态，可点「重试送达」。');
+                });
+            }
+          });
+        });
+    }).catch(function (e) { setBusy(false); toast(String(e)); });
+  }
+
+  /* 重试：先把可能残留的 invited 状态撤销，再完整走一遍「建请柬 → 送达 → 回执」。 */
+  function retryDelivery() {
+    if (!state.lastInviteParams) { toast('请先重新递出请柬'); return; }
+    var p = state.lastInviteParams;
+    setBusy(true);
+    return callTool('masquerade_invite_cancel', { error: '重试送达前的清理' }).then(function () {
+      setBusy(false);
+      $('#invite-card').value = p.card_id;
+      $('#invite-scene').value = p.scene;
+      $('#invite-mask').value = p.user_mask;
+      return doInvite();
+    }).catch(function (e) { setBusy(false); toast(String(e)); });
+  }
+
+  /*
+   * 同意 / 婉拒：两者都有一句符合插件文风的提示语，且都把选择作为可见消息
+   * 送进聊天（宿主 answer=true 会触发一次助手回复，助手因此确实收到确认）。
+   */
+  function consentTo(choice) {
+    closeInviteModal();
+    setBusy(true);
+    if (choice === 'decline') {
+      return callTool('masquerade_end', { reason: '婉拒了这张请柬' }).then(function (r) {
+        if (!r.success) { setBusy(false); toast(failure(r)); return; }
+        return syncToChat(r.chatDeclineCard, r.chatDeclineHiddenContext, { target: 'current' })
+          .then(function (s) {
+            setBusy(false);
+            showPane('idle');
+            state.invitation = null;
+            toast(r.consentLine || '也好，把面具收回丝绒盒吧。');
+            setDeliveryText($('#delivery-error'), s);
+            if (!s.synced) $('#btn-retry-delivery').hidden = true;
+          });
+      }).catch(function (e) { setBusy(false); toast(String(e)); });
+    }
+    return callTool('masquerade_accept', { assistant_reply: state.consent || '' }).then(function (r) {
+      if (!r.success) { setBusy(false); toast(failure(r)); return; }
+      state.stage = r.stage;
+      var combined = r.chatConfirmCard + '\n\n' + r.chatCardText;
+      var hidden = r.chatConfirmHiddenContext + '\n' + r.chatHiddenContext;
+      return syncToChat(combined, hidden, { target: 'current' }).then(function (s) {
         setBusy(false);
-        if (s.synced) {
-          text($('#assistant-consent'), s.studio
-            ? '✓ 演示模式：请柬已放进右侧聊天流，助手在那里回应你。'
-            : '✓ 请柬已发进当前聊天，助手正在对话框里回应。看到它应邀后再点「启幕」。');
+        renderStage(r.stage || {});
+        showPane('active');
+        toast(r.consentLine || '丝带已系好，面具已戴上。');
+        if (r.modelWarning) {
+          appendBubble('system', r.modelWarning);
+          toast('模型未配置：不会生成剧中台词');
+        } else if (r.modelStatus === 'demo') {
+          appendBubble('system', '浏览器预览：台词为本地演示剧本，不是真实模型回复。');
+        }
+        if (!s.synced) {
+          appendBubble('system', '应邀确认未送进聊天：' + (s.error || s.reason || '') +
+            '。可直接回到聊天里告诉助手「我同意赴约」。');
         } else {
-          text($('#assistant-consent'), '未同步到当前聊天；也可以直接在聊天里对助手说「我们玩一场假面舞会吧」，它会调用插件工具应邀。');
+          appendBubble('system', '✓ 应邀确认已送进聊天，助手会在对话框里收到。');
         }
       });
     }).catch(function (e) { setBusy(false); toast(String(e)); });
@@ -517,31 +811,8 @@
     text($('#turn-counter'), '第 0 轮 · 随时可以摘下面具');
   }
 
-  function doAccept() {
-    setBusy(true);
-    callTool('masquerade_accept', { assistant_reply: state.consent || '' }).then(function (r) {
-      setBusy(false);
-      if (!r.success) { toast(failure(r)); return; }
-      state.stage = r.stage;
-      renderStage(r.stage || {});
-      showPane('active');
-      if (r.modelWarning) {
-        appendBubble('system', r.modelWarning);
-        toast('模型未配置：不会生成剧中台词');
-      } else if (r.modelStatus === 'demo') {
-        appendBubble('system', '浏览器预览：台词为本地演示剧本，不是真实模型回复。');
-      }
-      return syncToChat(r.chatCardText, r.chatHiddenContext);
-    }).catch(function (e) { setBusy(false); toast(String(e)); });
-  }
-
-  function doCancelInvite() {
-    callTool('masquerade_end', { reason: '未获应邀，收回请柬' }).then(function (r) {
-      if (!r.success) { toast(failure(r)); return; }
-      toast('请柬已收回');
-      return loadStatus();
-    });
-  }
+  /* 「收回请柬」与弹窗里的「婉拒」走同一条语义：收回 + 文风婉拒提示 + 通知助手。 */
+  function doCancelInvite() { return consentTo('decline'); }
 
   function doSendLine() {
     var input = $('#line-input');
@@ -568,6 +839,18 @@
     }).catch(function (e) { setBusy(false); toast(String(e)); });
   }
 
+  /* 落幕概要卡片：只放压缩概要，完整台词一个字都不带；查看完整演绎的入口只在插件内。 */
+  function renderSummaryCard(card) {
+    if (!card) return;
+    text($('#summary-card-partner'), (card.partnerEmoji || '🎭') + ' ' + (card.partner || '假面舞伴'));
+    text($('#summary-card-scene'), card.scene || '');
+    text($('#summary-card-meta'), '共 ' + (card.turns || 0) + ' 轮 · ' +
+      (card.compressedBy === 'model' ? '插件内置模型压缩' : '本地摘录（模型未配置/不可用）'));
+    text($('#summary-card-text'), card.compressedSummary || '');
+    text($('#summary-card-notice'), card.notice || '');
+    state.lastArchiveId = card.archiveId || null;
+  }
+
   function doEnd() {
     setBusy(true);
     callTool('masquerade_end', { reason: '舞会散场' }).then(function (r) {
@@ -579,19 +862,21 @@
       text($('#compressed-summary'), r.compressedSummary || '');
       text($('#compressed-by'), r.compressedBy === 'model' ? '插件内置模型压缩' : '本地摘录（模型未配置/不可用）');
       text($('#closing-note-preview'), r.closingNote || '');
+      renderSummaryCard(r.summaryCard);
       text($('#sync-state'), '正在把压缩概要送进助手最新有对话的聊天……');
       $('#sync-state').className = 'sync-state';
       showPane('ended');
-      return syncToChat(r.chatCardText, r.chatHiddenContext).then(function (s) {
+      /* 落幕概要发到「最新有对话」的会话；剧中台词始终不进上下文。 */
+      return syncToChat(r.chatCardText, r.chatHiddenContext, { target: 'latestActive' }).then(function (s) {
         var el = $('#sync-state');
         if (s.synced) {
           el.className = 'sync-state';
           text(el, s.studio
             ? '✓ 演示模式：含压缩概要的落幕卡已放进右侧聊天流预览'
-            : '✓ 压缩概要已作为可见消息写进助手最新有对话的聊天，后续对话能看见；完整台词只在演绎档案里');
+            : deliveryLine(s) + '：压缩概要已写进上下文，完整台词只在插件「演绎档案」里');
         } else {
           el.className = 'sync-state warn';
-          text(el, '未同步到聊天；落幕说明已写入助手长期记忆，完整记录可在「演绎档案」里回看。');
+          text(el, deliveryLine(s) + '；落幕说明已写入助手长期记忆，完整记录可在「演绎档案」里回看。');
         }
       });
     }).catch(function (e) { setBusy(false); toast(String(e)); });
@@ -603,8 +888,41 @@
       state.status = status;
       showPane(status);
       if (status === 'invited') {
-        if (!state.invitation) text($('#invitation-text'), '请柬已发进聊天，正在等助手应邀。');
-        if (!state.consent) text($('#assistant-consent'), '助手会在当前聊天里回应；看到它应邀后点「启幕」。');
+        /* 刷新页面后按真实回执恢复，不再显示写死的「已送到聊天里」。 */
+        var d = r.delivery || { status: 'unknown' };
+        if (state.invitation && state.invitation.inviteCard) {
+          renderInviteCard(state.invitation.inviteCard);
+        } else if (r.invitation) {
+          renderInviteCard({
+            eyebrow: 'Une invitation', title: '谨邀你共赴一场假面舞会',
+            partner: r.session ? r.session.partner : '假面舞伴', partnerEmoji: '🎭',
+            scene: r.session ? r.session.scene : '', userMask: r.session ? r.session.userMask : '',
+            invitation: r.invitation, acceptLabel: '同意赴约', declineLabel: '婉拒',
+            acceptLine: '丝带已系好，面具已戴上。今夜第三支曲子，我赴约。',
+            declineLine: '也好，把面具收回丝绒盒吧。等你想跳的那一夜，灯会再亮起。'
+          });
+        }
+        if (d.status === 'delivered') {
+          text($('#invited-heading'), '请柬已送到聊天里');
+          setDeliveryText($('#invite-delivery'), {
+            synced: true, conversationId: d.conversationId || '', channel: 'list',
+            attempts: d.attempts || 1, degraded: false
+          });
+          $('#btn-retry-delivery').hidden = true;
+          $('#btn-retry-invited').hidden = true;
+        } else if (d.status === 'failed') {
+          text($('#invited-heading'), '请柬尚未送达');
+          setDeliveryText($('#invite-delivery'), { synced: false, reason: 'SEND_FAILED', error: d.error });
+          $('#btn-retry-delivery').hidden = false;
+          $('#btn-retry-invited').hidden = false;
+        } else {
+          text($('#invited-heading'), '请柬等待送达确认');
+          text($('#invite-delivery'), '上次打开时未记录送达结果，可点「重试送达」再发一次。');
+          $('#invite-delivery').className = 'delivery-state bad';
+          $('#btn-retry-delivery').hidden = false;
+          $('#btn-retry-invited').hidden = false;
+        }
+        text($('#assistant-consent'), '助手会在对话框里看到这张请柬。点开下面的邀请函，选择「同意赴约」或「婉拒」。');
       }
       if (status === 'active') {
         renderStage({
@@ -642,7 +960,27 @@
     b.addEventListener('click', function () { switchTab(b.dataset.view); });
   });
   $('#btn-invite').addEventListener('click', doInvite);
-  $('#btn-accept').addEventListener('click', doAccept);
+  $('#btn-accept').addEventListener('click', openInviteModal);
+  $('#invite-card-preview').addEventListener('click', openInviteModal);
+  $('#btn-modal-accept').addEventListener('click', function () { consentTo('accept'); });
+  $('#btn-modal-decline').addEventListener('click', function () { consentTo('decline'); });
+  $('#btn-modal-close').addEventListener('click', closeInviteModal);
+  $('#invite-modal').addEventListener('click', function (e) {
+    if (e.target === $('#invite-modal')) closeInviteModal();
+  });
+  $('#btn-retry-delivery').addEventListener('click', retryDelivery);
+  $('#btn-retry-invited').addEventListener('click', retryDelivery);
+  $('#invite-card-preview').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openInviteModal(); }
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !$('#invite-modal').hidden) closeInviteModal();
+  });
+  $('#btn-summary-archive').addEventListener('click', function () {
+    switchTab('archive');
+    var id = state.lastArchiveId || (state.closing && state.closing.archiveId);
+    if (id) openArchive(id);
+  });
   $('#btn-cancel-invite').addEventListener('click', doCancelInvite);
   $('#btn-send-line').addEventListener('click', doSendLine);
   $('#line-input').addEventListener('keydown', function (e) {
@@ -651,13 +989,15 @@
   $('#btn-end').addEventListener('click', doEnd);
   $('#btn-again').addEventListener('click', function () {
     state.invitation = null; state.consent = ''; state.closing = null;
+    state.inviteCard = null; state.lastArchiveId = null;
     showPane('idle');
   });
   $('#btn-new-card').addEventListener('click', function () { openEditor(null); });
   $('#btn-save-card').addEventListener('click', saveCard);
   $('#btn-view-archive').addEventListener('click', function () {
     switchTab('archive');
-    if (state.closing && state.closing.archiveId) openArchive(state.closing.archiveId);
+    var id = state.lastArchiveId || (state.closing && state.closing.archiveId);
+    if (id) openArchive(id);
   });
   $('#btn-archive-export').addEventListener('click', exportArchive);
   $('#btn-archive-delete').addEventListener('click', deleteArchive);

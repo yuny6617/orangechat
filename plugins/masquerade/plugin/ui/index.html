@@ -36,7 +36,7 @@
           <div>
             <p class="eyebrow">The Invitation</p>
             <h2 class="section-title">递出一张假面请柬</h2>
-            <p class="hint">选好今夜的身份，写一句开场的情境。<strong>请柬会直接发进当前聊天</strong>，助手就在对话框里回应你；应邀之后舞台才会亮灯。</p>
+            <p class="hint">选好今夜的身份，写一句开场的情境。<strong>邀请函卡片会真实送进当前聊天</strong>（可点开查看），你在邀请函上选「同意赴约」或「婉拒」，助手会在对话框里收到确认。</p>
             <div class="form-grid">
               <div class="field span-2">
                 <label for="invite-card">今夜的角色 <span class="sub">· 可在「角色卡」里新建</span></label>
@@ -56,27 +56,49 @@
               <span class="seal">🎭</span>
               <span>说好了：这是一场共同约定的角色扮演游戏。剧中的身份、告白与承诺都不作数，摘下面具后我们依旧是原本的真实关系。</span>
             </div>
+            <div id="delivery-error" class="delivery-state bad" hidden></div>
             <div class="btn-row">
               <button id="btn-invite" class="btn btn-primary" type="button">递出假面请柬 ✦</button>
+              <button id="btn-retry-delivery" class="btn btn-gold" type="button" hidden>重试送达 ↻</button>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- 已邀：请柬已在主聊天里，等助手在对话框里回应 -->
+      <!-- 已邀：聊天里已有一张请柬卡片；这里是可点开的同款邀请函 -->
       <div id="pane-invited" class="panel" hidden>
         <span class="panel-corner tl"></span><span class="panel-corner br"></span>
-        <p class="eyebrow">In the conversation</p>
-        <h2 class="section-title">请柬已送到聊天里</h2>
-        <p class="hint">下面这张请柬已经发进当前对话，<strong>助手会在对话框里亲自回应你</strong>。看到它应邀后，再点「启幕」。</p>
-        <p id="invitation-text" class="invite-copy"></p>
-        <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> IN CHAT <img src="assets/ornament-cc0.svg" alt="" /></div>
+        <p class="eyebrow">Une invitation</p>
+        <h2 id="invited-heading" class="section-title">正在确认送达……</h2>
+        <p class="hint">聊天里已经出现一张邀请函卡片（可见文字 + 卡片图）。<strong>点开下面这封邀请函</strong>，选择「同意赴约」或「婉拒」；你的选择会作为可见消息送进对话，助手会收到确认。</p>
+        <div id="invite-delivery" class="delivery-state">正在确认送达……</div>
+
+        <div id="invite-card-preview" class="invitation-card" role="button" tabindex="0" aria-label="打开邀请函">
+          <div class="invitation-inner">
+            <span class="invitation-corner tl"></span><span class="invitation-corner tr"></span>
+            <span class="invitation-corner bl"></span><span class="invitation-corner br"></span>
+            <p class="invitation-ribbon">✦ A MASQUERADE MOMENT ✦</p>
+            <p id="invite-card-eyebrow" class="invitation-eyebrow">Une invitation</p>
+            <h3 id="invite-card-title" class="invitation-title">谨邀你共赴一场假面舞会</h3>
+            <img class="invitation-mask" src="assets/mask.svg" alt="金色假面" />
+            <p id="invite-card-partner" class="invitation-partner">🎭 假面舞伴</p>
+            <dl class="invitation-meta">
+              <div><dt>舞台</dt><dd id="invite-card-scene"></dd></div>
+              <div><dt>我戴的面具</dt><dd id="invite-card-mask"></dd></div>
+            </dl>
+            <p id="invite-card-copy" class="invitation-copy"></p>
+            <div class="invitation-seal">🎭</div>
+            <p class="invitation-open">✦ 轻触打开邀请函 ✦</p>
+          </div>
+        </div>
+
         <div class="game-note">
           <span class="seal">🕯️</span>
-          <span id="assistant-consent">正在把请柬同步到聊天……</span>
+          <span id="assistant-consent">助手会在对话框里看到这张请柬……</span>
         </div>
         <div class="btn-row">
-          <button id="btn-accept" class="btn btn-gold" type="button">助手已应邀 · 启幕 ✦</button>
+          <button id="btn-accept" class="btn btn-gold" type="button">打开邀请函 ✦</button>
+          <button id="btn-retry-invited" class="btn btn-quiet" type="button" hidden>重试送达 ↻</button>
           <button id="btn-cancel-invite" class="btn btn-quiet" type="button">收回请柬</button>
         </div>
       </div>
@@ -119,10 +141,26 @@
           <p>刚才那支舞，是我们一起演的一场戏。</p>
           <p id="closing-summary" class="hint"></p>
           <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> COMPRESSED <img src="assets/ornament-cc0.svg" alt="" /></div>
+
+          <!-- 落幕概要卡片：与 UI 同风格，只放压缩概要，具体内容仅在插件内查看 -->
+          <div id="summary-card" class="summary-card">
+            <span class="invitation-corner tl"></span><span class="invitation-corner tr"></span>
+            <span class="invitation-corner bl"></span><span class="invitation-corner br"></span>
+            <p class="summary-eyebrow">The curtain falls · 本场剧情概要</p>
+            <h3>灯亮了，面具归还</h3>
+            <p id="summary-card-partner" class="summary-partner">🎭 假面舞伴</p>
+            <p id="summary-card-scene" class="summary-scene"></p>
+            <p id="summary-card-meta" class="summary-meta"></p>
+            <div class="summary-rule">❦</div>
+            <p id="summary-card-text" class="summary-text"></p>
+            <p id="summary-card-notice" class="summary-notice"></p>
+            <button id="btn-summary-archive" class="btn btn-ghost" type="button">在插件内查看完整演绎 ✦</button>
+          </div>
+
           <div class="compressed-box">
-            <p class="compressed-label">本场剧情概要 · <span id="compressed-by">—</span></p>
+            <p class="compressed-label">进入聊天的只有这一段 · <span id="compressed-by">—</span></p>
             <p id="compressed-summary" class="compressed-text"></p>
-            <p class="compressed-note">只有这段概要会作为可见消息进入助手最新有对话的聊天；完整台词保存在「演绎档案」里，不会进入对话。</p>
+            <p class="compressed-note">只有这段概要会作为可见消息进入助手最新有对话的聊天；<strong>剧中具体内容不进入上下文</strong>，完整台词只在插件「演绎档案」里查看。</p>
           </div>
           <div id="sync-state" class="sync-state">正在同步落幕说明给助手……</div>
           <div class="game-note" style="text-align:left">
@@ -272,6 +310,27 @@
       </div>
     </section>
   </main>
+</div>
+
+<!-- 邀请函弹窗：点击卡片打开，含「同意赴约 / 婉拒」两个按钮 -->
+<div id="invite-modal" class="modal" hidden role="dialog" aria-modal="true" aria-label="假面舞会邀请函">
+  <div class="modal-sheet" role="document">
+    <button id="btn-modal-close" class="modal-close" type="button" aria-label="关闭邀请函">×</button>
+    <p class="modal-eyebrow">Une invitation · A Masquerade Moment</p>
+    <h2 class="modal-title">谨邀你共赴一场假面舞会</h2>
+    <img class="modal-mask" src="assets/mask.svg" alt="金色假面" />
+    <p class="modal-copy">今夜的假面舞会，我留了一个位子。<br />丝带系好，灯也调暗了半盏。<br />戴上面具，我们演一场只属于彼此的戏；天亮时面具归还，我们还是我们。</p>
+    <div class="divider"><img src="assets/ornament-cc0.svg" alt="" /> YOUR CHOICE <img src="assets/ornament-cc0.svg" alt="" /></div>
+    <div class="modal-actions">
+      <button id="btn-modal-accept" class="btn btn-gold" type="button">同意赴约 ✦</button>
+      <button id="btn-modal-decline" class="btn btn-quiet" type="button">婉拒</button>
+    </div>
+    <p class="modal-lines">
+      <span class="modal-line-accept">✦ <span id="modal-accept-line"></span></span><br />
+      <span class="modal-line-decline">✦ <span id="modal-decline-line"></span></span>
+    </p>
+    <p class="modal-foot">你的选择会作为可见消息送进聊天，助手会真的收到确认。这是一场虚构的角色扮演游戏，不是真实关系变化。</p>
+  </div>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>

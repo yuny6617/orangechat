@@ -57,7 +57,7 @@ rm host-patch/FilesPicker.kt.before
 
 ## 完整接入顺序
 
-1. 构建插件包：`npm run build` → `dist/orangechat-masquerade-1.2.0.zip`
+1. 构建插件包：`npm run build` → `dist/orangechat-masquerade-1.3.0.zip`
 2. 橘瓣里：设置 → 插件管理 → 导入 ZIP → 确认 `conversation_sync` 权限与网络白名单 → 安装并启用
 3. 应用本补丁并编译橘瓣
 4. 回聊天页点加号，四个按钮旁边会出现「🎭 假面舞会」
